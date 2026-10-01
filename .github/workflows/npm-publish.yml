@@ -86,3 +86,20 @@ jobs:
             # pnpm is still used for install/build/test above.
             npm publish --provenance --access public
           fi
+
+      - name: Diagnose Trusted Publishing
+        if: failure()
+        run: |
+          echo "npm version: $(npm --version)"
+          echo "ACTIONS_ID_TOKEN_REQUEST_URL set: ${ACTIONS_ID_TOKEN_REQUEST_URL:+yes}${ACTIONS_ID_TOKEN_REQUEST_URL:-no}"
+          echo "ACTIONS_ID_TOKEN_REQUEST_TOKEN set: ${ACTIONS_ID_TOKEN_REQUEST_TOKEN:+yes}${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-no}"
+          echo "NODE_AUTH_TOKEN set: ${NODE_AUTH_TOKEN:+yes}${NODE_AUTH_TOKEN:-no}"
+          echo "NPM_TOKEN set: ${NPM_TOKEN:+yes}${NPM_TOKEN:-no}"
+          echo "npmrc: ${NPM_CONFIG_USERCONFIG:-unset}"
+          if [ -n "${NPM_CONFIG_USERCONFIG:-}" ]; then
+            sed -e 's/\(_authToken=\).*/\1***REDACTED***/' "$NPM_CONFIG_USERCONFIG" || true
+          fi
+          echo "--- raw OIDC probe ---"
+          curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=npm%3Aregistry.npmjs.org" | head -c 400 || true
+          echo

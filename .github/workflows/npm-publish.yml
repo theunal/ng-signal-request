@@ -21,7 +21,18 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          registry-url: 'https://registry.npmjs.org'
+
+      # `setup-node`'s `registry-url` is deliberately omitted: it writes an
+      # `_authToken=${NODE_AUTH_TOKEN}` line into the runner `.npmrc`. With no
+      # `NPM_TOKEN` secret that placeholder expands to an empty string, which
+      # npm CLI reads as "auth is configured" and then skips the OIDC exchange,
+      # publishing anonymously and failing with a misleading 404.
+      #
+      # npm 11.5.1 is the first version that implements the token-exchange
+      # endpoint `/-/npm/v1/oidc/token/exchange` behind Trusted Publishing.
+      # Node 22 ships an older npm, so upgrade explicitly.
+      - name: Upgrade npm for Trusted Publishing
+        run: npm install -g npm@latest
 
       - name: Enable pnpm via corepack
         run: corepack enable pnpm
@@ -68,5 +79,10 @@ jobs:
             echo "ng-signal-request@$VERSION is already on the registry; skipping publish."
           else
             cd dist/signal-request
-            pnpm publish --no-git-checks --provenance --access public
+            # `npm publish`, not `pnpm publish`: since pnpm v11 the publish
+            # command is implemented natively and no longer delegates to npm,
+            # so it never reaches npm's OIDC token-exchange endpoint and the
+            # upload fails with a bare 404 (pnpm/pnpm#9812, #11566).
+            # pnpm is still used for install/build/test above.
+            npm publish --provenance --access public
           fi

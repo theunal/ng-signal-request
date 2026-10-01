@@ -1,0 +1,72 @@
+name: Build, Test & Publish
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+concurrency: ${{ github.workflow }}-${{ github.ref }}
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Enable pnpm via corepack
+        run: corepack enable pnpm
+
+      - name: Derive version from tag
+        id: version
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Set library version
+        run: |
+          node -e "const p=require('./projects/signal-request/package.json'); p.version='${{ steps.version.outputs.VERSION }}'; require('fs').writeFileSync('./projects/signal-request/package.json', JSON.stringify(p, null, 2) + '\n')"
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Build with diagnostics
+        run: |
+          npx ng build signal-request 2>&1 | tee build.log
+          test ${PIPESTATUS[0]} -eq 0 || exit ${PIPESTATUS[0]}
+        env:
+          NODE_OPTIONS: '--max_old_space_size=6144'
+
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log
+          if-no-files-found: ignore
+
+      - name: Run tests
+        run: pnpm run test
+        env:
+          NODE_OPTIONS: '--max_old_space_size=6144'
+
+      - name: Typecheck the demo app
+        run: pnpm exec tsc -p projects/demo/tsconfig.json --noEmit
+        env:
+          NODE_OPTIONS: '--max_old_space_size=6144'
+
+      - name: Publish to npm
+        run: |
+          VERSION='${{ steps.version.outputs.VERSION }}'
+          if curl -fsSL "https://registry.npmjs.org/ng-signal-request/$VERSION" >/dev/null 2>&1; then
+            echo "ng-signal-request@$VERSION is already on the registry; skipping publish."
+          else
+            cd dist/signal-request
+            pnpm publish --no-git-checks --provenance --access public
+          fi

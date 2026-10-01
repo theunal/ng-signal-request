@@ -1,0 +1,18 @@
+/* Demo application.
+   Named `tsconfig.json` (not `tsconfig.app.json`) on purpose: the editor's TypeScript server
+   walks up from a file looking for a file with exactly that name, and with the `.app` suffix it
+   would skip this folder and settle on the root tsconfig, leaving
+   `import ... from 'ng-signal-request'` unresolved.
+
+   `ng-signal-request` resolves to the library SOURCE (mapped in the root tsconfig), so both
+   `ng serve demo` and the editor work without building the package first. */
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "outDir": "../../out-tsc/demo",
+    "types": [],
+    "rootDir": ".."
+  },
+  "files": ["src/main.ts"],
+  "include": ["src/**/*.d.ts"]
+}

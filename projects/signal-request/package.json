@@ -1,0 +1,35 @@
+{
+  "name": "ng-signal-request",
+  "version": "0.0.1",
+  "description": "Signal-based, type-safe request utilities for Angular",
+  "keywords": [
+    "angular",
+    "http",
+    "signals",
+    "resource",
+    "http-resource",
+    "rxjs",
+    "typescript"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/theunal/ng-signal-request.git"
+  },
+  "bugs": {
+    "url": "https://github.com/theunal/ng-signal-request/issues"
+  },
+  "homepage": "https://github.com/theunal/ng-signal-request#readme",
+  "sideEffects": false,
+  "peerDependencies": {
+    "@angular/common": ">=22.0.0 <23.0.0",
+    "@angular/core": ">=22.0.0 <23.0.0"
+  },
+  "dependencies": {
+    "tslib": "^2.3.0"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  }
+}

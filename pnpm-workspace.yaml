@@ -1,0 +1,13 @@
+allowBuilds:
+  '@parcel/watcher': true
+  esbuild: true
+  lmdb: true
+  msgpackr-extract: true
+lockfile: true
+minimumReleaseAgeExclude:
+  - '@angular/*'
+  - '@angular-devkit/*'
+  - '@schematics/angular'
+  - ng-packagr
+  - '@vitest/*'
+  - vitest

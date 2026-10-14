@@ -11,6 +11,7 @@ export type { RequestError, RequestErrorContext } from './lib/errors';
 export type {
   MutationOptions,
   MutationStatus,
+  OptimisticTarget,
   ParamsOption,
   PathParams,
   QueryParams,

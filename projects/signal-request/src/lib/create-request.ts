@@ -20,6 +20,7 @@ import {
   type ResourceParamsContext,
   type Signal,
 } from '@angular/core';
+import { fromEvent, type Subscription } from 'rxjs';
 import { SIGNAL_REQUEST_CONFIG } from './config';
 import { RequestCancelledError, toError, toRequestError } from './errors';
 import type {
@@ -412,6 +413,57 @@ function buildInContext<T, R, TParams>(
   };
   destroyRef.onDestroy(teardown);
 
+  const reloadNow = (): boolean => {
+    if (destroyed) return false;
+    if (untracked(cancelledRequest) !== undefined) {
+      cancelledRequest.set(undefined);
+      return true;
+    }
+    const wasRetrying = untracked(retrying);
+    resetRetry();
+    return resource.reload() || wasRetrying;
+  };
+
+  /* --------------------------- focus / reconnect refetch --------------------------- */
+
+  /**
+   * `focus` on its own is not enough: mobile browsers never fire it when a tab is brought back,
+   * so `visibilitychange` carries the signal there. A tab switch fires both back to back, hence
+   * the one-tick dedupe — without it a single switch would refetch twice. `visibilitychange` is
+   * also the only reliable way to know the document became visible again, which is what stops a
+   * backgrounded tab from refetching.
+   *
+   * An `idle` request is skipped on purpose: a source that returned `undefined` is *disabled*, and
+   * a background refetch would fire a request the user never asked for.
+   */
+  if (isBrowser && (options.refetchOnWindowFocus || options.refetchOnReconnect)) {
+    let queued = false;
+    const refetch = (): void => {
+      if (queued) return;
+      queued = true;
+      queueMicrotask(() => {
+        queued = false;
+        if (!destroyed && untracked(resource.status) !== 'idle') reloadNow();
+      });
+    };
+    const whenVisible = (): void => {
+      if (document.visibilityState !== 'hidden') refetch();
+    };
+
+    const subs: Subscription[] = [];
+    if (options.refetchOnWindowFocus) {
+      subs.push(fromEvent(document, 'visibilitychange').subscribe(whenVisible));
+      subs.push(fromEvent(window, 'focus').subscribe(whenVisible));
+    }
+    if (options.refetchOnReconnect) {
+      subs.push(fromEvent(window, 'online').subscribe(refetch));
+    }
+    destroyRef.onDestroy(() => {
+      for (const sub of subs) sub.unsubscribe();
+      subs.length = 0;
+    });
+  }
+
   /* --------------------------------- public API -------------------------------- */
 
   const enqueue = (): Promise<T> => {
@@ -481,16 +533,7 @@ function buildInContext<T, R, TParams>(
         (e): RunResult<T> => ({ ok: false, error: toError(e) }),
       ),
 
-    reload: (): boolean => {
-      if (destroyed) return false;
-      if (untracked(cancelledRequest) !== undefined) {
-        cancelledRequest.set(undefined);
-        return true;
-      }
-      const wasRetrying = untracked(retrying);
-      resetRetry();
-      return resource.reload() || wasRetrying;
-    },
+    reload: reloadNow,
 
     cancel: (): void => {
       if (destroyed) return;

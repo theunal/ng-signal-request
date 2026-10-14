@@ -171,6 +171,24 @@ interface RequestOptionsBase<T, TParams, TRaw> {
   pollInterval?: number | (() => number | false | null | undefined);
   /** Keep polling while the tab is hidden. Default `false`. */
   pollWhenHidden?: boolean;
+  /**
+   * Re-fetch when the document becomes visible again — a tab switch, or returning from the
+   * background. Default `false`. Browser only, and SSR no-ops like `pollInterval` / `debounce`.
+   *
+   * Listens to `visibilitychange` *and* `focus`, deduped within a tick: mobile browsers do not
+   * fire `focus` on a tab switch, desktop ones fire both.
+   *
+   * A **disabled** request (a source returning `undefined`) is never refetched by this.
+   */
+  refetchOnWindowFocus?: boolean;
+  /**
+   * Re-fetch when the browser reports it is back online (`navigator.onLine` flipping to `true`).
+   * Default `false`. Browser only.
+   *
+   * Note that the browser fires `online` when a network interface appears, not when a request is
+   * actually routable, so the failure this is meant to recover from can still happen afterwards.
+   */
+  refetchOnReconnect?: boolean;
   onSuccess?: (response: T) => void;
   onError?: (error: Error) => void;
   /** Runs after `onSuccess` / `onError`. */
@@ -201,6 +219,14 @@ export interface ParamsOption<TParams> {
  * - `createRequest<User>('/me')` — no `TParams`, so the source is always evaluated.
  * - `createRequest<Item[], ListQuery>((p) => …, { params: { … } })` — `TParams` given, so the
  *   request is driven by the params signal and `params.set()` re-fires it.
+ *
+ * > There is deliberately no `select` option here, even though TanStack Query has one. Making the
+ * > selector's **return** type inferrable requires a type parameter with no default, which in
+ * > turn means callers cannot pass `createRequest<T>(…)` without also naming the selection type
+ * > — and giving that parameter a default makes TypeScript prefer the default over the selector,
+ * > so the natural `select: (data) => data.map(…)` stops compiling. A plain `computed` over
+ * > `response()` does the same job, memoizes identically, and infers its type perfectly. See
+ * > "Transforming the response" in the README.
  */
 export type RequestOptions<T, TParams = void, TRaw = unknown> =
   RequestOptionsBase<T, TParams, TRaw> & ([TParams] extends [void] ? unknown : ParamsOption<TParams>);
@@ -290,6 +316,17 @@ export interface Reloadable {
   reload(): boolean;
 }
 
+/**
+ * Somewhere an optimistic value can be written: the mutation's own `response`, or the
+ * displayed value of a `createRequest`.
+ *
+ * Structural on purpose — a `SignalRequest<T>` satisfies it without importing anything.
+ */
+export interface OptimisticTarget<T> {
+  readonly response: Signal<T | undefined>;
+  set(value: T): void;
+}
+
 export interface MutationOptions<T, TArgs = void> {
   /**
    * What happens when `run()` is called while another call is in flight.
@@ -308,6 +345,39 @@ export interface MutationOptions<T, TArgs = void> {
   timeout?: number;
   /** Requests to `reload()` after a successful call. A function avoids field-ordering problems. */
   invalidates?: ReadonlyArray<Reloadable> | (() => ReadonlyArray<Reloadable>);
+  /**
+   * Value to show **immediately**, before the server answers.
+   *
+   * ```ts
+   * const add = createMutation<Todo[], Todo>(
+   *   (draft) => ({ url: '/todos', body: draft }),
+   *   {
+   *     optimistic: (todos, draft) => [...(todos ?? []), draft],
+   *     target: list,            // where the value goes; defaults to this mutation
+   *     invalidates: () => [list],
+   *   },
+   * );
+   * ```
+   *
+   * The previous value is snapshotted and restored automatically when the call **fails** or is
+   * cancelled — you never write the undo yourself. On success the server's value replaces it, and
+   * `invalidates` pulls the real list as usual.
+   *
+   * With `concurrency: 'parallel'` the restore is a compare-and-swap: it only happens while this
+   * call's own value is still the one on screen, so a sibling call that succeeded in the meantime
+   * is never overwritten with a stale snapshot.
+   *
+   * `target` is optional, and only meaningful together with `optimistic`.
+   */
+  optimistic?: (current: T | undefined, args: TArgs) => T;
+  /**
+   * Where `optimistic` writes. Defaults to the mutation's own `response()`.
+   *
+   * Pass a `createRequest` to make the whole list show the new item immediately and snap back on
+   * failure — the common case. The request is left at `local` status; its own loaders take over
+   * again on the next source change.
+   */
+  target?: OptimisticTarget<T>;
   onSuccess?: (response: T, args: TArgs) => void;
   onError?: (error: Error, args: TArgs) => void;
   onSettled?: (args: TArgs) => void;

@@ -1,5 +1,5 @@
 import { HttpErrorResponse, HttpEventType } from '@angular/common/http';
-import { inject, Injector } from '@angular/core';
+import { ErrorHandler, inject, Injector } from '@angular/core';
 import { TestBed } from '@angular/core/testing';
 import {
   createMutation,
@@ -397,6 +397,176 @@ describe('createMutation', () => {
     http.expectOne('/items').flush(['a', 'c']);
     await settle();
     expect(list.response()).toEqual(['a', 'c']);
+  });
+
+  it('optimistic: writes into the target query immediately, then lets invalidates pull the real list', async () => {
+    const { http, create } = setup();
+    const { list, add } = create(() => {
+      const list = createRequest<string[]>('/todos', { initialValue: [] });
+      const add = createMutation<string[], string>(
+        (title) => ({ url: '/todos', body: { title } }),
+        {
+          optimistic: (todos, title) => [`${title} (sending…)`, ...(todos ?? [])],
+          target: list,
+          invalidates: () => [list],
+        },
+      );
+      return { list, add };
+    });
+    await settle();
+    http.expectOne('/todos').flush(['existing']);
+    await settle();
+
+    const p = add.run('write');
+    // Visible in the list before the server ever answered. The query is `local`, not `loading` —
+    // nothing is being fetched for it — while the mutation itself still is.
+    expect(list.response()).toEqual(['write (sending…)', 'existing']);
+    expect(list.status()).toBe('local');
+    expect(list.loading()).toBe(false);
+    expect(add.loading()).toBe(true);
+
+    http.expectOne('/todos').flush('write');
+    await p;
+    await settle();
+
+    // The optimistic value is gone; `invalidates` pulled the real list.
+    http.expectOne('/todos').flush(['write', 'existing']);
+    await settle();
+    expect(list.response()).toEqual(['write', 'existing']);
+  });
+
+  it('optimistic: restores the snapshot when the call fails', async () => {
+    const { http, create } = setup();
+    const { list, add } = create(() => {
+      const list = createRequest<string[]>('/todos', { initialValue: [] });
+      const add = createMutation<string[], string>(
+        (title) => ({ url: '/todos', body: { title } }),
+        {
+          optimistic: (todos, title) => [`${title} (sending…)`, ...(todos ?? [])],
+          target: list,
+        },
+      );
+      return { list, add };
+    });
+    await settle();
+    http.expectOne('/todos').flush(['existing']);
+    await settle();
+
+    const p = add.tryRun('write');
+    expect(list.response()).toEqual(['write (sending…)', 'existing']);
+
+    http.expectOne('/todos').flush('nope', { status: 500, statusText: 'Err' });
+    expect((await p).ok).toBe(false);
+
+    // Rolled back to exactly what was there before, with no invalidation in between.
+    expect(list.response()).toEqual(['existing']);
+    expect(add.status()).toBe('error');
+    http.expectNone('/todos');
+  });
+
+  it('optimistic: defaults to the mutation’s own response when no target is given', async () => {
+    const { http, create } = setup();
+    const save = create(() =>
+      createMutation<string, string>((name) => ({ url: '/save', body: { name } }), {
+        optimistic: (current, name) => `${name} (sending…)`,
+      }),
+    );
+
+    const p = save.run('a');
+    expect(save.response()).toBe('a (sending…)');
+
+    http.expectOne('/save').flush('nope', { status: 500, statusText: 'Err' });
+    await settle();
+    // Nothing was there before the call, so the rollback clears it rather than leaving the lie.
+    expect(save.response()).toBeUndefined();
+    await expect(p).rejects.toBeInstanceOf(HttpErrorResponse);
+  });
+
+  it('optimistic: restores the snapshot on cancel()', async () => {
+    const { http, create } = setup();
+    const { list, add } = create(() => {
+      const list = createRequest<string[]>('/todos', { initialValue: ['existing'] });
+      const add = createMutation<string[], string>(
+        (title) => ({ url: '/todos', body: { title } }),
+        { optimistic: (todos, title) => [`${title} (sending…)`, ...(todos ?? [])], target: list },
+      );
+      return { list, add };
+    });
+
+    add.run('cancelled');
+    const req = http.expectOne('/todos');
+    expect(list.response()).toEqual(['cancelled (sending…)', 'existing']);
+
+    add.cancel();
+    expect(req.cancelled).toBe(true);
+    await settle();
+    expect(list.response()).toEqual(['existing']);
+  });
+
+  it('optimistic: destroy() does not bother rolling back a dead handle', async () => {
+    const { http, create } = setup();
+    const save = create(() =>
+      createMutation<string, string>((name) => ({ url: '/save', body: { name } }), {
+        optimistic: () => 'optimistic',
+      }),
+    );
+
+    const p = save.run('a');
+    const req = http.expectOne('/save');
+    expect(save.response()).toBe('optimistic');
+
+    save.destroy();
+    expect(req.cancelled).toBe(true);
+    await expect(p).rejects.toBeInstanceOf(RequestCancelledError);
+    // Deliberately left alone: there is no observer left to correct it.
+    expect(save.response()).toBe('optimistic');
+  });
+
+  it('optimistic: a failing call never overwrites the value a sibling call just wrote', async () => {
+    // `concurrency: 'parallel'` lets two calls be in flight at once. The rollback is a
+    // compare-and-swap, so the failure restores nothing here: by then `response()` holds a value
+    // the *other* call produced, and putting the snapshot back would resurrect stale data.
+    const { http, create } = setup();
+    const save = create(() =>
+      createMutation<string, string>((name) => ({ url: '/save', body: { name } }), {
+        optimistic: (_current, name) => `${name} (sending…)`,
+      }),
+    );
+
+    const a = save.run('a');
+    const b = save.run('b');
+    const [ra, rb] = http.match('/save');
+
+    // `b` lands first and becomes the real value, then `a` fails.
+    rb.flush('b done');
+    await b;
+    ra.flush('nope', { status: 500, statusText: 'Err' });
+    await settle();
+
+    expect(save.response()).toBe('b done');
+    expect(save.status()).toBe('error');
+  });
+
+  it('optimistic: a throwing optimistic is reported but does not take the call down', async () => {
+    const handled: unknown[] = [];
+    const { http, create } = setup([
+      { provide: ErrorHandler, useValue: { handleError: (e: unknown) => handled.push(e) } },
+    ]);
+    const save = create(() =>
+      createMutation<number>(() => '/save', {
+        optimistic: () => {
+          throw new Error('bad optimistic');
+        },
+      }),
+    );
+
+    const p = save.run();
+    http.expectOne('/save').flush(1);
+
+    await expect(p).resolves.toBe(1);
+    expect(save.response()).toBe(1);
+    expect(handled).toHaveLength(1);
+    expect((handled[0] as Error).message).toBe('bad optimistic');
   });
 
   it('concurrency "exhaust" ignores calls while one is in flight (double-click protection)', async () => {

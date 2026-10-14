@@ -1,5 +1,6 @@
 import { HttpErrorResponse, HttpParams } from '@angular/common/http';
-import { effect, Injector, signal, type Signal, type WritableSignal } from '@angular/core';
+import type { HttpTestingController } from '@angular/common/http/testing';
+import { computed, effect, Injector, signal, type Signal, type WritableSignal } from '@angular/core';
 import { TestBed } from '@angular/core/testing';
 import { beforeEach, describe, expect, expectTypeOf, it, vi, afterEach } from 'vitest';
 import { createRequest, provideSignalRequest, RequestCancelledError, type RequestConfig } from '../public-api';
@@ -30,6 +31,125 @@ interface QueryBag {
   flag: boolean;
   when: Date;
 }
+
+/**
+ * jsdom has no real visibility state, and `visibilityState` is a read-only prototype getter.
+ * Shadowing it per test is the only way to exercise the visible / hidden branches.
+ */
+function setVisibility(state: 'visible' | 'hidden'): void {
+  Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => state });
+}
+
+const tabBecameVisible = (): void => {
+  setVisibility('visible');
+  document.dispatchEvent(new Event('visibilitychange'));
+  window.dispatchEvent(new Event('focus'));
+};
+
+describe('createRequest – focus / reconnect refetch', () => {
+  /**
+   * A source never fires synchronously, so every test has to let the graph settle before it can
+   * reach for the request `respond` / `expectNone` are looking for.
+   */
+  const seed = async (http: HttpTestingController): Promise<void> => {
+    await settle();
+    await respond(http, '/items', ['a']);
+  };
+
+  afterEach(() => {
+    // Every listener here lives on the shared jsdom `window` / `document`, so a test that opted
+    // in must not leak its subscriptions into the next one.
+    setVisibility('visible');
+  });
+
+  it('refetches once when the tab becomes visible, even though both events fire', async () => {
+    // `visibilitychange` and `focus` arrive back to back on a real tab switch. Refetching on each
+    // would double every request, which is the whole cost `refetchOnWindowFocus` is meant to avoid.
+    const { http, create } = setup();
+    const list = create(() => createRequest<string[]>('/items', { refetchOnWindowFocus: true }));
+    await seed(http);
+
+    tabBecameVisible();
+    await settle();
+
+    http.expectOne('/items').flush(['a', 'b']);
+    await settle();
+    expect(list.response()).toEqual(['a', 'b']);
+    http.expectNone(() => true);
+  });
+
+  it('does not refetch while the document is still hidden', async () => {
+    const { http, create } = setup();
+    create(() => createRequest<string[]>('/items', { refetchOnWindowFocus: true }));
+    await seed(http);
+
+    setVisibility('hidden');
+    document.dispatchEvent(new Event('visibilitychange'));
+    window.dispatchEvent(new Event('focus'));
+    await settle();
+
+    http.expectNone('/items');
+  });
+
+  it('is off by default', async () => {
+    const { http, create } = setup();
+    create(() => createRequest<string[]>('/items'));
+    await seed(http);
+
+    tabBecameVisible();
+    await settle();
+
+    http.expectNone('/items');
+  });
+
+  it('never refetches a disabled request', async () => {
+    // A source returning `undefined` means "do not send this". Refetching it from a background
+    // event would fire a request the user never asked for, against whatever the source now holds.
+    const { http, create } = setup();
+    const enabled = signal(true);
+    create(() =>
+      createRequest<string[]>(() => (enabled() ? '/items' : undefined), { refetchOnWindowFocus: true }),
+    );
+    await seed(http);
+
+    enabled.set(false);
+    await settle();
+    http.expectNone('/items');
+
+    tabBecameVisible();
+    await settle();
+    http.expectNone('/items');
+  });
+
+  it('refetches when the browser comes back online', async () => {
+    const { http, create } = setup();
+    const list = create(() => createRequest<string[]>('/items', { refetchOnReconnect: true }));
+    await seed(http);
+
+    window.dispatchEvent(new Event('online'));
+    await settle();
+
+    http.expectOne('/items').flush(['a', 'b']);
+    await settle();
+    expect(list.response()).toEqual(['a', 'b']);
+  });
+
+  it('stops listening once the owning injector is destroyed', async () => {
+    // Every other test in this file would have to worry about leaked listeners without this.
+    const { http, create } = setup();
+    create(() =>
+      createRequest<string[]>('/items', { refetchOnWindowFocus: true, refetchOnReconnect: true }),
+    );
+    await seed(http);
+
+    TestBed.resetTestingModule();
+    tabBecameVisible();
+    window.dispatchEvent(new Event('online'));
+    await settle();
+
+    http.expectNone('/items');
+  });
+});
 
 describe('createRequest – basics', () => {
   it('fires automatically and exposes signals', async () => {
@@ -1340,6 +1460,70 @@ describe('createRequest – params typing', () => {
     expectTypeOf(r.params).toEqualTypeOf<WritableSignal<ListQuery | undefined>>();
     expectTypeOf(r.response).toEqualTypeOf<Signal<number | undefined>>();
     expectTypeOf(r.success).toEqualTypeOf<Signal<boolean>>();
+  });
+});
+
+describe('createRequest – transforming the response', () => {
+  // There is no `select` option on purpose: inferring a selector's *return* type needs a type
+  // parameter with no default, which would stop `createRequest<T>(...)` from being callable, and
+  // giving it a default makes TypeScript prefer the default over the selector. A `computed` is the
+  // same memoization with perfect inference, so these tests pin the documented substitute.
+  it('memoizes the transformation and re-runs it only when the response changes', async () => {
+    const { http, create } = setup();
+    const toTotal = vi.fn((all: number[]) => all.reduce((a, b) => a + b, 0));
+    const { users, total } = create(() => {
+      const users = createRequest<number[]>('/n', { initialValue: [] });
+      const total = computed(() => toTotal(users.response()));
+      return { users, total };
+    });
+    await settle();
+
+    expect(total()).toBe(0);
+    toTotal.mockClear();
+
+    http.expectOne('/n').flush([1, 2, 3]);
+    await settle();
+
+    // The selector runs once for the change, then reading it again is free.
+    expect(total()).toBe(6);
+    expect(total()).toBe(6);
+    expect(toTotal).toHaveBeenCalledTimes(1);
+
+    // A *local* set() with a new array is a new value, so the selector runs again.
+    users.set([10]);
+    expect(total()).toBe(10);
+
+    // An identical array is a different reference, so it recomputes but yields the same number —
+    // which is exactly why `equal` exists for the expensive cases.
+    users.set([10]);
+    expect(total()).toBe(10);
+    expect(toTotal).toHaveBeenCalledTimes(3);
+  });
+
+  it('lets `equal` keep a structurally-equal response from waking anything up', async () => {
+    const { http, create } = setup();
+    const seen: number[][] = [];
+    const users = create(() => {
+      const users = createRequest<number[]>('/n', {
+        initialValue: [],
+        equal: (a, b) => a.length === b.length && a.every((v, i) => v === b[i]),
+      });
+      effect(() => seen.push([...users.response()]));
+      return users;
+    });
+    await settle();
+    http.expectOne('/n').flush([1, 2, 3]);
+    await settle();
+
+    // Same three numbers from the server, new array: `equal` says "unchanged", so the effect —
+    // and therefore anything reading `response()` — is not re-run.
+    users.reload();
+    await settle();
+    http.expectOne('/n').flush([1, 2, 3]);
+    await settle();
+
+    expect(users.response()).toEqual([1, 2, 3]);
+    expect(seen.filter((v) => v.length === 3)).toHaveLength(1);
   });
 });
 

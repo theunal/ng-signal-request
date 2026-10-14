@@ -182,8 +182,34 @@ bag it is just an ordinary query value (`?method=PUT`).
 | `timeout` | Abort after N ms. Surfaces as `{ kind: 'timeout', ms }`. Overrides a `timeout` the source sets; a source-level `timeout` alone is classified the same way. See the caveat below |
 | `pollInterval` | ms, or `() => number \| false` (reactive on/off). Browser only |
 | `pollWhenHidden` | Keep polling while the tab is hidden (default `false`) |
+| `refetchOnWindowFocus` | Re-fetch when the tab becomes visible again (default `false`). Browser only |
+| `refetchOnReconnect` | Re-fetch when the browser reports it is back online (default `false`). Browser only |
 | `onSuccess` / `onError` / `onSettled` | Lifecycle hooks (`onError` fires once, after retries are exhausted) |
 | `equal`, `injector`, `debugName` | Same as `httpResource` |
+
+#### Refetching when the user comes back
+
+```ts
+readonly list = createRequest<Item[]>('/items', {
+  refetchOnWindowFocus: true,
+  refetchOnReconnect: true,
+  retry: 2,
+});
+```
+
+`refetchOnWindowFocus` listens to `visibilitychange` **and** `focus`, deduped
+within a tick. Desktop browsers fire both when you alt-tab back; mobile ones fire
+only `visibilitychange`, so listening to `focus` alone would silently do nothing
+on a phone. A document that is still hidden never refetches.
+
+`refetchOnReconnect` listens to the browser's `online` event. Note that the
+browser fires it when a network interface appears, not when a request is
+actually routable, so the failure this is meant to recover from can still
+happen afterwards.
+
+Neither ever refetches a **disabled** request: a source returning `undefined`
+means "do not send this", and a background event must not override that. Both
+are browser-only and no-op during SSR, like `pollInterval` and `debounce`.
 
 ### Params
 
@@ -415,6 +441,7 @@ becomes the query string, exactly as in `createRequest`.
 | Option | Description |
 | --- | --- |
 | `concurrency` | `parallel` (default) · `exhaust` (returns the in-flight promise) · `switch` (cancels the previous call, rejecting it with `RequestCancelledError`) |
+| `optimistic` / `target` | Show the result before the server answers, and **restore it automatically** if the call fails or is cancelled. See below |
 | `responseType` | `json` \| `text` \| `blob` \| `arraybuffer` |
 | `parse` | Validate or map the response body |
 | `headers` | Headers for this call, merged over the global defaults |
@@ -431,6 +458,46 @@ The returned handle exposes `response`, `error`, `requestError`, `loading`,
 missing field), the returned promise rejects with that error and nothing is
 sent; `tryRun()` resolves with `{ ok: false, error }`. A builder returning
 `undefined` / `null` / `false` rejects with `RequestCancelledError`.
+
+### Optimistic update with automatic rollback
+
+`optimistic` writes the value you return into `target` the moment `run()` is
+called — before the request is even sent — and restores the previous value by
+itself when the call **fails or is cancelled**. You never write the undo.
+
+```ts
+readonly add = createMutation<Todo[], Todo>(
+  (draft) => ({ url: '/todos', body: draft }),
+  {
+    optimistic: (todos, draft) => [...(todos ?? []), draft],  // on screen immediately
+    target: this.list,          // any createRequest; defaults to this mutation's own response
+    concurrency: 'exhaust',     // double-click protection
+    invalidates: () => [this.list], // …on success only
+  },
+);
+
+await this.add.run(draft);
+// list() shows `draft` immediately
+// → server 500: list() snaps back on its own
+// → server 200: invalidates refetches and the real list replaces it
+```
+
+Three details worth knowing:
+
+- **`target` is optional.** Without it the optimistic value lands on the
+  mutation's own `response()` — useful for a standalone "saving…" label.
+  With a `createRequest` you get the list case above, which is what you want
+  most of the time.
+- **The restore is a compare-and-swap.** It only happens while this call's own
+  value is still the one on screen. Under `concurrency: 'parallel'` two calls
+  can be in flight, and without that guard a failing call would overwrite the
+  value a sibling call had just written with a stale snapshot.
+- **`destroy()` does not roll back.** A destroyed handle has no observer left
+  to correct. A plain `cancel()` and a `switch` superseding the call both do.
+
+`optimistic` is separate from `createRequest`'s `set()` / `update()`: those are
+how *you* write a local value by hand, `optimistic` is how you attach a write to
+one and get the undo for free.
 
 ### Upload progress
 
@@ -531,9 +598,79 @@ status = createRequest<Job>(() => `/jobs/${this.id()}`, {
   pollInterval: () => (this.running() ? 2000 : false),
 });
 
-// Optimistic update
-this.todos.update((list) => [...list, draft]);   // visible immediately
-await this.add.run(draft);                       // invalidates pulls the real list
+// Optimistic update, with the undo handled for you
+this.add = createMutation<Todo[], Todo>(
+  (draft) => ({ url: '/todos', body: draft }),
+  { optimistic: (todos, d) => [...(todos ?? []), d], target: this.todos, invalidates: () => [this.todos] },
+);
+```
+
+### Infinite scroll
+
+There is no `createInfiniteRequest`, and that is a deliberate omission rather
+than a gap waiting to be filled: a dedicated primitive would have to decide
+`getNextPageParam`'s shape, when a param change resets the pages, and whether
+reloading page 3 replaces it — all of which are specific to your API. The three
+primitives you already have cover the common case:
+
+```ts
+readonly page = signal(1);
+readonly feed = createRequest<Post[], { page: number; perPage: number }>(
+  { url: '/posts' },
+  {
+    params: { page: 1, perPage: 10 },
+    initialValue: [],
+    keepPreviousValue: true,              // old pages stay on screen while the next loads
+    onSuccess: (incoming) => this.append(incoming),
+  },
+);
+
+private appendedPage = 0;
+private append(incoming: Post[]) {
+  if (this.appendedPage === this.page()) return;   // a reload must not duplicate the page
+  this.appendedPage = this.page();
+  this.feed.update((all) => [...all, ...incoming]); // response() *is* the accumulator
+}
+
+loadMore() {
+  this.page.update((p) => p + 1);
+  this.feed.params.set({ page: this.page(), perPage: 10 });
+}
+```
+
+`keepPreviousValue` is load-bearing here, not cosmetic: without it `response()`
+would drop back to `initialValue` the moment the next page starts loading, and
+the whole list would blink out. `update()` writes into the same `response()`,
+so there is no second signal to keep in sync.
+
+The `appendedPage` guard is the honest price. `onSuccess` fires on **every**
+settle, including reloads, so without it `feed.reload()` would append page 3 a
+second time. `useInfiniteQuery` gets this for free from its per-page cache;
+here you get one line and an explanation.
+
+### Transforming the response
+
+There is deliberately **no `select` option**, even though TanStack Query has
+one. Making the selector's *return* type inferrable requires a type parameter
+with no default, which means `createRequest<User[]>(…)` stops being callable
+unless you also name the selection type — and giving that parameter a default
+makes TypeScript prefer the default over the selector, so the natural
+`select: (data) => data.map(…)` stops compiling. A plain `computed` does the
+same job, memoizes identically, and infers perfectly:
+
+```ts
+readonly users = createRequest<User[]>('/users', { initialValue: [] });
+readonly active = computed(() => this.users.response().filter((u) => !u.banned));
+```
+
+`active()` recomputes only when `response()` does, so the template re-renders
+only when the *filtered* result changes. Pair it with `equal` when the
+transformation is expensive and the payload is large:
+
+```ts
+createRequest<Item[]>('/items', {
+  equal: (a, b) => a.length === b.length && a.every((v, i) => v === b[i]),
+});
 ```
 
 ## Testing
@@ -621,6 +758,13 @@ await settle();
   in the source, on `createMutation` via the same flag in the builder.
 - Requests are **not** deduplicated. Two components asking for the same url each
   fire their own request — that is what makes the lifetime rule above possible.
+- There is no shared cache, so no `staleTime` / `gcTime` and no key-based
+  invalidation; `invalidates` needs a reference to the handle. Two components
+  showing the same list mean two requests and two lifetimes, and a mutation only
+  refreshes the handles you named.
+- There is no `select` option and no infinite-query primitive. Both are
+  deliberate — see "Transforming the response" and "Infinite scroll" under
+  Common patterns for what to use instead and why.
 
 ## API
 
@@ -636,7 +780,9 @@ await settle();
 | `provideSignalRequest(config \| () => config)` | Global `baseUrl`, `retry`, `headers`, `onError`, `onSuccess`. The factory form runs in an injection context |
 | `SIGNAL_REQUEST_CONFIG` | The `InjectionToken` behind it |
 | `RequestCancelledError` | Thrown by `run()` on cancel / disable / destroy |
+| `toError(value)` | Normalizes an `unknown` into an `Error` without wrapping an `HttpErrorResponse` |
 | `toRequestError(cause, context?)` | Normalizes an `unknown` into a `RequestError` |
+| `requestErrorOf(error, context)` | Builds a `requestError`-style accessor for your own `error` signal |
 
 ### Types
 
@@ -653,7 +799,8 @@ await settle();
 | `QueryParams` / `QueryValue` / `PathParams` | Parameter helpers |
 | `RetryConfig` / `RetryOptions` | Retry policy |
 | `RequestStatus` / `MutationStatus` / `RunResult<T>` | Status and result types |
-| `Reloadable` / `SignalRequestConfig` | Invalidation and global config shapes |
+| `Reloadable` / `OptimisticTarget<T>` | Invalidation and optimistic-update shapes |
+| `SignalRequestConfig` | Global config shape |
 
 ### `ng-signal-request/testing`
 

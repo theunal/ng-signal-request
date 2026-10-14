@@ -13,22 +13,22 @@
   "private": true,
   "packageManager": "pnpm@12.6.0+sha512.3ef68f951cb111ac204b4a5a16f0b2ddf0da56a96e0413e81d855d9f0b55ef926714709028e1cd00c405c2c5fb7b9e8ec4dc46777c805d0373c2f2ff00fd20ec",
   "dependencies": {
-    "@angular/common": "^22.2.1",
-    "@angular/compiler": "^22.2.1",
-    "@angular/core": "^22.2.1",
-    "@angular/platform-browser": "^22.2.1",
+    "@angular/common": "^22.2.2",
+    "@angular/compiler": "^22.2.2",
+    "@angular/core": "^22.2.2",
+    "@angular/platform-browser": "^22.2.2",
     "rxjs": "~7.8.0",
     "tslib": "^2.3.0"
   },
   "devDependencies": {
-    "@angular/build": "^22.2.1",
-    "@angular/cli": "^22.2.1",
-    "@angular/compiler-cli": "^22.2.1",
-    "@types/node": "^26.6.3",
-    "@vitest/coverage-v8": "5.0.3",
-    "jsdom": "^30.1.1",
+    "@angular/build": "^22.2.2",
+    "@angular/cli": "^22.2.2",
+    "@angular/compiler-cli": "^22.2.2",
+    "@types/node": "^26.6.5",
+    "@vitest/coverage-v8": "5.0.4",
+    "jsdom": "^30.1.2",
     "ng-packagr": "^22.2.4",
     "typescript": "~6.0.0",
-    "vitest": "^5.0.3"
+    "vitest": "^5.0.4"
   }
 }

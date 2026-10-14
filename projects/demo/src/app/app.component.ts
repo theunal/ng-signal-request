@@ -1,15 +1,16 @@
 import { ChangeDetectionStrategy, Component, signal } from '@angular/core';
 
 import { FormSection } from './sections/form-section';
+import { InfiniteSection } from './sections/infinite-section';
 import { ListSection } from './sections/list-section';
 import { RetrySection } from './sections/retry-section';
 
-type Tab = 'list' | 'form' | 'retry';
+type Tab = 'list' | 'form' | 'retry' | 'infinite';
 
 @Component({
   selector: 'demo-root',
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [ListSection, FormSection, RetrySection],
+  imports: [ListSection, FormSection, RetrySection, InfiniteSection],
   template: `
     <header>
       <h1>ng-signal-request</h1>
@@ -49,6 +50,9 @@ type Tab = 'list' | 'form' | 'retry';
         @case ('retry') {
           <demo-retry />
         }
+        @case ('infinite') {
+          <demo-infinite />
+        }
       }
     </main>
   `,
@@ -58,6 +62,7 @@ export class AppComponent {
     { id: 'list', label: 'Liste & params' },
     { id: 'form', label: 'Form & mutation' },
     { id: 'retry', label: 'Retry, debounce, polling' },
+    { id: 'infinite', label: 'Sonsuz liste & optimistic' },
   ];
 
   protected readonly tab = signal<Tab>('list');

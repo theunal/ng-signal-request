@@ -36,6 +36,7 @@ warning banner in the app states two of its limits outright:
 | --- | --- |
 | `/api/flaky` | `503` on the first two hits, success on the third → `retry` is observable |
 | `/api/slow` | 3s delay → `cancel()` has something real to abort |
+| `/api/reject` | always `500` after a 0.9s delay → the optimistic **rollback** is observable |
 
 Every other request goes to the real API.
 
@@ -73,6 +74,17 @@ Every other request goes to the real API.
 - `cancel()` really aborting a 3-second request
 - `createRequest.text()` — the body read as text
 - The `equal`, `debugName` and `injector` options pass straight through
+
+**4 · Infinite list & optimistic** — `createRequest` + `createMutation`
+
+- Infinite scroll without a dedicated primitive: `params` carries the page,
+  `keepPreviousValue` holds the loaded pages on screen, `update()` accumulates,
+  and an `appendedPage` guard keeps a reload from duplicating a page
+- `optimistic` + `target` writing into that same query — the new row is visible
+  before the request goes out
+- The rollback, twice over: **Ekle** succeeds (and the demo API drops the write,
+  so `invalidates` shows you the server's truth), **Hata ile ekle** hits
+  `/api/reject` and the row disappears on its own
 
 ## Not covered
 

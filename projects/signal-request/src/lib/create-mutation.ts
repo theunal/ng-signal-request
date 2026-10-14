@@ -19,7 +19,14 @@ import {
 import { retry, throwError, timer, type Observable, type Subscription } from 'rxjs';
 import { SIGNAL_REQUEST_CONFIG } from './config';
 import { RequestCancelledError, toError, toRequestError, type RequestError } from './errors';
-import type { MutationOptions, MutationStatus, RequestValue, RunResult, SignalMutation } from './types';
+import type {
+  MutationOptions,
+  MutationStatus,
+  OptimisticTarget,
+  RequestValue,
+  RunResult,
+  SignalMutation,
+} from './types';
 import { nextRetryDelay, noop, normalizeRetry, resolveRequest, withGlobalHeaders } from './utils';
 
 interface Call {
@@ -150,6 +157,43 @@ function buildMutation<T, TArgs>(
     for (const target of list ?? []) target.reload();
   };
 
+  /** The mutation's own `response`, shaped like an `OptimisticTarget` so it needs no special case. */
+  const selfTarget: OptimisticTarget<T> = {
+    response: response.asReadonly(),
+    set: (value: T) => response.set(value),
+  };
+
+  /**
+   * Writes the optimistic value for one call and returns the undo.
+   *
+   * The undo is a compare-and-swap: it restores the snapshot only when this call's own value is
+   * still what the target holds. Without that guard `concurrency: 'parallel'` would let a failing
+   * call wipe the value a sibling call had just written — the rollback would then *introduce* a
+   * stale value instead of removing a fake one. Under `exhaust` / `switch` only one call is ever in
+   * flight, so the guard always passes and the behaviour is a plain restore.
+   *
+   * A throwing `optimistic` is reported and the call proceeds without one, rather than taking the
+   * whole write down before it was sent.
+   */
+  const applyOptimistic = (callArgs: TArgs): (() => void) => {
+    if (!options.optimistic) return noop;
+    const target = options.target ?? selfTarget;
+    const snapshot = untracked(target.response);
+    let next: T;
+    try {
+      next = options.optimistic(snapshot, callArgs);
+    } catch (e) {
+      safe(() => errorHandler.handleError(e));
+      return noop;
+    }
+    target.set(next);
+    return () => {
+      // `undefined` is restored as-is: there was nothing before, and leaving the invented value
+      // up would be the one case where the rollback silently does nothing visible.
+      if (untracked(target.response) === next) target.set(snapshot as T);
+    };
+  };
+
   const rejected = (reason: Error): Promise<T> => {
     const promise = Promise.reject<T>(reason);
     promise.catch(noop);
@@ -205,10 +249,16 @@ function buildMutation<T, TArgs>(
     const promise = new Promise<T>((resolve, reject) => {
       let settled = false;
       let subscription: Subscription | undefined;
+      /** Undoes this call's optimistic write. See `applyOptimistic`. */
+      let undo: () => void = noop;
 
       const call: Call = {
         cancel: () => {
           if (settled) return;
+          // A destroyed handle has no observer left to correct, and writing to a dead signal is
+          // pure noise; a plain `cancel()` (or a `switch` superseding this call) does roll back,
+          // because leaving an invented value on screen is the worse outcome.
+          if (!destroyed) undo();
           finish();
           subscription?.unsubscribe();
           reject(new RequestCancelledError());
@@ -246,6 +296,9 @@ function buildMutation<T, TArgs>(
       };
       const fail = (err: Error): void => {
         if (settled) return;
+        // The optimistic value never became real, so it must not stay on screen. `undo` is a
+        // compare-and-swap, so a value another call wrote in the meantime survives.
+        undo();
         finish();
         errorTimeout.set(timeout);
         error.set(err);
@@ -278,6 +331,9 @@ function buildMutation<T, TArgs>(
       };
 
       calls.add(call);
+      // Applied last, so the state above (`args`, cleared `error`, cleared `progress`) is what the
+      // template sees together with the optimistic value rather than before it.
+      undo = applyOptimistic(callArgs);
       subscription = stream.subscribe({ next: onEvent, error: (e) => fail(toError(e)) });
       if (settled) subscription.unsubscribe();
     });

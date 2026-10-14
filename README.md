@@ -758,6 +758,13 @@ await settle();
   in the source, on `createMutation` via the same flag in the builder.
 - Requests are **not** deduplicated. Two components asking for the same url each
   fire their own request — that is what makes the lifetime rule above possible.
+- There is no shared cache, so no `staleTime` / `gcTime` and no key-based
+  invalidation; `invalidates` needs a reference to the handle. Two components
+  showing the same list mean two requests and two lifetimes, and a mutation only
+  refreshes the handles you named.
+- There is no `select` option and no infinite-query primitive. Both are
+  deliberate — see "Transforming the response" and "Infinite scroll" under
+  Common patterns for what to use instead and why.
 
 ## API
 

@@ -18,14 +18,17 @@ import {
 } from '@angular/core';
 import { retry, throwError, timer, type Observable, type Subscription } from 'rxjs';
 import { SIGNAL_REQUEST_CONFIG } from './config';
+import { QueryClient } from './cache/query-client';
 import { RequestCancelledError, toError, toRequestError, type RequestErrorView } from './errors';
-import type {
+import type { QueryKey } from './cache/key';
+import {
   MutationOptions,
   MutationStatus,
   OptimisticTarget,
   RequestValue,
   RunResult,
   SignalMutation,
+  type InvalidationTarget,
 } from './types';
 import { nextRetryDelay, noop, normalizeRetry, resolveRequest, withGlobalHeaders } from './utils';
 
@@ -115,6 +118,12 @@ function buildMutation<T, TArgs>(
   const http = inject(HttpClient);
   const config = inject(SIGNAL_REQUEST_CONFIG);
   const errorHandler = inject(ErrorHandler);
+  /**
+   * Only used when `invalidates` is given a key. Injected unconditionally so that a mutation
+   * built without one still behaves identically — `inject()` here resolves from the same
+   * application injector either way, and there is nothing to lazily.
+   */
+  const client = inject(QueryClient);
   const retryPolicy = normalizeRetry(options.retry);
   const concurrency = options.concurrency ?? 'parallel';
 
@@ -152,9 +161,29 @@ function buildMutation<T, TArgs>(
     }
   };
 
+  /**
+ * A query key is an array; a handle is an object with `reload()`.
+ *
+ * A hand-written guard rather than a bare `Array.isArray`: the built-in narrows its *true* branch
+ * to `any[]` and leaves `readonly unknown[]` in the false branch, so `target.reload()` would not
+ * type-check on what is left.
+ */
+const isQueryKey = (target: InvalidationTarget): target is QueryKey => Array.isArray(target);
+
+/**
+   * Applies `invalidates` after a successful call.
+   *
+   * Handles are reloaded directly; keys go through `QueryClient`, which invalidates **every**
+   * cached entry under that key — not just the one this mutation happens to hold a reference
+   * to. That is the whole reason a key is worth accepting here: the list showing the new row is
+   * usually a different component from the one holding the mutation.
+   */
   const reloadInvalidated = (): void => {
     const list = typeof options.invalidates === 'function' ? options.invalidates() : options.invalidates;
-    for (const target of list ?? []) target.reload();
+    for (const target of list ?? []) {
+      if (isQueryKey(target)) client.invalidate(target);
+      else target.reload();
+    }
   };
 
   /** The mutation's own `response`, shaped like an `OptimisticTarget` so it needs no special case. */

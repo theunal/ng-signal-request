@@ -7,6 +7,9 @@ import { noop, nextRetryDelay, type NormalizedRetry } from '../utils';
 import type { NormalizedKey } from './key';
 import type { StructuralSharingFn } from './structural-sharing';
 
+/** How a fetch ended, as reported to {@link CacheEntry.addSettleListener}. */
+export type SettleOutcome<T> = { readonly ok: true; readonly value: T } | { readonly ok: false; readonly error: Error };
+
 /** One fetch's worth of configuration, supplied by the handle that starts it. */
 export interface FetchPlan<T> {
   readonly request: HttpResourceRequest;
@@ -92,6 +95,28 @@ export class CacheEntry<T = unknown> {
   private destroyed = false;
 
   /**
+   * The last plan a subscriber registered.
+   *
+   * This is what makes cache-driven refetch possible: `QueryClient.invalidate()` acts on a
+   * **key**, at a moment when no handle is asking for anything, so the entry needs to be able
+   * to rebuild the request on its own. The handle re-registers on every evaluation of its
+   * params, so the stored request is never staler than the newest subscriber's.
+   *
+   * Two handles with one key must therefore agree on the request — which is the same rule the
+   * `key` option documents.
+   */
+  private plan: FetchPlan<T> | undefined;
+
+  /**
+   * Notified once per settled fetch, to every handle watching this entry.
+   *
+   * A listener list rather than a per-call `.then()` so that joining an in-flight fetch does not
+   * produce two sets of lifecycle hooks for one network call, and so a cache-driven refetch —
+   * which no handle asked for — still runs the hooks the user registered.
+   */
+  private readonly settleListeners = new Set<(outcome: SettleOutcome<T>) => void>();
+
+  /**
    * Called once, when the entry tears itself down, so the cache can drop it.
    *
    * A callback rather than a back-reference to the cache: an entry holding the
@@ -135,15 +160,15 @@ export class CacheEntry<T = unknown> {
   /* --------------------------------------------------------------------- */
 
   /**
-   * Registers an observer and returns the unsubscribe.
-   *
-   * `gcTime` is passed in rather than fixed at construction because it is only
-   * read on the way *down* to zero observers — the moment when there is no handle
-   * left to ask for it.
-   *
-   * Calling the returned function twice is a no-op, so a handle can hand it to a
-   * `DestroyRef` without tracking whether it already ran.
-   */
+ * Registers an observer and returns the unsubscribe.
+ *
+ * `gcTime` is passed in rather than fixed at construction because it is only
+ * read on the way *down* to zero observers — the moment when there is no handle
+ * left to ask for it.
+ *
+ * Calling the returned function twice is a no-op, so a handle can hand it to a
+ * `DestroyRef` without tracking whether it already ran.
+ */
   subscribe(gcTime: number): () => void {
     if (this.destroyed) return noop;
     this.observers += 1;
@@ -160,6 +185,41 @@ export class CacheEntry<T = unknown> {
     };
   }
 
+  /** Notified once per settled fetch. Returns the unsubscribe. */
+  addSettleListener(listener: (outcome: SettleOutcome<T>) => void): () => void {
+    this.settleListeners.add(listener);
+    return () => {
+      this.settleListeners.delete(listener);
+    };
+  }
+
+  /**
+   * Stores the plan a subscriber would use, so a cache-driven refetch can rebuild the request.
+   *
+   * Cleared when the last observer leaves: an entry nobody is watching has no live request
+   * description, and holding one would keep the body and headers of the last call alive.
+   */
+  registerPlan(plan: FetchPlan<T>): void {
+    this.plan = plan;
+  }
+
+  /**
+   * Fetches again using the stored plan.
+   *
+   * Returns `undefined` when there is nothing to fetch with — no subscriber has registered a
+   * plan, so no handle is in a position to say what this request should be. Skipping is the
+   * honest answer; guessing would send something the user never described.
+   */
+  refetch(): Promise<T | undefined> | undefined {
+    if (this.destroyed || this.plan === undefined) return undefined;
+    return this.fetch(this.plan);
+  }
+
+  /** The stored plan, or `undefined`. Devtools and tests. */
+  get hasPlan(): boolean {
+    return this.plan !== undefined;
+  }
+
   /** Observer count. Surfaced by the devtools panel and asserted by the leak tests. */
   get observerCount(): number {
     return this.observers;
@@ -173,6 +233,11 @@ export class CacheEntry<T = unknown> {
   private release(): void {
     this.observers = Math.max(0, this.observers - 1);
     if (this.observers > 0) return;
+
+    // Nobody is watching, so nothing is in a position to describe a later refetch,
+    // and nobody is left to tell that a fetch settled.
+    this.plan = undefined;
+    this.settleListeners.clear();
 
     // The last observer left. The entry keeps whatever it already delivered, but
     // the request it is waiting on has nobody to deliver to — so it is cancelled.
@@ -195,10 +260,23 @@ export class CacheEntry<T = unknown> {
   destroy(): void {
     if (this.destroyed) return;
     this.destroyed = true;
+    this.plan = undefined;
+    this.settleListeners.clear();
     this.cancel();
     clearTimeout(this.gcTimer);
     this.gcTimer = undefined;
     this.onDestroy();
+  }
+
+  /**
+   * Tells every watching handle how the fetch ended.
+   *
+   * Copied before iterating, because a listener is allowed to unsubscribe itself — which it
+   * does whenever its injector is destroyed, and that can happen from inside a settle if the
+   * handler tears the component down.
+   */
+  private notifySettle(outcome: SettleOutcome<T>): void {
+    for (const listener of [...this.settleListeners]) listener(outcome);
   }
 
   get isDestroyed(): boolean {
@@ -308,6 +386,7 @@ export class CacheEntry<T = unknown> {
         this.updatedAt.set(now);
         this.invalidated.set(false);
         this.local.set(false);
+        this.notifySettle({ ok: true, value: shared });
         resolve(shared);
       };
 
@@ -317,6 +396,7 @@ export class CacheEntry<T = unknown> {
         this.error.set(err);
         this.errorTimeout.set(request.timeout);
         this.updatedAt.set(Date.now());
+        this.notifySettle({ ok: false, error: err });
         reject(err);
       };
 

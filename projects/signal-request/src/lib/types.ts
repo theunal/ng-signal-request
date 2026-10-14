@@ -5,7 +5,7 @@ import type {
   HttpResourceRequest,
 } from '@angular/common/http';
 import type { RequestErrorView } from './errors';
-import type { QueryKeyFactory } from './cache/key';
+import type { QueryKey, QueryKeyFactory } from './cache/key';
 import type { StructuralSharingFn } from './cache/structural-sharing';
 import type {
   Injector,
@@ -470,6 +470,22 @@ export interface Reloadable {
 }
 
 /**
+ * What `createMutation`'s `invalidates` accepts.
+ *
+ * A **handle** reloads that one request. A **key** invalidates every cached entry under it,
+ * which is what you want when the same data is on screen in several places at once and you do
+ * not want to hold a reference to each of those handles.
+ *
+ * ```ts
+ * invalidates: () => [this.detail, ['users'], ['posts', id]]
+ * ```
+ *
+ * They are told apart at runtime by shape: an array is a key, an object with `reload()` is a
+ * handle. A query key is always an array, so there is no ambiguity.
+ */
+export type InvalidationTarget = Reloadable | QueryKey;
+
+/**
  * Somewhere an optimistic value can be written: the mutation's own `response`, or the
  * displayed value of a `createRequest`.
  *
@@ -496,8 +512,13 @@ export interface MutationOptions<T, TArgs = void> {
   retry?: RetryConfig;
   /** Abort the call after this many ms. Surfaced as `requestError() === { kind: 'timeout' }`. */
   timeout?: number;
-  /** Requests to `reload()` after a successful call. A function avoids field-ordering problems. */
-  invalidates?: ReadonlyArray<Reloadable> | (() => ReadonlyArray<Reloadable>);
+  /**
+   * What to reload after a successful call. A function avoids field-ordering problems.
+   *
+   * Handles are reloaded directly; keys are invalidated, which also refreshes every **other**
+   * cached handle under that key and not just this one.
+   */
+  invalidates?: ReadonlyArray<InvalidationTarget> | (() => ReadonlyArray<InvalidationTarget>);
   /**
    * Value to show **immediately**, before the server answers.
    *

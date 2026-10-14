@@ -18,6 +18,7 @@ export type {
   CacheOptions,
   CachedRequest,
   CachedRequestOptions,
+  InvalidationTarget,
   MutationOptions,
   MutationStatus,
   OptimisticTarget,
@@ -47,7 +48,8 @@ export type {
 /* -------------------------------------------------------------------------- */
 
 export { QueryCache, type CacheChangeListener } from './lib/cache/query-cache';
-export { CacheEntry, type FetchPlan } from './lib/cache/cache-entry';
+export { QueryClient, type Updater } from './lib/cache/query-client';
+export { CacheEntry, type FetchPlan, type SettleOutcome } from './lib/cache/cache-entry';
 export {
   formatKey,
   matchesFilter,

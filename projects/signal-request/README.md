@@ -446,6 +446,95 @@ three loading cycles. Exclude it if that is not what you want:
 retry: { count: 2, when: (e) => (e as HttpErrorResponse).status !== 0 }
 ```
 
+## Cache
+
+By default nothing is shared: every `createRequest` is its own `httpResource`,
+with its own request and its own lifetime. That is still the default, because
+the lifetime rule is a feature — a component that dies takes its request with
+it.
+
+Give a request a `key` and it becomes **cached**. Every handle built with the
+same key shares one entry, one request and one value.
+
+```ts
+readonly users = createRequest<User[]>(
+  () => ({ url: '/users', params: { page: this.page() } }),
+  { key: () => ['users', { page: this.page() }], staleTime: 30_000, initialValue: [] },
+);
+```
+
+Two components with that key now cost **one** request, and both see the same
+value. Object segments compare by value, so `{ page: 1 }` from two places is one
+entry.
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `key` | — | **The opt-in.** Must be sufficient to determine the request |
+| `staleTime` | `0` | How long a value counts as fresh. `0` = always stale |
+| `gcTime` | `5 min` | How long an entry with no subscribers is kept |
+| `refetchOnMount` | `'stale'` | `'stale'` · `'always'` · `false` |
+| `structuralSharing` | walk-and-reuse | What to store when nothing changed |
+
+A key is always a **function**, so it is read inside the handle's reactive
+chain: a filter signal in the key re-points the handle at another entry. A
+function *inside* a key throws — it would make a new function every evaluation,
+so the entry would never be reused and the cache would grow without ever
+hitting.
+
+A cached handle has **no `.resource`**. There is no `httpResource` behind it —
+that is exactly why the request can be shared — so `.resource` is a type error
+rather than a silent `undefined`, and `ctx.chain()` gets an explanatory error
+instead of chaining against nothing.
+
+### Invalidating by key
+
+`QueryClient` is the imperative half. Inject it anywhere.
+
+```ts
+private readonly client = inject(QueryClient);
+
+this.client.invalidate(['users']);             // refetches ['users', …] on screen
+this.client.invalidate((s) => s === 'todos');  // a predicate over each segment
+this.client.getData<User[]>(['users', 1]);      // read without a handle
+this.client.setData(['users', 1], (list) => …); // write without a handle
+this.client.isFetching();                       // global or per filter
+```
+
+`['users']` is a **prefix**, not an equality test: it reaches `['users', 1]` and
+`['users', { page: 2 }]` alike. That is the whole point of the key being a
+segment array rather than an opaque id.
+
+Several invalidations in the same tick collapse into one refetch per entry, so
+three mutations landing together do not produce three network calls. Entries
+nobody is watching are only *marked* — the next subscriber fetches.
+
+### `createMutation` invalidating keys
+
+`invalidates` now takes keys alongside handles, which removes the "I have to
+hold a reference to every component showing this list" problem:
+
+```ts
+readonly save = createMutation<User, Partial<User>>(
+  (user) => ({ url: '/users', body: user }),
+  { invalidates: () => [this.detail, ['users']] }, // a handle, or a key
+);
+```
+
+Handles are reloaded; keys are invalidated, so **every** cached handle under
+that key refreshes, not just the one this mutation happens to reference.
+
+### What is different from a cached `httpResource`
+
+- **Structural sharing keeps the previous reference when nothing changed**, so
+  the data signal is never written and no consumer is notified. Existing
+  `equal` composes as a short-circuit.
+- **The last subscriber leaving cancels the in-flight request**, even with data
+  cached. Cached data is untouched; the next subscriber refetches.
+- **`cancel()` is wider than usual**: one key means one request, so cancelling
+  it affects every subscriber of that key.
+- **`gcTime`'s timer is browser-only.** On the server it would only hold
+  stability.
+
 ## `createMutation(builder, options?)` — and `.post` / `.put` / `.patch` / `.delete`
 
 `httpResource` is for reads: it is eager and cancels the previous request,
@@ -799,10 +888,9 @@ await settle();
   in the source, on `createMutation` via the same flag in the builder.
 - Requests are **not** deduplicated. Two components asking for the same url each
   fire their own request — that is what makes the lifetime rule above possible.
-- There is no shared cache, so no `staleTime` / `gcTime` and no key-based
-  invalidation; `invalidates` needs a reference to the handle. Two components
-  showing the same list mean two requests and two lifetimes, and a mutation only
-  refreshes the handles you named.
+- There is no shared cache by default. Give a request a `key` and it becomes
+  cached — see "Cache" above. Without one, the limits below still apply.
+
 - There is no `select` option and no infinite-query primitive. Both are
   deliberate — see "Transforming the response" and "Infinite scroll" under
   Common patterns for what to use instead and why.
@@ -842,8 +930,21 @@ await settle();
 | `QueryParams` / `QueryValue` / `PathParams` | Parameter helpers |
 | `RetryConfig` / `RetryOptions` | Retry policy |
 | `RequestStatus` / `MutationStatus` / `RunResult<T>` | Status and result types |
-| `Reloadable` / `OptimisticTarget<T>` | Invalidation and optimistic-update shapes |
+| `Reloadable` / `OptimisticTarget<T>` / `InvalidationTarget` | Invalidation, optimistic-update and key shapes |
 | `SignalRequestConfig` | Global config shape |
+
+### Cache
+
+| Export | Description |
+| --- | --- |
+| `QueryClient` | Injectable: `invalidate` · `refetch` · `cancel` · `getData` · `setData` · `remove` · `isFetching` · `count` · `clear` |
+| `QueryCache` | The store: `resolve` · `peek` · `matching` · `markInvalidated` · `remove` · `all` · `subscribeChanges` · `clear` |
+| `CacheEntry` | One cached resource: `data` · `status` signals, `refetch()` · `subscribe()` · `setData()` · `isStale()` |
+| `QueryKey` / `QueryKeyFactory` / `QueryKeyFilter` / `QueryKeyPredicate` | Key shapes and the matching filter |
+| `normalizeKey` · `matchesFilter` · `startsWith` · `formatKey` | Key helpers, exported for devtools and custom stores |
+| `defaultStructuralSharing` · `StructuralSharingFn` | The default sharing walk, and its type |
+| `CachedRequest` / `CachedRequestOptions` / `CacheOptions` | The cached handle and its options |
+| `RefetchOnMount` | `'stale'` · `'always'` · `false` |
 
 ### `ng-signal-request/testing`
 

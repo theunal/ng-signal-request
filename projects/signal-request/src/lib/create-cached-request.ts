@@ -16,7 +16,7 @@ import {
   type ResourceParamsContext,
   type Signal,
 } from '@angular/core';
-import { CacheEntry, type FetchPlan } from './cache/cache-entry';
+import { CacheEntry, type FetchPlan, type SettleOutcome } from './cache/cache-entry';
 import { normalizeKey } from './cache/key';
 import { QueryCache } from './cache/query-cache';
 import { resolveStructuralSharing } from './cache/structural-sharing';
@@ -184,43 +184,43 @@ function buildCachedInContext<T, R, TParams>(
   };
 
   let release: (() => void) | undefined;
+  let removeSettleListener: (() => void) | undefined;
   let subscribed: CacheEntry<T> | undefined;
   let destroyed = false;
   /** Last value seen on any entry, so `keepPreviousValue` survives a key change. */
   const lastGood = signal<T | undefined>(initial);
 
-  const startFetch = (p: Plan<T>): Promise<T | undefined> => {
-    const fetchPlan: FetchPlan<T> = {
-      request: p.request,
-      structuralSharing: share,
-      retry: retryPolicy,
-      parse: options.parse as ((raw: unknown) => T) | undefined,
-      responseType: RESPONSE_TYPE[kind],
-    };
-    // Checked before calling, and `fetch` sets its slot synchronously, so this is exact: the
-    // lifecycle hooks fire once per *fetch*, not once per handle that joined it.
-    const started = p.entry.pending === undefined;
-    const promise = p.entry.fetch(fetchPlan);
-    if (!started) return promise;
+  const buildFetchPlan = (p: Plan<T>): FetchPlan<T> => ({
+    request: p.request,
+    structuralSharing: share,
+    retry: retryPolicy,
+    parse: options.parse as ((raw: unknown) => T) | undefined,
+    responseType: RESPONSE_TYPE[kind],
+  });
 
-    const describe = { url: p.request.url, method: p.request.method ?? 'GET' };
-    promise.then(
-      (value) => {
-        if (destroyed) return;
-        safe(() => options.onSuccess?.(value as T));
-        safe(() => globalConfig.onSuccess?.(value, describe));
-        safe(() => options.onSettled?.());
-      },
-      (reason: unknown) => {
-        if (destroyed) return;
-        const error = toError(reason);
-        safe(() => options.onError?.(error));
-        safe(() => globalConfig.onError?.(error, describe));
-        safe(() => options.onSettled?.());
-      },
-    );
-    return promise;
+  /**
+   * Lifecycle hooks, driven by the entry's settle notification rather than by a `.then()` on the
+   * fetch promise.
+   *
+   * Two reasons. Joining an in-flight fetch would otherwise attach a second set of hooks to a
+   * call that was already being watched — one network call, two `onSuccess`. And a refetch that
+   * the *cache* started, because a mutation invalidated the key, has to run these too: from the
+   * user's point of view their component did reload.
+   */
+  const settleListener = (outcome: SettleOutcome<T>): void => {
+    if (destroyed) return;
+    const describe = { url: plan()?.request.url, method };
+    if (outcome.ok) {
+      safe(() => options.onSuccess?.(outcome.value));
+      safe(() => globalConfig.onSuccess?.(outcome.value, describe));
+    } else {
+      safe(() => options.onError?.(outcome.error));
+      safe(() => globalConfig.onError?.(outcome.error, describe));
+    }
+    safe(() => options.onSettled?.());
   };
+
+  const startFetch = (p: Plan<T>): Promise<T | undefined> => p.entry.fetch(buildFetchPlan(p));
 
   /** What a *first* subscriber should do about this entry. */
   const maybeFetchOnMount = (p: Plan<T>): void => {
@@ -256,18 +256,26 @@ function buildCachedInContext<T, R, TParams>(
 
         release?.();
         release = current.entry.subscribe(gcTime);
+        removeSettleListener?.();
+        removeSettleListener = current.entry.addSettleListener(settleListener);
+        // Registered on every evaluation, so a cache-driven refetch always rebuilds the request
+        // from this handle's latest params rather than a snapshot from its first render.
+        current.entry.registerPlan(buildFetchPlan(current));
         subscribed = current.entry;
         if (!lazy) maybeFetchOnMount(current);
         return;
       }
       // Same entry, different request — `params` changed, or a reactive global header did.
       // Refetch, but never duplicate an in-flight one.
+      current.entry.registerPlan(buildFetchPlan(current));
       if (!lazy && current.entry.pending === undefined) void startFetch(current);
     });
   });
 
   destroyRef.onDestroy(() => {
     destroyed = true;
+    removeSettleListener?.();
+    removeSettleListener = undefined;
     if (release) {
       release();
     } else {

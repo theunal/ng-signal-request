@@ -44,7 +44,7 @@ describe('createMutation', () => {
     await expect(p).resolves.toEqual({ id: 4, name: 'Ada' });
     expect(save.status()).toBe('success');
     expect(save.response()).toEqual({ id: 4, name: 'Ada' });
-    expect(onSuccess).toHaveBeenCalledWith({ id: 4, name: 'Ada' }, { id: 4, name: 'Ada' });
+    expect(onSuccess).toHaveBeenCalledWith({ id: 4, name: 'Ada' }, { id: 4, name: 'Ada' }, undefined);
     expect(onSettled).toHaveBeenCalledTimes(1);
   });
 
@@ -87,7 +87,10 @@ describe('createMutation', () => {
     await expect(p).rejects.toBeInstanceOf(HttpErrorResponse);
     expect(del.status()).toBe('error');
     expect(del.error()).toBeInstanceOf(HttpErrorResponse);
-    expect(onError).toHaveBeenCalledWith(expect.any(HttpErrorResponse), 1);
+    // The trailing `context` is `undefined` when no `onMutate` was given. It is passed
+    // unconditionally — `toHaveBeenCalledWith` compares the whole argument list, so a callback
+    // that grows an optional trailing parameter is observable even to a caller that ignores it.
+    expect(onError).toHaveBeenCalledWith(expect.any(HttpErrorResponse), 1, undefined);
     expect(global).toHaveBeenCalledWith(expect.any(HttpErrorResponse), { url: '/users/1', method: 'DELETE' });
 
     const t = del.tryRun(2);

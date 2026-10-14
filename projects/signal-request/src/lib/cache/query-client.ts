@@ -1,6 +1,7 @@
-import { inject, Injectable } from '@angular/core';
+import { computed, inject, Injectable, type Signal } from '@angular/core';
 import type { CacheEntry } from './cache-entry';
 import type { QueryKey, QueryKeyFilter } from './key';
+import { MutationRegistry } from './mutation-registry';
 import { QueryCache } from './query-cache';
 
 /**
@@ -30,6 +31,7 @@ export type Updater<T> = T | ((previous: T | undefined) => T | undefined);
 @Injectable({ providedIn: 'root' })
 export class QueryClient {
   private readonly cache = inject(QueryCache);
+  private readonly mutations = inject(MutationRegistry);
 
   /**
    * Entries queued for a refetch this tick, keyed by hash.
@@ -121,6 +123,25 @@ export class QueryClient {
   /** Empties the cache. Mostly for tests and devtools. */
   clear(): void {
     this.cache.clear();
+  }
+
+  /**
+   * How many **mutations** are in flight.
+   *
+   * A signal, because the answer changes on its own — a toolbar that shows a spinner has nothing
+   * to re-read to find out. With a filter it counts only mutations whose `mutationKey` matches, so
+   * `client.isMutating(['todos'])` answers "is a todo being written?" without the caller holding
+   * a reference to any of them.
+   */
+  isMutating(filter?: QueryKeyFilter): Signal<boolean> {
+    if (filter === undefined) return this.mutations.isMutating;
+    const count = this.mutations.countMatching(filter);
+    return computed(() => count() > 0);
+  }
+
+  /** The number of mutations in flight, optionally filtered by `mutationKey`. */
+  mutatingCount(filter?: QueryKeyFilter): Signal<number> {
+    return filter === undefined ? this.mutations.count : this.mutations.countMatching(filter);
   }
 
   /**

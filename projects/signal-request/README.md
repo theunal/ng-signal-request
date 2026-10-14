@@ -523,6 +523,77 @@ readonly save = createMutation<User, Partial<User>>(
 Handles are reloaded; keys are invalidated, so **every** cached handle under
 that key refreshes, not just the one this mutation happens to reference.
 
+### `onMutate`, and the settle context
+
+`onMutate` runs **before** the request goes out and before the optimistic value
+is written. Whatever it returns is threaded into the settle hooks and is
+readable as `mutation.context()`.
+
+```ts
+const save = createMutation<number, Todo, { attemptedAt: number }>(
+  (draft) => ({ url: '/todos', body: draft }),
+  {
+    onMutate: (draft) => ({ attemptedAt: Date.now() }),
+    onError: (error, _args, ctx) => log.warn(error, ctx?.attemptedAt),
+  },
+);
+```
+
+The order is fixed and worth knowing, because the rollback and the refetch both
+touch the same display:
+
+| | |
+| --- | --- |
+| 1 | `onMutate(args)` — may be async; awaited before anything else |
+| 2 | the optimistic value is written into `target` |
+| 3 | the request is sent |
+| 4 | on success: `invalidates` → `onSuccess` → `onSettled` |
+| 4 | on failure: the optimistic value is rolled back → `onError` → `onSettled` |
+
+A throwing or rejecting `onMutate` fails the whole call: **nothing is sent**,
+nothing was shown, `onError` runs and `run()` rejects.
+
+> **`TContext` is only inferred when you write no type arguments at all.**
+> TypeScript fills any type argument you leave out with its *default*, so
+> `createMutation<number, string>(…)` locks `TContext` to `undefined` before
+> `onMutate` is looked at. Either name it —
+> `createMutation<number, string, MyContext>(…)` — or let it all be inferred.
+
+### Optimistic writes by key
+
+`target` also takes a key, so the mutation does not need a reference to the
+handle showing the list:
+
+```ts
+{
+  optimistic: (todos, draft) => [...(todos ?? []), draft],
+  target: ['todos'],
+  invalidates: () => [['todos']],
+}
+```
+
+The entry has to already exist — a handle for that key must be on screen
+somewhere. Minting one here would leave an orphan that can never fetch and that
+nothing is subscribed to, so a missing entry makes the optimistic write a no-op
+instead.
+
+### `mutationKey` and `isMutating`
+
+`mutationKey` groups a mutation so it can be found without a reference, and
+`isMutating` answers "is anything being written?" as a **signal**, because that
+changes on its own:
+
+```ts
+const save = createMutation(..., { mutationKey: ['todos'] });
+
+client.isMutating();             // Signal<boolean> — anything
+client.isMutating(['todos']);    // Signal<boolean> — only todo mutations
+client.mutatingCount()();        // Signal<number>
+```
+
+Prefix-matched like a query key. This is what a global "saving…" indicator or a
+navigation guard needs — neither holds references to your mutations.
+
 ### What is different from a cached `httpResource`
 
 - **Structural sharing keeps the previous reference when nothing changed**, so
@@ -571,6 +642,8 @@ becomes the query string, exactly as in `createRequest`.
 | Option | Description |
 | --- | --- |
 | `concurrency` | `parallel` (default) · `exhaust` (returns the in-flight promise) · `switch` (cancels the previous call, rejecting it with `RequestCancelledError`) |
+| `mutationKey` | Groups this mutation so `QueryClient.isMutating([...])` can find it without a reference |
+| `onMutate` | Runs before the request and the optimistic write; its return value becomes the `context` |
 | `optimistic` / `target` | Show the result before the server answers, and **restore it automatically** if the call fails or is cancelled. See below |
 | `responseType` | `json` \| `text` \| `blob` \| `arraybuffer` |
 | `parse` | Validate or map the response body |
@@ -937,7 +1010,8 @@ await settle();
 
 | Export | Description |
 | --- | --- |
-| `QueryClient` | Injectable: `invalidate` · `refetch` · `cancel` · `getData` · `setData` · `remove` · `isFetching` · `count` · `clear` |
+| `QueryClient` | Injectable: `invalidate` · `refetch` · `cancel` · `getData` · `setData` · `remove` · `isFetching` · `count` · `clear` · `isMutating` · `mutatingCount` |
+| `MutationRegistry` | In-flight mutation counts, globally and per `mutationKey` |
 | `QueryCache` | The store: `resolve` · `peek` · `matching` · `markInvalidated` · `remove` · `all` · `subscribeChanges` · `clear` |
 | `CacheEntry` | One cached resource: `data` · `status` signals, `refetch()` · `subscribe()` · `setData()` · `isStale()` |
 | `QueryKey` / `QueryKeyFactory` / `QueryKeyFilter` / `QueryKeyPredicate` | Key shapes and the matching filter |

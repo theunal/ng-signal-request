@@ -496,7 +496,7 @@ export interface OptimisticTarget<T> {
   set(value: T): void;
 }
 
-export interface MutationOptions<T, TArgs = void> {
+export interface MutationOptions<T, TArgs = void, TContext = undefined> {
   /**
    * What happens when `run()` is called while another call is in flight.
    * - `parallel` (default): every call is sent
@@ -513,7 +513,39 @@ export interface MutationOptions<T, TArgs = void> {
   /** Abort the call after this many ms. Surfaced as `requestError() === { kind: 'timeout' }`. */
   timeout?: number;
   /**
-   * What to reload after a successful call. A function avoids field-ordering problems.
+   * Groups this mutation so it can be found without holding a reference to it.
+   *
+   * Read by `QueryClient.isMutating(mutationKey)`, which is how a global "saving…" indicator
+   * knows something is in flight *somewhere* — a toolbar, an interceptor, a navigation guard.
+   *
+   * ```ts
+   * const save = createMutation(..., { mutationKey: ['todos'] });
+   * client.isMutating(['todos']);   // true while any todo mutation is running
+   * ```
+   *
+   * Prefix-matched like a query key, so `['todos']` also covers `['todos', 1]`.
+   */
+  mutationKey?: QueryKey;
+  /**
+   * Runs **before** the request is sent and before the optimistic value is written.
+   *
+   * Whatever it returns is threaded into `onError`, `onSuccess` and `onSettled`, and is readable
+   * as `mutation.context()`. Use it for anything the settle hooks need that is not derivable from
+   * the args — a snapshot taken at call time rather than at settle time, an id minted before the
+   * round-trip.
+   *
+   * ```ts
+   * onMutate: (draft) => ({ previous: list().response() }),
+   * onError:  (error, _args, ctx) => list().set(ctx?.previous ?? []),
+   * ```
+   *
+   * Awaited when it returns a promise, so an async preparation delays the request rather than
+   * racing it. A rejection here fails the whole call — **nothing is sent**, and the optimistic
+   * value is never written.
+   */
+  onMutate?: (args: TArgs) => TContext | Promise<TContext>;
+  /**
+   * Requests to `reload()` after a successful call. A function avoids field-ordering problems.
    *
    * Handles are reloaded directly; keys are invalidated, which also refreshes every **other**
    * cached handle under that key and not just this one.
@@ -550,18 +582,37 @@ export interface MutationOptions<T, TArgs = void> {
    * Pass a `createRequest` to make the whole list show the new item immediately and snap back on
    * failure — the common case. The request is left at `local` status; its own loaders take over
    * again on the next source change.
+   *
+   * Pass a **key** instead, to write into whatever cached entry lives there without holding a
+   * reference to it:
+   *
+   * ```ts
+   * { optimistic: (todos, draft) => [...(todos ?? []), draft], target: ['todos'] }
+   * ```
+   *
+   * The entry has to already exist — a handle for that key has to be on screen somewhere. There
+   * is no request description to build one from, and creating an orphan would leave an entry that
+   * can never fetch and never be collected by anything reading it.
    */
-  target?: OptimisticTarget<T>;
-  onSuccess?: (response: T, args: TArgs) => void;
-  onError?: (error: Error, args: TArgs) => void;
-  onSettled?: (args: TArgs) => void;
+  target?: OptimisticTarget<T> | QueryKey;
+  /**
+   * Called once for a settled call that succeeded.
+   *
+   * The signature is `(response, args, context)`; the first two arguments are unchanged from
+   * earlier versions, so existing callbacks keep working unchanged.
+   */
+  onSuccess?: (response: T, args: TArgs, context: TContext | undefined) => void;
+  /** Called once for a settled call that failed. Receives whatever `onMutate` returned. */
+  onError?: (error: Error, args: TArgs, context: TContext | undefined) => void;
+  /** Runs after `onSuccess` / `onError`. Also receives the `onMutate` context. */
+  onSettled?: (args: TArgs, context: TContext | undefined) => void;
   injector?: Injector;
   // `reportProgress` is deliberately absent: it is set on the *builder*
   // (`(args) => ({ url, body, reportProgress: true })`), not here, because one mutation may be the
   // upload and another the delete. An option would read as if it applied to every call.
 }
 
-export interface SignalMutation<T, TArgs = void> {
+export interface SignalMutation<T, TArgs = void, TContext = undefined> {
   readonly response: Signal<T | undefined>;
   readonly error: Signal<Error | undefined>;
   /** The same failure as `error`, narrowed to a discriminated union. See `SignalRequest`. */
@@ -570,6 +621,13 @@ export interface SignalMutation<T, TArgs = void> {
   readonly status: Signal<MutationStatus>;
   /** Arguments of the most recent call. */
   readonly args: Signal<TArgs | undefined>;
+  /**
+   * Whatever the most recent `onMutate` returned, or `undefined` before the first call.
+   *
+   * Also handed to `onError` / `onSettled`, but readable here because a template often needs it
+   * too — showing the error next to the row it belongs to, for instance.
+   */
+  readonly context: Signal<TContext | undefined>;
   /**
    * Latest progress event, when the call asked for it (`reportProgress: true` on the builder).
    * `undefined` before the first event and after the call settles.

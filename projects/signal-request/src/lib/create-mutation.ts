@@ -18,6 +18,8 @@ import {
 } from '@angular/core';
 import { retry, throwError, timer, type Observable, type Subscription } from 'rxjs';
 import { SIGNAL_REQUEST_CONFIG } from './config';
+import { QueryCache } from './cache/query-cache';
+import { MutationRegistry } from './cache/mutation-registry';
 import { QueryClient } from './cache/query-client';
 import { RequestCancelledError, toError, toRequestError, type RequestErrorView } from './errors';
 import type { QueryKey } from './cache/key';
@@ -37,10 +39,10 @@ interface Call {
 }
 
 interface MutationFactory {
-  <T = unknown, TArgs = void>(
+  <T = unknown, TArgs = void, TContext = undefined>(
     request: (args: TArgs) => RequestValue,
-    options?: MutationOptions<T, TArgs>,
-  ): SignalMutation<T, TArgs>;
+    options?: MutationOptions<T, TArgs, TContext>,
+  ): SignalMutation<T, TArgs, TContext>;
 }
 
 /**
@@ -66,18 +68,18 @@ function mutationFactory(label: string, method: string): MutationFactory {
     buildMutationFactory(method, request, options, named(label));
 }
 
-function buildMutationFactory<T, TArgs>(
+function buildMutationFactory<T, TArgs, TContext>(
   method: string,
   request: (args: TArgs) => RequestValue,
-  options: MutationOptions<T, TArgs>,
+  options: MutationOptions<T, TArgs, TContext>,
   caller: () => void,
-): SignalMutation<T, TArgs> {
+): SignalMutation<T, TArgs, TContext> {
   let injector = options.injector;
   if (!injector) {
     assertInInjectionContext(caller);
     injector = inject(Injector);
   }
-  return runInInjectionContext(injector, () => buildMutation(method, request, options));
+  return runInInjectionContext(injector, () => buildMutation<T, TArgs, TContext>(method, request, options));
 }
 
 const POST = mutationFactory('createMutation', 'POST');
@@ -110,14 +112,16 @@ export const createMutation: CreateMutation = Object.assign(POST, {
   delete: mutationFactory('createMutation.delete', 'DELETE'),
 }) as CreateMutation;
 
-function buildMutation<T, TArgs>(
+function buildMutation<T, TArgs, TContext>(
   method: string,
   request: (args: TArgs) => RequestValue,
-  options: MutationOptions<T, TArgs>,
-): SignalMutation<T, TArgs> {
+  options: MutationOptions<T, TArgs, TContext>,
+): SignalMutation<T, TArgs, TContext> {
   const http = inject(HttpClient);
   const config = inject(SIGNAL_REQUEST_CONFIG);
   const errorHandler = inject(ErrorHandler);
+  const cache = inject(QueryCache);
+  const mutations = inject(MutationRegistry);
   /**
    * Only used when `invalidates` is given a key. Injected unconditionally so that a mutation
    * built without one still behaves identically — `inject()` here resolves from the same
@@ -142,6 +146,8 @@ function buildMutation<T, TArgs>(
     return toRequestError(cause, timeout === undefined ? {} : { timeout });
   });
   const args = signal<TArgs | undefined>(undefined);
+  /** Whatever the last call's `onMutate` produced. See `MutationOptions.onMutate`. */
+  const context = signal<TContext | undefined>(undefined);
   const progress = signal<HttpProgressEvent | undefined>(undefined);
   const inFlight = signal(0);
   const finished = signal<Exclude<MutationStatus, 'loading'>>('idle');
@@ -170,6 +176,10 @@ function buildMutation<T, TArgs>(
  */
 const isQueryKey = (target: InvalidationTarget): target is QueryKey => Array.isArray(target);
 
+/** The same discrimination for `target`, which takes a handle or a key. */
+const isKeyTarget = (target: OptimisticTarget<unknown> | QueryKey): target is QueryKey =>
+  Array.isArray(target);
+
 /**
    * Applies `invalidates` after a successful call.
    *
@@ -193,6 +203,26 @@ const isQueryKey = (target: InvalidationTarget): target is QueryKey => Array.isA
   };
 
   /**
+   * Resolves `target` to something writable.
+   *
+   * A key goes through `peek`, never `resolve`: an entry nobody is holding a handle for has no
+   * request description, and minting one would leave an orphan that can never fetch and that
+   * nothing is subscribed to — so nothing would ever collect it either. Returning `undefined`
+   * makes the optimistic write a no-op instead, which is the honest outcome: nobody is looking.
+   */
+  const resolveTarget = (): OptimisticTarget<T> | undefined => {
+    const configured = options.target;
+    if (configured === undefined) return selfTarget;
+    if (!isKeyTarget(configured)) return configured;
+    const entry = cache.peek<T>(configured);
+    if (!entry) return undefined;
+    // Adapted rather than satisfied directly: an entry stores through `setData`, which also moves
+    // its timestamps and clears `invalidated`. Going through it keeps a local write indistinguishable
+    // from `setData()` on the handle itself.
+    return { response: entry.data, set: (value: T) => void entry.setData(value) };
+  };
+
+  /**
    * Writes the optimistic value for one call and returns the undo.
    *
    * The undo is a compare-and-swap: it restores the snapshot only when this call's own value is
@@ -206,7 +236,8 @@ const isQueryKey = (target: InvalidationTarget): target is QueryKey => Array.isA
    */
   const applyOptimistic = (callArgs: TArgs): (() => void) => {
     if (!options.optimistic) return noop;
-    const target = options.target ?? selfTarget;
+    const target = resolveTarget();
+    if (!target) return noop;
     const snapshot = untracked(target.response);
     let next: T;
     try {
@@ -229,7 +260,20 @@ const isQueryKey = (target: InvalidationTarget): target is QueryKey => Array.isA
     return promise;
   };
 
-  const execute = (callArgs: TArgs): Promise<T> => {
+  /**
+   * Runs `onMutate` and returns the context it produced.
+   *
+   * Deliberately **before** the optimistic write: a hook that snapshots state wants to see the
+   * world as it was, before this call changed anything. A rejection fails the call outright —
+   * nothing is sent and nothing was shown — because a preparation that could not run means the
+   * call was never really made.
+   */
+  const runOnMutate = async (callArgs: TArgs): Promise<TContext> => {
+    if (!options.onMutate) return undefined as TContext;
+    return await options.onMutate(callArgs);
+  };
+
+  const execute = (callArgs: TArgs, ctx: TContext): Promise<T> => {
     // `TArgs` doubles as a params bag: its `body` / `path` / `headers` keys fill the
     // matching request slots and the rest become the query string. The verb comes from
     // the variant that was called.
@@ -272,8 +316,10 @@ const isQueryKey = (target: InvalidationTarget): target is QueryKey => Array.isA
 
     inFlight.update((n) => n + 1);
     args.set(callArgs);
+    context.set(ctx);
     error.set(undefined);
     progress.set(undefined);
+    mutations.begin(options.mutationKey);
 
     const promise = new Promise<T>((resolve, reject) => {
       let settled = false;
@@ -297,6 +343,7 @@ const isQueryKey = (target: InvalidationTarget): target is QueryKey => Array.isA
         settled = true;
         calls.delete(call);
         inFlight.update((n) => n - 1);
+        mutations.end(options.mutationKey);
         // A settled call has no progress left to report, and leaving the last event behind would
         // pin a `<progress [value]="…">` at its final value. Cleared on every settle path — success,
         // failure and cancel — so `progress()` is `undefined` again until the next call reports.
@@ -317,10 +364,13 @@ const isQueryKey = (target: InvalidationTarget): target is QueryKey => Array.isA
         finish();
         response.set(value);
         finished.set('success');
+        // Settle order is fixed and worth stating, because the rollback and the refetch both
+        // touch the same display: invalidate → onSuccess → onSettled. So a hook that reads the
+        // refreshed value sees the fresh list, not the one that is about to be replaced.
         safe(reloadInvalidated);
-        safe(() => options.onSuccess?.(value, callArgs));
+        safe(() => options.onSuccess?.(value, callArgs, ctx));
         safe(() => config.onSuccess?.(value, { url: built.url, method }));
-        safe(() => options.onSettled?.(callArgs));
+        safe(() => options.onSettled?.(callArgs, ctx));
         resolve(value);
       };
       const fail = (err: Error): void => {
@@ -332,9 +382,9 @@ const isQueryKey = (target: InvalidationTarget): target is QueryKey => Array.isA
         errorTimeout.set(timeout);
         error.set(err);
         finished.set('error');
-        safe(() => options.onError?.(err, callArgs));
+        safe(() => options.onError?.(err, callArgs, ctx));
         safe(() => config.onError?.(err, { url: built.url, method }));
-        safe(() => options.onSettled?.(callArgs));
+        safe(() => options.onSettled?.(callArgs, ctx));
         reject(err);
       };
       /**
@@ -382,12 +432,41 @@ const isQueryKey = (target: InvalidationTarget): target is QueryKey => Array.isA
 
   inject(DestroyRef).onDestroy(destroy);
 
+  /**
+   * Runs the call, with `onMutate` in front of it when there is one.
+   *
+   * Without `onMutate` this calls `execute` **synchronously**, which is load-bearing: the request
+   * is on the wire before `run()` returns, so `run(); expectOne(url)` in a test works and a
+   * `switch`-mode cancel still sees the previous call in the same tick. Routing everything through
+   * a promise chain "for symmetry" would push dispatch into a microtask and quietly change that.
+   */
+  const start = (callArgs: TArgs): Promise<T> => {
+    if (!options.onMutate) return execute(callArgs, undefined as TContext);
+
+    return runOnMutate(callArgs).then(
+      (ctx) => execute(callArgs, ctx),
+      // `onMutate` threw or rejected: the call was never made, so it fails like any other
+      // failed call — hooks run, the promise rejects, nothing was sent.
+      (reason: unknown) => {
+        const failure = toError(reason);
+        args.set(callArgs);
+        context.set(undefined);
+        error.set(failure);
+        finished.set('error');
+        safe(() => options.onError?.(failure, callArgs, undefined));
+        safe(() => config.onError?.(failure, { url: undefined, method }));
+        safe(() => options.onSettled?.(callArgs, undefined));
+        return rejected(failure);
+      },
+    );
+  };
+
   const run = (callArgs: TArgs): Promise<T> => {
     if (destroyed) return rejected(new RequestCancelledError('The mutation was destroyed.'));
     switch (concurrency) {
       case 'exhaust': {
         if (exhausted) return exhausted;
-        const promise = execute(callArgs);
+        const promise = start(callArgs);
         exhausted = promise;
         const clear = (): void => {
           if (exhausted === promise) exhausted = undefined;
@@ -397,9 +476,9 @@ const isQueryKey = (target: InvalidationTarget): target is QueryKey => Array.isA
       }
       case 'switch':
         cancelAll();
-        return execute(callArgs);
+        return start(callArgs);
       default:
-        return execute(callArgs);
+        return start(callArgs);
     }
   };
 
@@ -410,6 +489,7 @@ const isQueryKey = (target: InvalidationTarget): target is QueryKey => Array.isA
     loading,
     status,
     args: args.asReadonly(),
+    context: context.asReadonly(),
     progress: progress.asReadonly(),
     run: (...a: [TArgs?]) => run(a[0] as TArgs),
     tryRun: (...a: [TArgs?]): Promise<RunResult<T>> =>
@@ -422,10 +502,11 @@ const isQueryKey = (target: InvalidationTarget): target is QueryKey => Array.isA
       response.set(undefined);
       error.set(undefined);
       args.set(undefined);
+      context.set(undefined);
       progress.set(undefined);
       if (untracked(inFlight) === 0) finished.set('idle');
     },
     destroy,
   };
-  return api as unknown as SignalMutation<T, TArgs>;
+  return api as unknown as SignalMutation<T, TArgs, TContext>;
 }

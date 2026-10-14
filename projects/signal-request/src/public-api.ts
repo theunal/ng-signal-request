@@ -7,7 +7,13 @@ export type { CreateRequest, CreateRequestFn } from './lib/create-request';
 export { createMutation } from './lib/create-mutation';
 export type { CreateMutation } from './lib/create-mutation';
 export { RequestCancelledError, requestErrorOf, toError, toRequestError } from './lib/errors';
-export type { RequestError, RequestErrorContext } from './lib/errors';
+export type {
+  RequestError,
+  RequestErrorContext,
+  RequestErrorKind,
+  RequestErrorOf,
+  RequestErrorView,
+} from './lib/errors';
 export type {
   MutationOptions,
   MutationStatus,

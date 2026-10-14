@@ -18,7 +18,7 @@ import {
 } from '@angular/core';
 import { retry, throwError, timer, type Observable, type Subscription } from 'rxjs';
 import { SIGNAL_REQUEST_CONFIG } from './config';
-import { RequestCancelledError, toError, toRequestError, type RequestError } from './errors';
+import { RequestCancelledError, toError, toRequestError, type RequestErrorView } from './errors';
 import type {
   MutationOptions,
   MutationStatus,
@@ -126,7 +126,7 @@ function buildMutation<T, TArgs>(
    */
   const errorTimeout = signal<number | undefined>(undefined);
   /** The same failure as `error`, classified. */
-  const requestError = computed<RequestError | undefined>(() => {
+  const requestError = computed<RequestErrorView | undefined>(() => {
     const cause = error();
     if (cause === undefined) return undefined;
     const timeout = errorTimeout();

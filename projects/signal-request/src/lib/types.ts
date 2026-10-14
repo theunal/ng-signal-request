@@ -4,7 +4,7 @@ import type {
   HttpResourceRef,
   HttpResourceRequest,
 } from '@angular/common/http';
-import type { RequestError } from './errors';
+import type { RequestErrorView } from './errors';
 import type {
   Injector,
   ResourceParamsContext,
@@ -250,16 +250,24 @@ export interface SignalRequest<T, R = T | undefined, TParams = void> {
   /** Set only after all retries are exhausted. */
   readonly error: Signal<Error | undefined>;
   /**
-   * The same failure, narrowed to a discriminated union so a template can `switch` on
-   * `kind` instead of doing `instanceof` checks. `undefined` whenever `error()` is
-   * `undefined` — including while a retry is in flight, where `error` is masked.
+   * The same failure, narrowed to a discriminated union so you can `switch` on `kind` instead of
+   * doing `instanceof` checks — plus one predicate per kind and a `message` for templates.
+   * `undefined` whenever `error()` is `undefined`, including while a retry is in flight.
    *
    * ```ts
    * const e = this.list.requestError();
-   * if (e?.kind === 'http') e.status;   // number
+   * if (e?.kind === 'http') e.status;   // number, compiler-checked
+   * ```
+   *
+   * In a template the predicates save the `@switch`:
+   *
+   * ```html
+   * @if (error.http(); as http) { error: {{ http.status }} }
+   * @else if (error.network()) { no connection }
+   * @else { {{ error.message }} }
    * ```
    */
-  readonly requestError: Signal<RequestError | undefined>;
+  readonly requestError: Signal<RequestErrorView | undefined>;
   /**
    * `true` when the last settled attempt succeeded — the promise-style counterpart of
    * `error()`: no `try`/`catch` needed.
@@ -391,7 +399,7 @@ export interface SignalMutation<T, TArgs = void> {
   readonly response: Signal<T | undefined>;
   readonly error: Signal<Error | undefined>;
   /** The same failure as `error`, narrowed to a discriminated union. See `SignalRequest`. */
-  readonly requestError: Signal<RequestError | undefined>;
+  readonly requestError: Signal<RequestErrorView | undefined>;
   readonly loading: Signal<boolean>;
   readonly status: Signal<MutationStatus>;
   /** Arguments of the most recent call. */

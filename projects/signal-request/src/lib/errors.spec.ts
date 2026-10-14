@@ -1,7 +1,7 @@
 import { HttpErrorResponse } from '@angular/common/http';
 import { describe, expect, expectTypeOf, it } from 'vitest';
 
-import { createRequest, toRequestError, type RequestError } from '../public-api';
+import { createRequest, toRequestError, type RequestError, type RequestErrorOf, type RequestErrorView } from '../public-api';
 import { fail, respond, settle, setup } from '../../testing/testing';
 
 /**
@@ -86,12 +86,126 @@ describe('toRequestError', () => {
 
   it('narrows per kind', () => {
     const error = toRequestError(new HttpErrorResponse({ status: 500, statusText: '' }));
-    expectTypeOf(error).toEqualTypeOf<RequestError>();
+    // Still a `RequestError` — the view only *adds* to it, so `kind` and the payload fields are
+    // untouched and every existing use keeps compiling.
+    expectTypeOf(error).toExtend<RequestError>();
+    expectTypeOf(error).toEqualTypeOf<RequestErrorView>();
 
     if (error.kind !== 'http') throw new Error('http bekleniyordu');
     expectTypeOf(error.status).toEqualTypeOf<number>();
     expectTypeOf(error.body).toEqualTypeOf<unknown>();
     expect(error.url).toBeNull();
+  });
+});
+
+describe('RequestErrorView — predicates and message', () => {
+  /** Every kind, with a cause that actually carries something to say. */
+  const cases = [
+    {
+      name: 'http',
+      error: () => toRequestError(new HttpErrorResponse({ status: 404, statusText: 'Not Found' })),
+      message: 'HTTP 404 Not Found',
+      withText: 'HTTP 503 Service Unavailable',
+    },
+    {
+      name: 'timeout',
+      // A timeout is only ever *classified* as one when the cause is abort-like — which is the
+      // whole caveat the README's "`status: 0` is ambiguous" section is about.
+      error: () => toRequestError({ name: 'TimeoutError' } as never, { timeout: 5_000 }),
+      message: 'Timed out after 5000ms',
+      withText: 'Timed out after 5000ms',
+    },
+    {
+      name: 'network',
+      // `status: 0` is how `HttpClient` reports "no response" — the realistic network failure.
+      error: () => toRequestError(new HttpErrorResponse({ status: 0 })),
+      message: 'No connection',
+      withText: 'No connection',
+    },
+    {
+      name: 'aborted',
+      error: () => toRequestError({ name: 'AbortError' } as never),
+      message: 'Request cancelled',
+      withText: 'Request cancelled',
+    },
+    {
+      name: 'unknown',
+      error: () => toRequestError('boom'),
+      message: 'boom',
+      withText: 'boom',
+    },
+  ] as const;
+
+  it('each predicate returns the error itself, and undefined for every other kind', () => {
+    for (const current of cases) {
+      const error = current.error();
+      expect(error.kind).toBe(current.name);
+
+      for (const other of cases) {
+        const result = error[other.name]();
+        if (other.name === current.name) {
+          // Identity, not a copy: the payload has to be the thing on screen.
+          expect(result).toBe(error);
+        } else {
+          expect(result).toBeUndefined();
+        }
+      }
+    }
+  });
+
+  it('types each predicate as its own union member', () => {
+    // Spelled out one by one: inside the loop above TypeScript widens the key to the union of
+    // every kind, which is exactly the precision this test exists to pin.
+    const error = toRequestError(new HttpErrorResponse({ status: 404, statusText: 'Not Found' }));
+
+    expectTypeOf(error.http()).toEqualTypeOf<RequestErrorOf<'http'> | undefined>();
+    expectTypeOf(error.timeout()).toEqualTypeOf<RequestErrorOf<'timeout'> | undefined>();
+    expectTypeOf(error.network()).toEqualTypeOf<RequestErrorOf<'network'> | undefined>();
+    expectTypeOf(error.unknown()).toEqualTypeOf<RequestErrorOf<'unknown'> | undefined>();
+    expectTypeOf(error.aborted()).toEqualTypeOf<RequestErrorOf<'aborted'> | undefined>();
+    expectTypeOf(error.message).toEqualTypeOf<string>();
+
+    // The alias in `@if (error.http(); as http)` is the narrow member, not the whole union —
+    // that is the compiler-checked narrowing the template gets for free.
+    const http = error.http();
+    if (http) {
+      expectTypeOf(http.status).toEqualTypeOf<number>();
+      expectTypeOf(http.body).toEqualTypeOf<unknown>();
+    }
+  });
+
+  it('summarizes every kind into a one-line message', () => {
+    for (const current of cases) {
+      expect(current.error().message).toBe(current.message);
+    }
+  });
+
+  it('appends the statusText Angular gives it', () => {
+    // `HttpErrorResponse` substitutes 'Unknown Error' for an empty `statusText`, so in practice
+    // this branch is always taken and the summary always reads `HTTP <status> <text>`.
+    expect(toRequestError(new HttpErrorResponse({ status: 500, statusText: '' })).message).toBe(
+      'HTTP 500 Unknown Error',
+    );
+  });
+
+  it('digs a real message out of an unknown cause', () => {
+    expect(toRequestError(new Error('kapı bozuk')).message).toBe('kapı bozuk');
+    expect(toRequestError({ nope: true }).message).toBe('Unknown error');
+    expect(toRequestError('').message).toBe('Unknown error');
+  });
+
+  it('keeps the helpers off the data: toEqual, JSON and spread see only fields', () => {
+    // The whole reason the predicates live on a prototype. If they became own properties every
+    // `toEqual({ kind: … })` assertion in this suite would start failing on the extra members.
+    const error = toRequestError({ name: 'AbortError' } as never);
+
+    expect(error).toEqual({ kind: 'aborted' });
+    expect(JSON.stringify(error)).toBe('{"kind":"aborted"}');
+    expect(Object.keys(error)).toEqual(['kind']);
+    expect({ ...error }).toEqual({ kind: 'aborted' });
+    // …while still being reachable, which is the whole feature.
+    expect(typeof error.http).toBe('function');
+    expect(error.message).toBe('Request cancelled');
   });
 });
 

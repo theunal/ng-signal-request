@@ -41,7 +41,7 @@ const LAST_PAGE = 10;
         }
         @if (feed.requestError(); as error) {
           <span class="badge err">
-            {{ error.kind }}{{ error.kind === 'http' ? ' · ' + error.status : '' }}
+            {{ error.http() ? 'HTTP ' + error.http()!.status : error.message }}
           </span>
         }
       </div>
@@ -187,8 +187,8 @@ export class InfiniteSection {
       concurrency: 'exhaust',
       retry: false, // a deliberate 500 is not worth retrying
       onSettled: () => {
-        const kind = this.addRejecting.requestError()?.kind ?? 'hata';
-        this.outcome.set(`${kind} — iyimser kayıt listeden geri alındı`);
+        const error = this.addRejecting.requestError();
+        this.outcome.set(error ? `${error.message} — iyimser kayıt geri alındı` : null);
       },
     },
   );

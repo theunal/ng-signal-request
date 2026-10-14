@@ -99,12 +99,10 @@ export class AuthService {
   template: `
     @if (list.loading()) { loading... }
     @else if (list.requestError(); as error) {
-      @switch (error.kind) {
-        @case ('http') { error: {{ error.status }} }
-        @case ('network') { no connection }
-        @case ('timeout') { timed out }
-        @default { error: {{ error.message }} }
-      }
+      @if (error.http(); as http) { error: {{ http.status }} }
+      @else if (error.network()) { no connection }
+      @else if (error.timeout()) { timed out }
+      @else { {{ error.message }} }
     }
     @else { {{ list.response().length }} records }
     <button (click)="refresh()">Refresh</button>
@@ -314,7 +312,7 @@ await this.save.run({ path: { id: 1 }, body: { name: 'Ada' } });
 | `loading()` | loading / reloading / waiting for the next retry |
 | `initialLoading()` | only the first load, or one caused by changed params — not reload/refresh/retry |
 | `error()` | raw `Error`, set **after retries are exhausted**; stays `undefined` while retrying |
-| `requestError()` | the same failure, narrowed to a discriminated union (see "Errors") |
+| `requestError()` | the same failure, narrowed to a discriminated union, with per-kind predicates and a `message` (see "Errors") |
 | `status()` | `idle` \| `loading` \| `reloading` \| `resolved` \| `error` \| `local` |
 | `retryAttempt()` | `0`, or the current retry number. **Keeps its last value after giving up** |
 | `headers()`, `statusCode()`, `progress()` | straight from `httpResource` |
@@ -361,6 +359,49 @@ if (error?.kind === 'http') {
   error.body; // unknown
 }
 ```
+
+### In a template: predicates instead of `@switch`
+
+Every kind also gets a predicate that returns the error **itself** when that
+is its kind, and `undefined` otherwise — plus a one-line `message`:
+
+```ts
+error.http();    // RequestErrorOf<'http'> | undefined
+error.timeout(); // RequestErrorOf<'timeout'> | undefined
+error.message;   // string — 'HTTP 404 Not Found', 'Timed out after 5000ms', …
+```
+
+`@if (error.http(); as http)` binds the alias to the exact union member, so
+`http.status` is a `number` and not `number | undefined`:
+
+```html
+@if (error.http(); as http) { error: {{ http.status }} }
+@else if (error.network()) { no connection }
+@else if (error.timeout()) { timed out }
+@else { {{ error.message }} }
+```
+
+`@switch` only works as a statement, so it cannot be used inside an
+interpolation; the predicates can:
+
+```html
+<span class="badge">{{ error.http() ? 'HTTP ' + error.http()!.status : error.kind }}</span>
+```
+
+Three things worth knowing:
+
+- **`kind` is still there, and still the right tool for TypeScript.** The
+  predicates exist for templates. `if (e.kind === 'http')` keeps its
+  compiler-checked narrowing; `e.status` on a `timeout` error is still a type
+  error rather than a silent `undefined`.
+- **`message` is best-effort display copy** — a badge, a tooltip, a log line.
+  Branch on `kind`, never on that string: it is English, not localizable, and
+  not a stable contract.
+- **They are plain methods on a shared prototype, not signals.** A failure is
+  not a time-varying value, so a signal would add a reactive-graph edge
+  without adding reactivity — while costing an allocation per kind per error.
+  Being prototype members also keeps them out of `JSON.stringify`, object
+  spread and `toEqual`, so an error still serializes as plain data.
 
 `requestError()` is `undefined` whenever `error()` is — including while a retry
 is in flight, where `error` is deliberately masked. `createMutation` has the
@@ -789,6 +830,8 @@ await settle();
 | Export | Description |
 | --- | --- |
 | `RequestError` | The discriminated failure union |
+| `RequestErrorView` | `RequestError` plus the per-kind predicates and `message` |
+| `RequestErrorKind` / `RequestErrorOf<K>` | The five kinds, and one union member by name |
 | `RequestErrorContext` | `{ timeout? }` used for timeout classification |
 | `SignalRequest<T, R, TParams>` | Query handle |
 | `SignalMutation<T, TArgs>` | Mutation handle |

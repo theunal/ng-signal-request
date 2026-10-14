@@ -91,15 +91,118 @@ function isAbortLike(cause: unknown): boolean {
   );
 }
 
+/** The five classifications, for narrowing without matching on the literal. */
+export type RequestErrorKind = RequestError['kind'];
+
+/** The member of {@link RequestError} with kind `K`. */
+export type RequestErrorOf<K extends RequestErrorKind> = Extract<RequestError, { kind: K }>;
+
 /**
- * Normalizes an arbitrary thrown value into a `RequestError`.
+ * A `RequestError` plus the helpers a template actually wants.
  *
- * Exported so a hand-written loader or your own `resource` can produce the same shape.
+ * `kind` and the payload fields are unchanged, so every existing use — including the
+ * compiler-checked `if (e.kind === 'http') e.status` narrowing — keeps working. What is new is
+ * that a template no longer has to spell out a `@switch`:
+ *
+ * ```html
+ * @if (error.http(); as http) { error: {{ http.status }} }
+ * @else if (error.network()) { no connection }
+ * @else if (error.timeout()) { timed out }}
+ * @else { {{ error.message }} }
+ * ```
+ *
+ * Each predicate returns the error itself when that is its kind, and `undefined` otherwise — so
+ * the `@if ... ; as` alias is typed as the exact union member, with no new payload types to learn.
  */
+export type RequestErrorView = RequestError & {
+  /**
+   * A one-line English summary: `HTTP 404 Not Found`, `Timed out after 5000ms`, `No connection`.
+   *
+   * Best-effort presentation copy for a badge, a tooltip or a log line. Branch on `kind`, not on
+   * this string — it is not a stable contract and it is not localizable.
+   */
+  readonly message: string;
+  readonly aborted: () => RequestErrorOf<'aborted'> | undefined;
+  readonly timeout: () => RequestErrorOf<'timeout'> | undefined;
+  readonly http: () => RequestErrorOf<'http'> | undefined;
+  readonly network: () => RequestErrorOf<'network'> | undefined;
+  readonly unknown: () => RequestErrorOf<'unknown'> | undefined;
+};
+
+/**
+ * One-line summaries, all in one place so they are easy to review and change.
+ *
+ * `network` and `aborted` are separate classifications even though both arrive as `status: 0` —
+ * see the `RequestError` docs — and they read differently to a user, so they get their own copy.
+ */
+function summarize(error: RequestError): string {
+  switch (error.kind) {
+    case 'http':
+      return `HTTP ${error.status}${error.statusText ? ` ${error.statusText}` : ''}`;
+    case 'timeout':
+      return `Timed out after ${error.ms}ms`;
+    case 'network':
+      return 'No connection';
+    case 'aborted':
+      return 'Request cancelled';
+    case 'unknown': {
+      const cause: unknown = error.cause;
+      if (typeof cause === 'string' && cause) return cause;
+      if (typeof cause === 'object' && cause !== null) {
+        const message = (cause as { message?: unknown }).message;
+        if (typeof message === 'string' && message) return message;
+      }
+      return 'Unknown error';
+    }
+  }
+}
+
+/**
+ * The helpers live on a shared prototype rather than on the error instance.
+ *
+ * That is what keeps them out of `Object.keys`, `JSON.stringify`, spread and — the reason this is
+ * worth the indirection — Vitest's `toEqual`, which compares own enumerable keys. So
+ * `expect(requestError()).toEqual({ kind: 'timeout', ms: 30 })` keeps passing, and an error still
+ * serializes as plain data. It also means one allocation per failure instead of six, and a
+ * predicate call is a string comparison rather than a reactive-graph lookup.
+ *
+ * `message` is a prototype *getter* for the same reason: it has to read like `error.message` in a
+ * template without becoming a field.
+ */
+const viewPrototype: object = {
+  get message(): string {
+    return summarize(this as unknown as RequestError);
+  },
+  aborted(this: RequestErrorView) {
+    return this.kind === 'aborted' ? (this as RequestErrorOf<'aborted'>) : undefined;
+  },
+  timeout(this: RequestErrorView) {
+    return this.kind === 'timeout' ? (this as RequestErrorOf<'timeout'>) : undefined;
+  },
+  http(this: RequestErrorView) {
+    return this.kind === 'http' ? (this as RequestErrorOf<'http'>) : undefined;
+  },
+  network(this: RequestErrorView) {
+    return this.kind === 'network' ? (this as RequestErrorOf<'network'>) : undefined;
+  },
+  unknown(this: RequestErrorView) {
+    return this.kind === 'unknown' ? (this as RequestErrorOf<'unknown'>) : undefined;
+  },
+};
+
+function asView(error: RequestError): RequestErrorView {
+  return Object.assign(Object.create(viewPrototype), error) as RequestErrorView;
+}
+
+/** Normalizes an arbitrary thrown value into a `RequestError` view. */
 export function toRequestError(
   cause: unknown,
   context: RequestErrorContext = {},
-): RequestError {
+): RequestErrorView {
+  return asView(classify(cause, context));
+}
+
+function classify(cause: unknown, context: RequestErrorContext): RequestError {
   if (isAbortLike(cause)) {
     return context.timeout === undefined
       ? { kind: 'aborted' }
@@ -131,7 +234,7 @@ export function toRequestError(
 export function requestErrorOf(
   error: () => Error | undefined,
   context: () => RequestErrorContext,
-): () => RequestError | undefined {
+): () => RequestErrorView | undefined {
   return () => {
     const cause = error();
     return cause === undefined ? undefined : toRequestError(cause, context());

@@ -5,6 +5,8 @@ import type {
   HttpResourceRequest,
 } from '@angular/common/http';
 import type { RequestErrorView } from './errors';
+import type { QueryKeyFactory } from './cache/key';
+import type { StructuralSharingFn } from './cache/structural-sharing';
 import type {
   Injector,
   ResourceParamsContext,
@@ -113,6 +115,30 @@ export interface SignalRequestConfig {
    * what you want. Prefer the function form for anything dynamic.
    */
   headers?: Record<string, string> | (() => Record<string, string>);
+  /**
+   * Default `staleTime` for **cached** requests. Ignored by requests without a `key`.
+   * Default `0` — always stale.
+   */
+  staleTime?: number;
+  /**
+   * Default `gcTime` for cached requests. Default 5 minutes.
+   */
+  gcTime?: number;
+  /**
+   * Default `refetchOnMount` for cached requests. Default `'stale'`.
+   */
+  refetchOnMount?: RefetchOnMount;
+  /**
+   * Default for `refetchOnWindowFocus`, for every request whether keyed or not.
+   *
+   * Global default `false`, matching the per-request default: a refetch nobody asked for is a
+   * surprising thing for a library to do on its own.
+   */
+  refetchOnWindowFocus?: boolean;
+  /**
+   * Default for `refetchOnReconnect`, for every request. Global default `false`.
+   */
+  refetchOnReconnect?: boolean;
   /**
    * Called once for every request or mutation that ends in a final error, after retries.
    * Ideal for toasts / logging.
@@ -231,12 +257,133 @@ export interface ParamsOption<TParams> {
 export type RequestOptions<T, TParams = void, TRaw = unknown> =
   RequestOptionsBase<T, TParams, TRaw> & ([TParams] extends [void] ? unknown : ParamsOption<TParams>);
 
+/** What a cached request does when its **first** subscriber arrives. */
+export type RefetchOnMount =
+  /** Fetch when there is no data, or when `staleTime` has elapsed. The default. */
+  | 'stale'
+  /** Always fetch on the first subscribe — after joining an entry that is already fetching, it joins. */
+  | 'always'
+  /** Never fetch on subscribe. The data is used as it is; `run()` / `reload()` are the only ways to fetch. */
+  | false;
+
+/**
+ * Options that turn a request into a **cached, shared** one.
+ *
+ * `key` is the whole opt-in. Without it the handle is built on `httpResource` exactly as in
+ * v0.0.x, and every option here is inert — which is why they are additive rather than a second
+ * entry point: `createRequest<User[]>('/users', { key: () => ['users'] })` is the same call with
+ * one extra property.
+ */
+export interface CacheOptions<T> {
+  /**
+   * The cache identity. **Must be sufficient to determine the request**: two handles with the
+   * same key share one request, so a key that omits a filter means two different queries collide.
+   *
+   * ```ts
+   * key: () => ['users', { page: page(), q: term() }]   // good
+   * key: () => ['users']                               // a page change will NOT refetch
+   * ```
+   *
+   * Called inside a reactive context, so signals it reads re-point the handle at another entry.
+   * Object segments compare by value, not identity.
+   */
+  readonly key: QueryKeyFactory;
+  /**
+   * How long a value counts as fresh, in ms. `0` — the default — means "always stale", so a
+   * subscriber arriving later always refetches.
+   *
+   * Staleness is only consulted when a handle subscribes and when something invalidates; it is
+   * never a timer.
+   */
+  readonly staleTime?: number;
+  /**
+   * How long an entry with **no subscribers** is kept before it is dropped, in ms.
+   *
+   * Default 5 minutes. This is what makes "come back to the list tab" a cache hit rather than a
+   * refetch. `0` drops the entry the moment the last subscriber leaves.
+   *
+   * The gc timer is browser-only: on the server it would only hold stability.
+   */
+  readonly gcTime?: number;
+  /**
+   * What to do when this handle becomes the first subscriber of an entry.
+   *
+   * Default `'stale'`. `'always'` is for detail screens that must be re-checked on every visit;
+   * `false` is for data something else owns.
+   */
+  readonly refetchOnMount?: RefetchOnMount;
+  /**
+   * Decide what to store for a new response, reusing the previous value where nothing changed.
+   *
+   * ```ts
+   * structuralSharing: (previous, next) => ({ ...next, fetchedAt: previous?.fetchedAt })
+   * ```
+   *
+   * The default walks arrays and plain objects and **keeps the previous reference for every part
+   * that did not change**, so an unchanged row does not re-render. Returning `previous` outright
+   * means the data signal is never written and no consumer is notified at all.
+   *
+   * Existing `equal` composes with this: it short-circuits the walk when the two are the same
+   * value. Do not mutate cached data — the references you are given may be shared.
+   */
+  readonly structuralSharing?: StructuralSharingFn<T>;
+}
+
+/**
+ * Everything `createRequest` accepts, plus the cache options.
+ *
+ * The `key` is what picks this overload: without it the request is uncached and returns
+ * {@link SignalRequest}, with it the request is shared and returns {@link CachedRequest}. One
+ * entry point, two behaviours, no second import.
+ */
+export type CachedRequestOptions<T, TParams = void, TRaw = unknown> =
+  RequestOptions<T, TParams, TRaw> & CacheOptions<T>;
+
 /**
  * @typeParam T       the data type that `run()` resolves with
  * @typeParam R       the type of `response()` (`T` when `initialValue` is given, else `T | undefined`)
  * @typeParam TParams the type of the writable `params` signal
  */
-export interface SignalRequest<T, R = T | undefined, TParams = void> {
+export interface SignalRequest<T, R = T | undefined, TParams = void> extends RequestBase<T, R, TParams> {
+  /** The underlying `httpResource`, for interop (snapshots, chaining, devtools). */
+  readonly resource: HttpResourceRef<T | undefined>;
+}
+
+/**
+ * A handle backed by a shared cache entry.
+ *
+ * Identical to {@link SignalRequest} except in two ways, both forced by the cache:
+ *
+ * - **No `resource`.** There is no `httpResource` behind this handle — the request belongs to the
+ *   cache entry, which is exactly why it can be shared. Reading `.resource` is a type error
+ *   rather than a silent `undefined`, and `ctx.chain` does not apply to this path.
+ * - **Freshness is visible.** `isStale` / `isFetching` / `dataUpdatedAt` only mean something
+ *   against a shared entry, so they exist only here.
+ */
+export interface CachedRequest<T, R = T | undefined, TParams = void> extends RequestBase<T, R, TParams> {
+  /**
+   * Whether the entry owes a fetch by its own clock: no data yet, invalidated, or `staleTime`
+   * elapsed since the last value.
+   *
+   * A plain function, not a signal — freshness depends on the wall clock, and a `computed`
+   * would need a timer to be woken by time passing. Reading it in a template re-evaluates on
+   * every change detection, which is what a staleness badge wants.
+   */
+  isStale(): boolean;
+  /** Whether the entry is on the network right now. A cache hit is not `loading`. */
+  readonly isFetching: Signal<boolean>;
+  /** Epoch ms of the last successful fetch, or `0` if there has never been one. */
+  readonly dataUpdatedAt: Signal<number>;
+  /** How many times this entry has hit the network. Useful for proving a dedup in a test. */
+  readonly fetchCount: Signal<number>;
+}
+
+/**
+ * Everything a request handle has, regardless of whether it is cached.
+ *
+ * Split out so `SignalRequest` and `CachedRequest` differ in exactly one place: what backs them.
+ */
+export interface RequestBase<T, R = T | undefined, TParams = void> {
   /**
    * Writable params signal, **created by the library** from `TParams` — you never build it
    * yourself. Read it in the source, write to it with `params.set()`.
@@ -305,8 +452,6 @@ export interface SignalRequest<T, R = T | undefined, TParams = void> {
   update(updater: (current: R) => T): void;
   /** Stop everything (timers, in-flight request). Happens automatically with the owning injector. */
   destroy(): void;
-  /** The underlying `httpResource`, for interop (snapshots, chaining, devtools). */
-  readonly resource: HttpResourceRef<T | undefined>;
 }
 
 export type RunResult<T> =

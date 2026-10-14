@@ -1,4 +1,5 @@
 import { HttpHeaders, HttpParams, type HttpResourceRequest } from '@angular/common/http';
+import { effect, signal, untracked, type Signal } from '@angular/core';
 import type {
   PathParams,
   QueryParams,
@@ -295,3 +296,39 @@ export function nextRetryDelay(retry: NormalizedRetry | undefined, attempt: numb
 }
 
 export const noop = (): void => {};
+
+/* ------------------------------ shared primitives ------------------------------ */
+
+/** Which `HttpClient` body reader a call uses, chosen by the verb variant you called. */
+export type Kind = 'json' | 'text' | 'blob' | 'arrayBuffer';
+
+/**
+ * `Kind` mapped onto `HttpClient`'s `responseType`.
+ *
+ * The two vocabularies differ only in the casing of `arraybuffer`, and the mapping lives here so
+ * the cached and uncached paths cannot drift on it.
+ */
+export const RESPONSE_TYPE: Record<Kind, 'json' | 'text' | 'blob' | 'arraybuffer'> = {
+  json: 'json',
+  text: 'text',
+  blob: 'blob',
+  arrayBuffer: 'arraybuffer',
+};
+
+/**
+ * Trailing-edge debounce for a signal. Skips the very first value.
+ *
+ * Shared by both request paths so `debounce` behaves identically whether or not the request is
+ * cached — which matters, because a cached request that debounced differently would still fire a
+ * network call on every keystroke, defeating the cache it opted into.
+ */
+export function debouncedSignal<V>(source: Signal<V>, ms: number): Signal<V> {
+  const out = signal<V>(untracked(source));
+  effect((onCleanup) => {
+    const value = source();
+    if (Object.is(value, untracked(out))) return;
+    const timer = setTimeout(() => out.set(value), ms);
+    onCleanup(() => clearTimeout(timer));
+  });
+  return out.asReadonly();
+}

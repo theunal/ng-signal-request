@@ -15,6 +15,9 @@ export type {
   RequestErrorView,
 } from './lib/errors';
 export type {
+  CacheOptions,
+  CachedRequest,
+  CachedRequestOptions,
   MutationOptions,
   MutationStatus,
   OptimisticTarget,
@@ -23,7 +26,9 @@ export type {
   QueryParams,
   QueryPrimitive,
   QueryValue,
+  RefetchOnMount,
   Reloadable,
+  RequestBase,
   RequestConfig,
   RequestOptions,
   RequestSource,
@@ -36,3 +41,26 @@ export type {
   SignalRequest,
   SignalRequestConfig,
 } from './lib/types';
+
+/* -------------------------------------------------------------------------- */
+/*  Cache                                                                     */
+/* -------------------------------------------------------------------------- */
+
+export { QueryCache, type CacheChangeListener } from './lib/cache/query-cache';
+export { CacheEntry, type FetchPlan } from './lib/cache/cache-entry';
+export {
+  formatKey,
+  matchesFilter,
+  normalizeKey,
+  startsWith,
+  type NormalizedKey,
+  type QueryKey,
+  type QueryKeyFactory,
+  type QueryKeyFilter,
+  type QueryKeyPredicate,
+} from './lib/cache/key';
+export {
+  defaultStructuralSharing,
+  resolveStructuralSharing,
+  type StructuralSharingFn,
+} from './lib/cache/structural-sharing';

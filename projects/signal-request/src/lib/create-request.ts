@@ -24,21 +24,32 @@ import { fromEvent, type Subscription } from 'rxjs';
 import { SIGNAL_REQUEST_CONFIG } from './config';
 import { RequestCancelledError, toError, toRequestError } from './errors';
 import type {
+  CachedRequest,
+  CachedRequestOptions,
   RequestOptions,
   RequestSource,
   RequestStatus,
   RunResult,
   SignalRequest,
 } from './types';
+import { buildCachedRequest } from './create-cached-request';
 import {
+  debouncedSignal,
   nextRetryDelay,
   noop,
   normalizeRetry,
   resolveRequest,
   withGlobalHeaders,
+  type Kind,
 } from './utils';
 
-type Kind = 'json' | 'text' | 'blob' | 'arrayBuffer';
+/** Marker for "the source function threw" (e.g. `ctx.chain()` of a resource that is not ready). */
+const THROWN = Symbol('thrown');
+
+interface Deferred<T> {
+  resolve(value: T): void;
+  reject(error: unknown): void;
+}
 
 type ResourceFactory = (
   request: (ctx: ResourceParamsContext) => HttpResourceRequest | undefined,
@@ -61,26 +72,6 @@ const UNAVAILABLE_CTX: ResourceParamsContext = {
     );
   },
 };
-
-/** Marker for "the source function threw" (e.g. `ctx.chain()` of a resource that is not ready). */
-const THROWN = Symbol('thrown');
-
-interface Deferred<T> {
-  resolve(value: T): void;
-  reject(error: unknown): void;
-}
-
-/** Trailing-edge debounce for a signal. Skips the very first value. */
-function debouncedSignal<V>(source: Signal<V>, ms: number): Signal<V> {
-  const out = signal<V>(untracked(source));
-  effect((onCleanup) => {
-    const value = source();
-    if (Object.is(value, untracked(out))) return;
-    const timer = setTimeout(() => out.set(value), ms);
-    onCleanup(() => clearTimeout(timer));
-  });
-  return out.asReadonly();
-}
 
 function buildRequest<T, R, TParams>(
   kind: Kind,
@@ -571,8 +562,20 @@ function buildInContext<T, R, TParams>(
 /**
  * A `createRequest` bound to one response type. The other three are properties, so
  * `createRequest.post.text(...)` is typed exactly like `createRequest.text(...)`.
+ *
+ * The **cached** overloads come first. They are the more specific ones, and TypeScript picks the
+ * first match — so `key` has to be seen before the uncached overload can accept the same options
+ * without it.
  */
 export interface CreateRequestFn<TRaw = unknown, TDefault = unknown> {
+  <T = TDefault, TParams = void>(
+    source: RequestSource<TParams>,
+    options: CachedRequestOptions<T, TParams, TRaw> & { initialValue: NoInfer<T> },
+  ): CachedRequest<T, T, TParams>;
+  <T = TDefault, TParams = void>(
+    source: RequestSource<TParams>,
+    options: CachedRequestOptions<T, TParams, TRaw>,
+  ): CachedRequest<T, T | undefined, TParams>;
   <T = TDefault, TParams = void>(
     source: RequestSource<TParams>,
     options: RequestOptions<T, TParams, TRaw> & { initialValue: NoInfer<T> },
@@ -614,7 +617,11 @@ function named(name: string): () => void {
 
 function createFn(method: string, kind: Kind, caller: () => void) {
   return (source: RequestSource<never>, options: RequestOptions<never, never, unknown> = {}) =>
-    buildRequest<never, never, never>(kind, method, source, options, caller);
+    // The one branch in the whole library that decides how a request is transported. Everything
+    // after it — overloads, verbs, response types — is shared by both paths.
+    (options as { key?: unknown }).key !== undefined
+      ? buildCachedRequest<never, never, never>(kind, method, source, options as never, caller)
+      : buildRequest<never, never, never>(kind, method, source, options, caller);
 }
 
 /**

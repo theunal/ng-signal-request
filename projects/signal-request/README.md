@@ -662,6 +662,24 @@ Three things worth knowing:
   old page entries stay, with their own `gcTime`, because they are usually
   exactly what someone flipping a filter back and forth wants. `maxPages`
   drops a page the same way — it releases the subscription, it does not delete.
+- **`remove()` is a view reset, not a reload.** It drops the accumulation, and
+  because the accumulation is what subscribes to the page entries, nothing
+  re-subscribes to page one afterwards. To start over in one step, **change the
+  key** — a run counter in the key resets the accumulation and leaves the old
+  pages cached:
+
+  ```ts
+  private readonly run = signal(0);
+  readonly feed = createInfiniteRequest<Item>(source, {
+    key: () => ['items', this.run()],
+    // …
+  });
+  restart() { this.run.update((n) => n + 1); }
+  ```
+
+  This is why `reload()` and `remove()` are separate methods rather than one
+  `reset()`: `reload()` re-fetches the pages that are loaded, `remove()` empties
+  the view, and only a key change means "start from the beginning".
 
 This replaces the hand-written recipe that used to live here. That recipe
 needed an `appendedPage` guard because `onSuccess` fires on **every** settle
@@ -1135,6 +1153,102 @@ have rendered fine with one empty panel. It deliberately does not wait for
 `whenStable()` — that never resolves while a request is in flight, which is
 exactly what is being waited for.
 
+## Compared with TanStack Query's Angular adapter
+
+The honest framing first: TanStack Query is the reference implementation of this
+category, a framework-agnostic core with adapters for React, Vue, Svelte, Solid
+and Angular. Adopting it is never a mistake, and if you need what is in the list
+below, it is the one to use. The question this table answers is narrower — what
+you give up when you stay inside Angular.
+
+| Concern | Here | TanStack Query (Angular) |
+| --- | --- | --- |
+| Runtime dependencies | `tslib` and the Angular peers only | `@tanstack/query-core` plus the adapter |
+| Describing a request | The request *is* the options — `url`, `params`, `path`, `headers`, `reportProgress` are routed for you | A `queryFn` you write, plus a `queryKey` |
+| Uncached requests | First class: no `key` means Angular's `httpResource`, its own lifetime, no cache entry | Not a concept — every query has a key and a cache entry |
+| Infinite queries | `createInfiniteRequest`, **one entry per page**, so prefix invalidation and cross-component sharing work on a feed | `injectInfiniteQuery`, one entry per list |
+| `select` | A **method**: `.select(fn, { equal })`, so the handle's own `response()` is untouched | An option on the query observer |
+| Persistence | `/persist`: synchronous storage, a codec, a version, key filters, and a `TransferState` path for SSR | `persistQueryClient`: async storages, `maxAge`, busters, migrations |
+| Devtools | `/devtools`, 2.3 KB gzip, entry list and a few actions, imported in dev only | A mature panel with a query explorer and timings |
+| SSR | `providedIn: 'root'` already means one cache per render, with `TransferState` hydration | A `QueryClient` you create per request in the server handler |
+| Errors | A normalized `RequestError` view with predicates (`isHttp`, `isTimeout`, …), so templates do not need `@switch` | `Error`, narrowed by hand |
+| Framework scope | Angular 22 | React, Vue, Svelte, Solid, Angular |
+
+Where TanStack Query is simply ahead, with no clever reframing:
+
+- **Offline.** `onlineManager`, `networkMode` and mutation resumption are real
+  features with no equivalent here. `refetchOnReconnect` is the extent of it.
+- **Async persistence.** `/persist` storage is synchronous, `localStorage`-shaped.
+  If you need IndexedDB, that is TanStack.
+- **A `queryFn` is more general.** Anything that returns a promise — GraphQL,
+  IndexedDB, a WASM call — is a query there. This library is HTTP only, which is
+  exactly what lets the request stay declarative, but it is a real limit.
+- **Devtools depth**, and an ecosystem: plugins, years of answered questions.
+- **Bounding the cache in space.** TanStack removes entries explicitly;
+  `gcTime` here bounds the cache in *time* only, so a workload with a very large
+  number of distinct keys inside one `gcTime` window is unbounded. A `maxEntries`
+  cap is the obvious follow-up and is not in 0.1.0.
+
+Where this library is ahead, in an Angular-only codebase:
+
+- **No added runtime dependency**, and `httpResource` does the work when there is
+  nothing to share, so the uncached path is the Angular team's code, not ours.
+- **Requests are declarative.** `params` routes itself to the query string,
+  `{id}` in `path` is interpolated, `headers` merge with the global ones, and
+  `reportProgress` finds an XHR backend. None of that is `queryFn` code.
+- **Keyless is a first-class mode.** Most screens have requests nobody shares;
+  you do not have to invent a key for them, or reason about an entry that
+  outlives the component that asked for it.
+- **One handle either way.** `createRequest(url)` and
+  `createRequest(url, { key })` are the same type; the difference is a key.
+- **Per-handle `select` and `equal`**, so each consumer keeps its own projection
+  and its own equality without touching the shared value.
+- **SSR with nothing to remember**: `root` in this library is per render.
+
+Vocabularies, so the two do not fight in your head:
+
+| TanStack Query | Here |
+| --- | --- |
+| `queryKey` | `key` |
+| `queryFn` | the source: a `url`, or `(params, ctx) => url` |
+| `staleTime`, `gcTime`, `refetchOnMount`, `refetchOnWindowFocus`, `refetchOnReconnect` | the same names, the same meanings |
+| `enabled: false` | `params` set to `undefined` — `status() === 'idle'` |
+| `placeholderData` / `keepPreviousData` | `keepPreviousValue` |
+| `initialData`, `initialDataUpdatedAt` | `initialValue`, and `cache().seed(key, value, dataUpdatedAt)` |
+| `queryClient.setQueryData` / `getQueryData` | `client.setData` / `client.getData`, `cache().peek` |
+| `useIsMutating` / `mutationKey` | `client.isMutating(filter)` / `mutationKey` |
+| `onMutate` + manual rollback | `optimistic` + automatic rollback |
+| `hydrate` / `dehydrate` | `hydrate` / `dehydrate` in `/persist` |
+| `queryClient.invalidateQueries` | `client.invalidate`, `invalidates` on a mutation |
+
+## Upgrading from 0.0.x
+
+**Nothing you wrote has to change.** 0.1.0 is additive: the public API of 0.0.4 is
+still there, name for name, and a handle with no `key` behaves exactly as it did.
+That is checked rather than asserted — diffing the export list of `public-api.ts`
+between the `v0.0.4` tag and 0.1.0 gives **0 removed, 40 added**.
+
+What is new is everything on this page from "Cache" onwards: `key`, `QueryCache`,
+`QueryClient`, `invalidates` by key, `mutationKey` / `isMutating`, `optimistic`
+by key, `createInfiniteRequest`, `select()`, `combine()`, `createRequests()`,
+`/devtools` and `/persist`.
+
+Two documented behaviours changed, and both were corrections rather than new
+rules — if you read the old README, this is the diff:
+
+| The old README said | Now |
+| --- | --- |
+| "Requests are **not** deduplicated — two components asking for the same url each fire their own request" | Still true **without a `key`**. Give the request a `key` and one entry is shared, so two components cost one request |
+| "There is no `select` option and no infinite-query primitive. Both are deliberate" | `select()` is a method on every handle; `createInfiniteRequest` exists — see "Infinite scroll" |
+
+One widening: `invalidates` used to accept `Reloadable` handles only. It now
+accepts **keys as well**, told apart by shape (an array is a key, an object with
+`reload` is a handle), so existing arrays-of-handles keep working unchanged.
+
+If you use `@tanstack/angular-query-experimental`, the table in the previous
+section is the migration map; there is no codemod, because the shapes are close
+enough that the translation is mechanical.
+
 ## Behavior notes and limits
 
 - `createRequest` / `createMutation` require an **injection context** (field
@@ -1384,4 +1498,5 @@ re-running a workflow is always safe.
 
 - [npm package](https://www.npmjs.com/package/ng-signal-request)
 - [Issue tracker](https://github.com/theunal/ng-signal-request/issues)
+- [Changelog](https://github.com/theunal/ng-signal-request/blob/main/CHANGELOG.md)
 - [License (MIT)](./LICENSE)

@@ -1,16 +1,17 @@
 import { ChangeDetectionStrategy, Component, signal } from '@angular/core';
 
+import { CacheSection } from './sections/cache-section';
 import { FormSection } from './sections/form-section';
 import { InfiniteSection } from './sections/infinite-section';
 import { ListSection } from './sections/list-section';
 import { RetrySection } from './sections/retry-section';
 
-type Tab = 'list' | 'form' | 'retry' | 'infinite';
+type Tab = 'list' | 'form' | 'retry' | 'infinite' | 'cache';
 
 @Component({
   selector: 'demo-root',
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [ListSection, FormSection, RetrySection, InfiniteSection],
+  imports: [ListSection, FormSection, RetrySection, InfiniteSection, CacheSection],
   template: `
     <header>
       <h1>ng-signal-request</h1>
@@ -53,6 +54,9 @@ type Tab = 'list' | 'form' | 'retry' | 'infinite';
         @case ('infinite') {
           <demo-infinite />
         }
+        @case ('cache') {
+          <demo-cache />
+        }
       }
     </main>
   `,
@@ -62,7 +66,8 @@ export class AppComponent {
     { id: 'list', label: 'Liste & params' },
     { id: 'form', label: 'Form & mutation' },
     { id: 'retry', label: 'Retry, debounce, polling' },
-    { id: 'infinite', label: 'Sonsuz liste & optimistic' },
+    { id: 'infinite', label: 'Sonsuz liste' },
+    { id: 'cache', label: 'Paylaşılan önbellek' },
   ];
 
   protected readonly tab = signal<Tab>('list');

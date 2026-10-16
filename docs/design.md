@@ -1,6 +1,9 @@
 # Design — server state for `ng-signal-request`
 
-Status: proposal for v0.1.0. Written before any of the cache code exists.
+Status: **shipped in v0.1.0.** Written before any of the cache code existed, so it
+is a plan; each phase's notes at the end of this document record what changed while
+building it and why. Where the plan and the code disagree, the code is right and the
+disagreement is a bug — two of them are written down as such.
 
 ## 1. Where we are today
 

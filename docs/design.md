@@ -234,24 +234,36 @@ Hard rule: **a handle with no `key` runs today's code path, unchanged.**
 
 ### SSR is a genuine correctness problem
 
-A root-scoped `QueryCache` on the server is shared across all requests in the
-process. Two users rendering `/users` at the same moment would share one entry
-and potentially see each other's data.
+The risk: a cache that lives for the process rather than for one render would let
+two users rendering `/users` at the same moment share an entry and see each
+other's data.
 
-Options, and why the first:
+The Phase 1 answer, which Phase 7 then leaned on, is that **`providedIn: 'root'`
+already means "per application instance"**: `root` resolves to the root
+environment injector of *one* `bootstrapApplication` / `renderApplication` call,
+and Angular's SSR calls `renderApplication` per request. So the cache is isolated
+per server request by construction, with no factory, no `REQUEST` token and
+nothing for the user to remember to provide. Phase 7 hydration is therefore
+per-instance too, which is exactly what `TransferState` gives: a per-request
+bucket of state.
 
-1. **Per-application-instance cache.** `provideSignalRequest` already returns
-   `EnvironmentProviders`; the cache is created per `ApplicationRef`. Phase 7
-   hydrates it from `TransferState` at bootstrap, so per-instance is also what
-   hydration needs. Requires handing the cache to `bootstrapApplication`'s
-   environment injector — which is exactly what an `EnvironmentProviders`
-   factory already does.
-2. Request-scoped cache via `REQUEST` injection token — correct, but Angular
-   only provides `REQUEST` inside a route handler, and a root service cannot see
-   it.
-3. Document that SSR users must provide a fresh cache per request — a footgun.
+Options considered:
 
-Going with 1, in Phase 1, so the SSR story is not retrofitted in Phase 7.
+1. **`providedIn: 'root'`.** Chosen — the framework's own per-application scope.
+2. **Per-instance cache via an `EnvironmentProviders` factory.** Would also work,
+   and was the original plan. Rejected only because it is strictly more code for
+   the same scope: a factory that builds a `QueryCache` still has to register it
+   under the same token in the same injector.
+3. **Request-scoped cache via the `REQUEST` token.** Correct, but Angular only
+   provides `REQUEST` inside a route handler, and a root service cannot see it.
+4. **Documenting "provide a fresh cache per request".** A footgun, and unnecessary
+   given (1).
+
+The residual sharp edge is the one that cannot be designed away: this holds
+because the server renders per request. A server that reused one
+`bootstrapApplication` instance across requests (some caching proxies, a custom
+`express` handler that hoists the injector) would share the cache, and the fix
+there is in the host, not in this library. Documented rather than hidden.
 
 ## 8. Rejected alternatives
 
@@ -278,12 +290,20 @@ Going with 1, in Phase 1, so the SSR story is not retrofitted in Phase 7.
 - **No linter or formatter exists.** The repo has only `.editorconfig`;
   `pnpm typecheck` (strict TS + `strictTemplates`) is the entire quality gate.
   Adding ESLint + Prettier is a real change to the toolchain and a supply-chain
-  addition; it is not in v0.1.0 scope. Recommended as v0.1.1.
-- **CI does not build the demo app**, so template type errors in demo sections are
-  not caught. A `pnpm build:demo` step should be added to the workflow; cheap and
-  clearly right.
-- **Two READMEs are kept byte-identical by hand.** This has already caused one
-  committed drift. A `cmp` check belongs in CI.
+  addition; it is not in v0.1.0 scope. Recommended as v0.1.1. **Still open.**
+- ~~**CI does not build the demo app**~~ — closed in Phase 6:
+  `.github/workflows/ci.yml` runs `build:demo` and `check:dist` on every push and
+  PR, so template type errors in the demo sections are caught.
+- ~~**Two READMEs are kept byte-identical by hand**~~ — closed in Phase 6:
+  `scripts/check-dist.mjs` compares them and fails the build on drift.
+- ~~**The published secondary entry points were never typechecked**~~
+  (`tsconfig.lib.json` only listed `src/**`) — closed in Phase 6 by widening
+  `include` and moving `rootDir` to `"."`.
+- ~~**No coverage threshold**, so "≥90% on new code" was a claim rather than a
+  gate~~ — closed in Phase 8; see below.
+- **`maxEntries` is still not implemented.** `gcTime` bounds the cache in *time*,
+  and a workload with a very large number of distinct keys within one `gcTime`
+  window is unbounded in *space*. Documented as a limit; a follow-up.
 
 ## 10. Phase plan
 
@@ -526,3 +546,71 @@ Rejected: putting `dehydrate`/`hydrate` on `QueryCache` itself. They are seriali
 what a codec is, what a version means, how old is too old — and the cache is the one class in the
 library that deliberately has no options. Keeping them in `/persist` also keeps the snapshot code,
 the codec and the storage probing in the bundle that only persistence users download.
+### Phase 8 notes - the documented sharp edges, and a coverage gate
+
+This phase had two halves: make the claims in the docs true again, and make the
+quality bar enforceable instead of aspirational.
+
+**Two README claims had become false, and stale documentation is worse than
+missing documentation** because it is trusted. "Requests are not deduplicated -
+two components asking for the same url each fire their own request" was only ever
+true of a *keyless* request, and stopped being the headline truth the moment keys
+shipped. And "there is no `select` option and no infinite-query primitive" had been
+sitting there since v0.0.4 while Phases 4 and 5 added exactly those two things. The
+general lesson, recorded here because it will happen again: a feature phase is not
+finished until the limits list has been re-read, since that list is where the
+previous phase's absences were written down.
+
+**One sharp edge was in the design doc rather than the README.** The section
+headed "SSR is a genuine correctness problem" still described an
+`EnvironmentProviders` factory as the chosen remedy, because that was the plan
+before Phase 1 established that `providedIn: 'root'` already *is* per-application
+instance. The section now says what the code does, and names the residual risk that
+no design can remove - it holds because the server renders per request, so a host
+that reuses one injector across requests would share the cache. That is a fact
+about the host, and it is written down rather than papered over.
+
+**The one behavioural sharp edge in this phase needed no new code**, because it had
+already been found and fixed while writing the Phase 7 tests: `Persister.destroy()`
+now flushes an open debounce window *before* it stops listening, so the destroy
+order between `createPersister` and `providePersistedCache` no longer matters. See
+the Phase 7 notes. The rest of this phase is tests, honest thresholds and honest
+prose, which is the correct outcome for a phase whose job was to reconcile the
+documentation with the library rather than to add to it.
+
+Coverage went from 88.7% statements to 95.8% by testing what was *unexercised*
+rather than what was convenient, and every gap that turned up was real API surface:
+`ctx.chain()`'s explanatory failure on a cached handle, the params-cleared
+"disabled" state (`run()` rejects, `tryRun()` reports, `reload()` returns `false`),
+`timeout`/`headers` reaching the shared request, a throwing hook going to Angular's
+`ErrorHandler` instead of failing the fetch, `set`/`update` writing through,
+`refetchOnWindowFocus`, the poll timer re-arming, a cached retry, a throwing
+`parse`, seeding into an entry that already exists, `QueryCache.clear()`, key
+normalization for `bigint`/`Date`/`NaN`/`-0` and the function-segment error, and
+the whole of `createInfiniteRequest`'s remaining surface (`select`, `cancel`,
+`reload` guards, `entryFor`, `isFetchingPreviousPage`, `reload`, an envelope page
+passing through unflattened, `onSuccess`/`onError`).
+
+Two testing facts were learned the hard way and are now in the README:
+
+- **A cached retry needs `setInterval` faked as well as `setTimeout`.** RxJS'
+  async scheduler drives a delayed retry through an interval, so faking only
+  `setTimeout` leaves the retry on a real timer - the test then fails with "found
+  no matching request" rather than with anything that mentions timers.
+- **The Angular testing backend does not forget an aborted request.** `verify()`
+  still reports it, so cancellation is asserted with `request.cancelled`, exactly
+  as the Phase 1 abort tests already did.
+
+Thresholds are now wired into `angular.json` (`90` statements, `85` branches, `90`
+functions, `90` lines) and `pnpm test` runs v8 coverage, so the gate is active
+locally and in CI without a second script. The numbers are deliberately *below*
+the current ones (95.8 / 90.0 / 96.3 / 97.8): a threshold set at the current
+figure would fail on any harmless refactor that touched one branch, which trains
+people to move the number rather than to test. The gate was also verified by
+raising `lines` to 99 and confirming the run fails with
+`ERROR: Coverage for lines (97.84%) does not meet global threshold (99%)` - a
+threshold that has never been seen to fire is a threshold nobody should trust.
+
+Deliberately not done: a `maxEntries` cap on the cache (still deferred, still
+honestly documented as a gap), and ESLint + Prettier (proposed for v0.1.1, since
+adding a linter is a toolchain and supply-chain change rather than a fix).

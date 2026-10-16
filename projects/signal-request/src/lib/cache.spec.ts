@@ -1,6 +1,6 @@
 import { computed as computedSignal, signal, type Signal } from '@angular/core';
 import { afterEach, describe, expect, expectTypeOf, it, vi } from 'vitest';
-import { createRequest } from '../public-api';
+import { createRequest, RequestCancelledError } from '../public-api';
 import type { CachedRequest, SignalRequest } from '../public-api';
 import { advanceClock, cache, settle, setup } from '../../testing/testing';
 
@@ -614,5 +614,350 @@ describe('cached handle — types', () => {
     // @ts-expect-error — a params option is required once TParams is declared.
     const missing = () => createRequest<User[], Query>('/users', { key: () => ['users'], initialValue: [] });
     expectTypeOf(missing).toBeFunction();
+  });
+});
+
+describe('cached request — the rest of the surface', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it('retries a keyed request through the shared entry, and clears the attempt on success', async () => {
+    // `setInterval` as well as `setTimeout`: rxjs' async scheduler drives a delayed retry through an
+    // interval, so faking only `setTimeout` would leave the retry sitting on a real timer.
+    vi.useFakeTimers({
+      toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'],
+    });
+    const { http, create } = setup();
+    const users = create(() =>
+      createRequest<User[]>('/users', { key: () => ['users'], retry: { count: 1, delay: 100 } }),
+    );
+    await settle();
+
+    http.expectOne('/users').flush({}, { status: 503, statusText: 'Unavailable' });
+    await settle();
+
+    // The keyed path has its own fetch loop, so the retry has to be proved here rather than assumed
+    // from the uncached one. While a retry is pending the failure is masked: `status()` is still
+    // loading and `error()` is empty, which is the difference between "trying again" and "failed".
+    expect(users.retryAttempt()).toBe(1);
+    expect(users.error()).toBeUndefined();
+    expect(users.status()).toBe('loading');
+
+    await vi.advanceTimersByTimeAsync(100);
+    await settle();
+    http.expectOne('/users').flush([{ id: 1, name: 'Ada' }]);
+    await settle();
+
+    expect(users.response()).toEqual([{ id: 1, name: 'Ada' }]);
+    expect(users.retryAttempt()).toBe(0);
+    users.destroy();
+  });
+
+  it('fails the call when parse throws, and still reports the status line', async () => {
+    const { http, create } = setup();
+    const users = create(() =>
+      createRequest<User[]>('/users', {
+        key: () => ['users'],
+        retry: 0,
+        parse: () => {
+          throw new Error('bad shape');
+        },
+      }),
+    );
+    await settle();
+    http.expectOne('/users').flush([{ id: 1, name: 'Ada' }]);
+    await settle();
+
+    // A 200 with an unusable body is a failure, not a success with `undefined` in it.
+    expect(users.status()).toBe('error');
+    expect(users.error()?.message).toContain('bad shape');
+    // The status code was recorded from the response before the parse ran, so the UI can still say
+    // "200, but the body did not fit" instead of losing that.
+    expect(users.statusCode()).toBe(200);
+    users.destroy();
+  });
+
+  it('seed() writes straight into an entry that already exists', async () => {
+    const { http, create } = setup();
+    const users = create(() =>
+      createRequest<User[]>('/users', { key: () => ['users'], staleTime: Number.POSITIVE_INFINITY }),
+    );
+    await settle();
+    http.expectOne('/users').flush([{ id: 1, name: 'Ada' }]);
+    await settle();
+
+    cache().seed(['users'], [{ id: 2, name: 'Grace' }], 1234);
+
+    expect(users.response()).toEqual([{ id: 2, name: 'Grace' }]);
+    // The original fetch time comes with the value, so `staleTime` measures real age rather than
+    // treating a restore as a fresh response.
+    expect(cache().peek(['users'])?.dataUpdatedAt()).toBe(1234);
+    // And it is not a *local* write: nothing calls this a user edit.
+    expect(cache().peek(['users'])?.local()).toBe(false);
+    http.expectNone(() => true);
+    users.destroy();
+  });
+
+  it('clear() empties the cache', async () => {
+    const { http, create } = setup();
+    const users = create(() => createRequest<User[]>('/users', { key: () => ['users'] }));
+    await settle();
+    http.expectOne('/users').flush([{ id: 1, name: 'Ada' }]);
+    await settle();
+    expect(cache().size).toBe(1);
+
+    cache().clear();
+
+    expect(cache().size).toBe(0);
+    expect(cache().peek(['users'])).toBeUndefined();
+    users.destroy();
+  });
+
+  it('markInvalidated() marks without fetching, and a mount refetches the marked entry', async () => {
+    const { http, create } = setup();
+    const options = { key: () => ['users'], staleTime: 60_000 };
+    const first = create(() => createRequest<User[]>('/users', options));
+    await settle();
+    http.expectOne('/users').flush([{ id: 1, name: 'Ada' }]);
+    await settle();
+    expect(first.isStale()).toBe(false);
+
+    expect(cache().markInvalidated(['users'])).toBe(1);
+
+    // Marking is deliberately not fetching: batching the refetches is `QueryClient`'s job, and the
+    // store has no idea when a refetch is due.
+    http.expectNone(() => true);
+    expect(first.isStale()).toBe(true);
+    expect(cache().markInvalidated(['nowhere'])).toBe(0);
+
+    // A handle arriving now is what drives the fetch.
+    const second = create(() => createRequest<User[]>('/users', options));
+    await settle();
+    http.expectOne('/users').flush([{ id: 2, name: 'Grace' }]);
+    await settle();
+
+    expect(second.response()).toEqual([{ id: 2, name: 'Grace' }]);
+    first.destroy();
+    second.destroy();
+  });
+});
+
+describe('cached request — options and the disabled state', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it('applies timeout and headers to the shared request', async () => {
+    const { http, create } = setup();
+    const users = create(() =>
+      createRequest<User[]>('/users', {
+        key: () => ['users'],
+        headers: { 'X-Token': 'abc' },
+        timeout: 4_000,
+      }),
+    );
+    await settle();
+
+    const request = http.expectOne('/users');
+    // Per-request headers still win, and they are on the one request every subscriber shares.
+    expect(request.request.headers.get('X-Token')).toBe('abc');
+    request.flush([{ id: 1, name: 'Ada' }]);
+    await settle();
+
+    expect(users.response()).toEqual([{ id: 1, name: 'Ada' }]);
+    users.destroy();
+  });
+
+  it('is disabled — not merely idle — when its params are cleared', async () => {
+    const { http, create } = setup();
+    const users = create(() =>
+      createRequest<User[], string>((name) => `/users/${name}`, {
+        key: () => ['users'],
+        params: 'core',
+        initialValue: [],
+      }),
+    );
+    await settle();
+    http.expectOne('/users/core').flush([{ id: 1, name: 'Ada' }]);
+    await settle();
+
+    users.params.set(undefined as unknown as string);
+    await settle();
+
+    // "Disabled" is a distinct answer from "loading": nothing is on the wire, and the caller is
+    // told so rather than being handed a promise that never settles.
+    http.expectNone(() => true);
+    expect(users.status()).toBe('idle');
+    expect(users.response()).toEqual([]);
+    await expect(users.run()).rejects.toBeInstanceOf(RequestCancelledError);
+    expect((await users.tryRun()).ok).toBe(false);
+    expect(users.reload()).toBe(false);
+
+    // And it comes back to life when the params do.
+    users.params.set('core');
+    await settle();
+    http.expectOne('/users/core').flush([{ id: 2, name: 'Grace' }]);
+    await settle();
+    expect(users.response()).toEqual([{ id: 2, name: 'Grace' }]);
+
+    users.destroy();
+  });
+
+  it('reports a normalized requestError, and success/loading agree with the status', async () => {
+    const { http, create } = setup();
+    const users = create(() => createRequest<User[]>('/users', { key: () => ['users'], retry: 0 }));
+    await settle();
+
+    expect(users.initialLoading()).toBe(true);
+    expect(users.loading()).toBe(true);
+    expect(users.success()).toBe(false);
+
+    http.expectOne('/users').flush({}, { status: 404, statusText: 'Not Found' });
+    await settle();
+
+    expect(users.status()).toBe('error');
+    expect(users.requestError()?.kind).toBe('http');
+    expect(users.loading()).toBe(false);
+    expect(users.initialLoading()).toBe(false);
+    expect(users.success()).toBe(false);
+    users.destroy();
+  });
+
+  it('refetches on the same entry when only the request changed', async () => {
+    const page = signal(1);
+    const { http, create } = setup();
+    const users = create(() =>
+      createRequest<User[]>(() => `/users?page=${page()}`, {
+        key: () => ['users'],
+        // Fresh, so only a changed *request* can be what causes the refetch.
+        staleTime: Number.POSITIVE_INFINITY,
+      }),
+    );
+    await settle();
+    http.expectOne('/users?page=1').flush([{ id: 1, name: 'Ada' }]);
+    await settle();
+
+    page.set(2);
+    await settle();
+
+    http.expectOne('/users?page=2').flush([{ id: 2, name: 'Grace' }]);
+    await settle();
+
+    expect(users.response()).toEqual([{ id: 2, name: 'Grace' }]);
+    users.destroy();
+  });
+
+  it('routes a throwing hook to the error handler instead of failing the fetch', async () => {
+    const onConsoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const { http, create } = setup();
+    const users = create(() =>
+      createRequest<User[]>('/users', {
+        key: () => ['users'],
+        onSuccess: () => {
+          throw new Error('hook blew up');
+        },
+      }),
+    );
+    await settle();
+    http.expectOne('/users').flush([{ id: 1, name: 'Ada' }]);
+    await settle();
+
+    // A broken hook is reported through Angular's `ErrorHandler`, not by rejecting the request:
+    // the data arrived, and the component should get it.
+    expect(onConsoleError).toHaveBeenCalled();
+    expect(users.response()).toEqual([{ id: 1, name: 'Ada' }]);
+    expect(users.status()).toBe('resolved');
+    users.destroy();
+  });
+
+  it('set() and update() write through to the shared entry', async () => {
+    const before = [{ id: 1, name: 'Ada' }];
+    const { http, create } = setup();
+    const users = create(() =>
+      createRequest<User[]>('/users', { key: () => ['users'], initialValue: [] as User[] }),
+    );
+    await settle();
+    http.expectOne('/users').flush(before);
+    await settle();
+
+    users.set([{ id: 2, name: 'Grace' }]);
+    expect(users.response()).toEqual([{ id: 2, name: 'Grace' }]);
+    // A local write is what makes a mutation's optimistic update visible before the server answers,
+    // so `status()` has to say so rather than claiming a resolved fetch.
+    expect(users.status()).toBe('local');
+
+    users.update((current) => [...current, { id: 3, name: 'Alan' }]);
+    expect(users.response()).toHaveLength(2);
+    users.destroy();
+  });
+
+  it('refetches when the window regains focus', async () => {
+    const { http, create } = setup();
+    const users = create(() =>
+      createRequest<User[]>('/users', {
+        key: () => ['users'],
+        refetchOnWindowFocus: true,
+        staleTime: Number.POSITIVE_INFINITY,
+      }),
+    );
+    await settle();
+    http.expectOne('/users').flush([{ id: 1, name: 'Ada' }]);
+    await settle();
+
+    window.dispatchEvent(new Event('focus'));
+    await settle();
+
+    http.expectOne('/users').flush([{ id: 2, name: 'Grace' }]);
+    await settle();
+
+    expect(users.response()).toEqual([{ id: 2, name: 'Grace' }]);
+    users.destroy();
+  });
+
+  it('re-arms its poll timer after every settle', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const { http, create } = setup();
+    const users = create(() =>
+      createRequest<User[]>('/users', { key: () => ['users'], pollInterval: 1_000 }),
+    );
+    await settle();
+    http.expectOne('/users').flush([{ id: 1, name: 'Ada' }]);
+    await settle();
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    await settle();
+    http.expectOne('/users').flush([{ id: 2, name: 'Grace' }]);
+    await settle();
+
+    expect(users.response()).toEqual([{ id: 2, name: 'Grace' }]);
+    users.destroy();
+  });
+
+  it('ctx.chain() fails fast, because a cached request has no httpResource to chain against', async () => {
+    const { create } = setup();
+    interface ParamsContext {
+      chain: (resource: unknown) => unknown;
+    }
+    let captured: ParamsContext | undefined;
+    const users = create(() =>
+      createRequest<string[], void>(
+        (_params, ctx) => {
+          captured = ctx as unknown as ParamsContext;
+          return '/users';
+        },
+        { key: () => ['users'] },
+      ),
+    );
+    await settle();
+
+    // A cached entry is shared and outlives the handle, so chaining it to one component's resource
+    // is not merely unimplemented - it would be wrong. The message says which, and why.
+    expect(() => captured!.chain(undefined)).toThrowError(
+      /ctx\.chain\(\) is not available on a cached request/,
+    );
+    users.destroy();
   });
 });

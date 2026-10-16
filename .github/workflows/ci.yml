@@ -30,7 +30,7 @@ jobs:
       - name: Typecheck
         run: pnpm run typecheck
 
-      - name: Test
+      - name: Test (v8 coverage; the thresholds in angular.json are enforced)
         run: pnpm run test
 
       - name: Build the library

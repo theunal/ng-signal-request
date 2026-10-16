@@ -4,6 +4,7 @@ import {
   createInfiniteRequest,
   createRequest,
   QueryClient,
+  RequestCancelledError,
   type FlattenedPages,
   type InfiniteRequest,
   type InfiniteRequestOptions,
@@ -464,5 +465,284 @@ describe('createInfiniteRequest — types', () => {
         getNextPageParam: () => undefined,
       }),
     ).toThrowError(/createInfiniteRequest/);
+  });
+});
+
+describe('createInfiniteRequest — the rest of the surface', () => {
+  it('is idle before the first page, loading while it is on the network, and error when it fails', async () => {
+    const { http, create } = setup();
+    const feed = create(() =>
+      createInfiniteRequest<Item[], number>(
+        (page) => ({ url: '/items', params: { page } }),
+        feedOptions({ retry: 0 }),
+      ),
+    );
+
+    // Nothing is loaded yet: there are no page params until the accumulation effect has run, which
+    // is why `idle` and `loading` are distinguishable at all.
+    expect(feed.status()).toBe('idle');
+    expect(feed.loading()).toBe(false);
+    expect(feed.requestError()).toBeUndefined();
+
+    await settle();
+    expect(feed.status()).toBe('loading');
+    expect(feed.loading()).toBe(true);
+
+    http.expectOne('/items?page=0').flush({ message: 'down' }, { status: 500, statusText: 'Error' });
+    await settle();
+
+    expect(feed.status()).toBe('error');
+    expect(feed.loading()).toBe(false);
+    expect(feed.error()).toBeDefined();
+    expect(feed.requestError()?.kind).toBe('http');
+    // `hasData` is false - a failed page contributes no data - and the param list is exhausted, so
+    // there is no page that could be in flight.
+    expect(feed.pages()).toEqual([]);
+    expect(feed.isFetchingNextPage()).toBe(false);
+
+    feed.destroy();
+  });
+
+  it('reports a previous page in flight, and when the pages were last fetched', async () => {
+    const { http, create } = setup();
+    const feed = create(() =>
+      createInfiniteRequest<Item[], number>(
+        (page) => ({ url: '/items', params: { page } }),
+        feedOptions({
+          getPreviousPageParam: (_first, _all, param) => param - 1,
+        }),
+      ),
+    );
+    await settle();
+    http.expectOne('/items?page=0').flush(pages[0]);
+    await settle();
+
+    expect(feed.dataUpdatedAt()).toBeGreaterThan(0);
+    expect(feed.isFetchingPreviousPage()).toBe(false);
+
+    // `isFetchingPreviousPage` is about the page *before the first one*, which is a different entry
+    // from the one `isFetchingNextPage` watches - the reason both exist rather than one `isFetching`.
+    const back = feed.fetchPreviousPage();
+    await settle();
+    expect(feed.pageParams()).toEqual([-1, 0]);
+    expect(feed.isFetchingPreviousPage()).toBe(true);
+    expect(feed.isFetchingNextPage()).toBe(false);
+
+    http.expectOne('/items?page=-1').flush(pages[1]);
+    await settle();
+    await back;
+
+    expect(feed.isFetchingPreviousPage()).toBe(false);
+    expect(feed.pages()).toEqual([pages[1], pages[0]]);
+    feed.destroy();
+  });
+
+  it('select() projects the flattened pages', async () => {
+    const { http, create } = setup();
+    const feed = create(() =>
+      createInfiniteRequest<Item[], number>(
+        (page) => ({ url: '/items', params: { page } }),
+        feedOptions(),
+      ),
+    );
+    const ids = feed.select((items) => items.map((item) => item.id));
+
+    await settle();
+    http.expectOne('/items?page=0').flush(pages[0]);
+    await settle();
+
+    // The selector sees `response()`, not the page array: `FlattenedPages<Item[]>` is `Item[]`.
+    expect(ids()).toEqual([1, 2]);
+    feed.destroy();
+  });
+
+  it('entryFor() reaches the page entry, so one page can be inspected without the accumulation', async () => {
+    const { http, create } = setup();
+    const feed = create(() =>
+      createInfiniteRequest<Item[], number>(
+        (page) => ({ url: '/items', params: { page } }),
+        feedOptions(),
+      ),
+    );
+    await settle();
+    http.expectOne('/items?page=0').flush(pages[0]);
+    await settle();
+
+    expect(feed.entryFor(0)?.data()).toEqual(pages[0]);
+    // A param that was never loaded has no entry, and asking does not create one.
+    expect(feed.entryFor(99)).toBeUndefined();
+    feed.destroy();
+  });
+
+  it('cancel() aborts every page in flight and leaves the loaded pages alone', async () => {
+    const { http, create } = setup();
+    const feed = create(() =>
+      createInfiniteRequest<Item[], number>(
+        (page) => ({ url: '/items', params: { page } }),
+        feedOptions(),
+      ),
+    );
+    await settle();
+    http.expectOne('/items?page=0').flush(pages[0]);
+    await settle();
+
+    feed.reload();
+    await settle();
+    const request = http.expectOne('/items?page=0');
+    expect(feed.isFetching()).toBe(true);
+
+    feed.cancel();
+    await settle();
+
+    // The request is aborted, not left dangling: `run()`/`reload()` hand out promises that settle.
+    expect(request.cancelled).toBe(true);
+    expect(feed.isFetching()).toBe(false);
+    // Cancelling is not removing: the page is still on screen while it is refetched.
+    expect(feed.pages()).toEqual([pages[0]]);
+
+    feed.destroy();
+  });
+
+  it('reload() is false with nothing loaded, and after destroy', async () => {
+    const { http, create } = setup();
+    const feed = create(() =>
+      createInfiniteRequest<Item[], number>(
+        (page) => ({ url: '/items', params: { page } }),
+        feedOptions(),
+      ),
+    );
+    await settle();
+    http.expectOne('/items?page=0').flush(pages[0]);
+    await settle();
+
+    // The initial page param is part of the accumulation from the start, so the only way to have
+    // nothing loaded is to drop it.
+    feed.remove();
+    await settle();
+    expect(feed.reload()).toBe(false);
+
+    feed.destroy();
+    expect(feed.reload()).toBe(false);
+  });
+
+  it('destroy() is idempotent, and fetching after it rejects instead of hanging', async () => {
+    const { http, create } = setup();
+    const feed = create(() =>
+      createInfiniteRequest<Item[], number>(
+        (page) => ({ url: '/items', params: { page } }),
+        feedOptions(),
+      ),
+    );
+    await settle();
+    http.expectOne('/items?page=0').flush(pages[0]);
+    await settle();
+
+    feed.destroy();
+    expect(() => feed.destroy()).not.toThrow();
+
+    // A caller awaiting a promise that will never settle is worse than a rejection: the rejection
+    // can be shown, the hang cannot.
+    await expect(feed.fetchNextPage()).rejects.toBeInstanceOf(RequestCancelledError);
+    await expect(feed.fetchPreviousPage()).rejects.toBeInstanceOf(RequestCancelledError);
+  });
+
+  it('passes a non-array page through instead of guessing which field is the list', async () => {
+    interface Envelope {
+      items: Item[];
+      cursor: string | null;
+    }
+    const { http, create } = setup();
+    const feed = create(() =>
+      createInfiniteRequest<Envelope, string>(
+        (cursor) => ({ url: '/feed', params: { cursor } }),
+        {
+          key: () => ['feed'],
+          initialPageParam: '',
+          getNextPageParam: (last) => last?.cursor ?? undefined,
+        },
+      ),
+    );
+    await settle();
+    http.expectOne((request) => request.url === '/feed').flush({
+      items: [{ id: 1 }],
+      cursor: null,
+    });
+    await settle();
+
+    expect(feed.response()).toEqual([{ items: [{ id: 1 }], cursor: null }]);
+    feed.destroy();
+  });
+
+  it('runs onSuccess with the accumulated pages and onError with the failure', async () => {
+    const { http, create } = setup();
+    const succeeded: Array<readonly Item[][]> = [];
+    const failed: Error[] = [];
+    const feed = create(() =>
+      createInfiniteRequest<Item[], number>(
+        (page) => ({ url: '/items', params: { page } }),
+        feedOptions({
+          retry: 0,
+          onSuccess: (loaded) => succeeded.push([...loaded]),
+          onError: (error) => failed.push(error),
+        }),
+      ),
+    );
+    await settle();
+    http.expectOne('/items?page=0').flush(pages[0]);
+    await settle();
+
+    // The callback receives the accumulated *pages*, not the flattened items - the same array
+    // `pages()` returns, so a hook can log which pages exist without unpacking them.
+    expect(succeeded).toEqual([[pages[0]]]);
+    expect(failed).toEqual([]);
+
+    feed.reload();
+    await settle();
+    http.expectOne('/items?page=0').flush({}, { status: 500, statusText: 'Error' });
+    await settle();
+
+    expect(failed).toHaveLength(1);
+    feed.destroy();
+  });
+
+  it('refetches every loaded page when the window regains focus', async () => {
+    const { http, create } = setup();
+    const feed = create(() =>
+      createInfiniteRequest<Item[], number>(
+        (page) => ({ url: '/items', params: { page } }),
+        feedOptions({ refetchOnWindowFocus: true }),
+      ),
+    );
+    await settle();
+    http.expectOne('/items?page=0').flush(pages[0]);
+    await settle();
+
+    window.dispatchEvent(new Event('focus'));
+    await settle();
+
+    // Every loaded page, not just the last one - the whole accumulation is revalidated.
+    http.expectOne('/items?page=0').flush(pages[0]);
+    await settle();
+
+    expect(feed.status()).toBe('resolved');
+    feed.destroy();
+  });
+
+  it('applies headers and timeout to every page request', async () => {
+    const { http, create } = setup();
+    const feed = create(() =>
+      createInfiniteRequest<Item[], number>(
+        (page) => ({ url: '/items', params: { page } }),
+        feedOptions({ headers: { 'X-Token': 'abc' }, timeout: 5_000 }),
+      ),
+    );
+    await settle();
+
+    const request = http.expectOne('/items?page=0');
+    expect(request.request.headers.get('X-Token')).toBe('abc');
+    request.flush(pages[0]);
+    await settle();
+
+    feed.destroy();
   });
 });

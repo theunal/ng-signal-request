@@ -1025,6 +1025,21 @@ await vi.advanceTimersByTimeAsync(1000);
 await settle();
 ```
 
+On the **cached** path, add `'setInterval'` and `'clearInterval'` to `toFake`:
+RxJS' async scheduler drives a delayed retry through an interval, so faking only
+`setTimeout` leaves the retry sitting on a real timer, and the test hangs waiting
+for a request that never arrives.
+
+## Coverage
+
+`pnpm test` runs v8 coverage and fails if the totals drop below the thresholds in
+`angular.json` (`90%` statements, `85%` branches, `90%` functions, `90%` lines).
+Current totals are ~96% statements, ~90% branches, ~97% functions and ~98% lines,
+so the distance to the threshold is the regression margin rather than the target.
+The gate is verified rather than trusted: raising a threshold above the current
+number fails the run with
+`ERROR: Coverage for lines (…) does not meet global threshold`.
+
 ## Persistence across reloads
 
 `ng-signal-request/persist` writes the cache to storage and reads it back, so a
@@ -1159,14 +1174,14 @@ exactly what is being waited for.
   report progress. `progress()` is therefore only ever populated with
   `provideHttpClient(withXhr())` — on `createRequest` via `reportProgress: true`
   in the source, on `createMutation` via the same flag in the builder.
-- Requests are **not** deduplicated. Two components asking for the same url each
-  fire their own request — that is what makes the lifetime rule above possible.
-- There is no shared cache by default. Give a request a `key` and it becomes
-  cached — see "Cache" above. Without one, the limits below still apply.
-
-- There is no `select` option and no infinite-query primitive. Both are
-  deliberate — see "Transforming the response" and "Infinite scroll" under
-  Common patterns for what to use instead and why.
+- A request **without** a `key` is not deduplicated and has no shared cache: two
+  components asking for the same url each fire their own request, which is what
+  makes the lifetime rule above possible. Giving the request a `key` is the
+  opt-in to sharing — see "Cache" above.
+- Everything else that used to be missing is now here: `select()` is a method on
+  every handle (see "Transforming the response"), `createInfiniteRequest` is the
+  infinite-query primitive (see "Infinite scroll"), `combine` / `createRequests`
+  aggregate handles, and `/persist` restores the cache across a reload.
 
 ## API
 

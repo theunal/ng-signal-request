@@ -3,14 +3,18 @@
 {
   "extends": "../../tsconfig.json",
   "compilerOptions": {
-    "rootDir": "src",
+    // `..` relative to the tsconfig, so the shared helpers under `testing/` and the `devtools/`
+    // entry point are type-checked too — they are published, and neither is reachable from `src/`.
+    "rootDir": ".",
     "outDir": "../../out-tsc/lib",
     "declaration": true,
     "declarationMap": true,
     "types": []
   },
   "include": [
-    "src/**/*.ts"
+    "src/**/*.ts",
+    "testing/**/*.ts",
+    "devtools/**/*.ts"
   ],
   "exclude": [
     "**/*.spec.ts"

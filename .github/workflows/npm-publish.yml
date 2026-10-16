@@ -72,6 +72,16 @@ jobs:
         env:
           NODE_OPTIONS: '--max_old_space_size=6144'
 
+      # The demo is an ordinary production build, which makes it the honest place to prove that
+      # an application that never imports `ng-signal-request/devtools` does not ship it, and that
+      # the two README copies have not drifted apart. See `scripts/check-dist.mjs`.
+      - name: Build the demo and check the distribution
+        run: |
+          pnpm run build:demo
+          pnpm run check:dist
+        env:
+          NODE_OPTIONS: '--max_old_space_size=6144'
+
       - name: Publish to npm
         run: |
           VERSION='${{ steps.version.outputs.VERSION }}'

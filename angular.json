@@ -20,12 +20,18 @@
             "index": "projects/demo/src/index.html",
             "browser": "projects/demo/src/main.ts",
             "outputPath": "dist/demo",
-            "styles": ["projects/demo/src/styles.css"]
+            "styles": [
+              "projects/demo/src/styles.css"
+            ]
           },
           "configurations": {
             "production": {
               "budgets": [
-                { "type": "initial", "maximumWarning": "500kB", "maximumError": "1MB" }
+                {
+                  "type": "initial",
+                  "maximumWarning": "500kB",
+                  "maximumError": "1MB"
+                }
               ],
               "outputHashing": "all"
             },
@@ -40,8 +46,12 @@
         "serve": {
           "builder": "@angular/build:dev-server",
           "configurations": {
-            "production": { "buildTarget": "demo:build:production" },
-            "development": { "buildTarget": "demo:build:development" }
+            "production": {
+              "buildTarget": "demo:build:production"
+            },
+            "development": {
+              "buildTarget": "demo:build:development"
+            }
           },
           "defaultConfiguration": "development"
         }
@@ -68,7 +78,11 @@
         "test": {
           "builder": "@angular/build:unit-test",
           "options": {
-            "tsConfig": "projects/signal-request/tsconfig.spec.json"
+            "tsConfig": "projects/signal-request/tsconfig.spec.json",
+            "include": [
+              "**/*.spec.ts",
+              "../devtools/**/*.spec.ts"
+            ]
           }
         }
       }

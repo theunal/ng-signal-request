@@ -10,7 +10,9 @@ Resource API does the work; on top of it this package adds Promise-based
 triggering with `run()`, method variants (`createRequest.post`,
 `createMutation.put`, …), retry, debounce, polling, `keepPreviousValue`,
 `baseUrl` / `:path` parameters, reactive global headers, normalized errors, a
-separate `createMutation` for writes, and a `/testing` entry point.
+`key`-based shared cache with invalidation, mutations with optimistic writes, a
+`select()` projection, `combine` / `createRequests`, and separate `/testing` and
+`/devtools` entry points.
 
 ```ts
 import {
@@ -1136,6 +1138,62 @@ await settle();
 
 `setup` · `settle` · `respond` · `fail` · `isHttpError`
 
+### `ng-signal-request/devtools`
+
+`QueryDevtools` · `DevtoolsPanel` · `snapshotEntries` · `DevtoolsEntry` · `DevtoolsStatus` · `SnapshotOptions`
+
+## Devtools
+
+A separate entry point, and that is the feature rather than packaging detail:
+
+```ts
+import { QueryDevtools, DevtoolsPanel } from 'ng-signal-request/devtools';
+
+// in a dev-only shell component
+@Component({ imports: [DevtoolsPanel], template: `<ngsr-devtools />` })
+export class DevShell {}
+```
+
+`DevtoolsPanel` is a small, unstyled table of the cache, fixed to the bottom
+right and collapsed to a `cache 3` button until clicked. `QueryDevtools` is the
+headless part:
+
+| Member | |
+| --- | --- |
+| `entries()` | live snapshot of every entry: key, status, observers, fetch count, age, retry, error |
+| `count()` / `fetching()` | totals, without building the full snapshot |
+| `isOpen()` · `open()` · `close()` · `toggle()` | panel state |
+| `log()` | `console.table` of the current snapshot |
+| `logChanges()` | logs one line per change — `+ key`, `- key`, a fetch, a status move — until the returned function is called |
+
+`snapshotEntries(cache, { filter?, now? })` builds a snapshot without the
+service, for a test or a custom panel.
+
+**It costs nothing when unused.** The entry point is its own bundle and the
+primary entry point never imports it, so an application that does not write the
+import above ships none of it — there is no production flag to get wrong and no
+branch that could be mis-trimmed. The library's CI checks this by building the
+demo and asserting that none of the devtools strings reach the output.
+
+```ts
+// what the check is, in one line
+expect(demoBundle).not.toContain('no cached queries');
+```
+
+Two things the panel reports that deserve a word:
+
+- **`observers` can lag by one change-detection pass.** Subscription
+  bookkeeping is not a signal, because a template should not be able to depend
+  on it. Everything else in the table is exact.
+- **`'ready'` is not the same as fresh.** Real staleness depends on the
+  `staleTime` of whichever handle is asking, which is a per-handle decision the
+  entry deliberately does not know, so a panel claiming to judge it would be
+  guessing. `'invalidated'` is reported exactly, and `age` is the honest
+  substitute.
+
+The snapshot is a `computed` over the entries' own signals — no polling, no
+interval to forget to clear.
+
 ## Demo
 
 `projects/demo` is a runnable Angular app that exercises every feature against
@@ -1159,14 +1217,38 @@ Requires Node 22+ and pnpm 12 (see `packageManager`).
 pnpm install
 pnpm build       # build the library into dist/signal-request
 pnpm test        # unit tests (vitest, headless)
-pnpm typecheck   # tsc --noEmit over the lib, spec and demo projects
+pnpm typecheck   # tsc --noEmit over the lib, spec, devtools and demo projects
 pnpm watch       # rebuild on change (development configuration)
+pnpm verify      # typecheck + test + build + build:demo + check:dist
+pnpm check:dist  # post-build assertions (see "Bundle" below)
 ```
 
 > On Windows, `packageManager` pins a pnpm version newer than the one on
 > `PATH`. If `pnpm install` fails with *"is not recognized as an internal or
-> external command"*, that pnpm self-management shim is broken — run the
+> external command"*, that pnpm self-management shim is broken - run the
 > command through Corepack instead: `corepack pnpm install`.
+
+## Bundle
+
+The library ships as three entry points, and the split is load-bearing rather
+than cosmetic. Sizes are the gzipped ESM bundles from a production build:
+
+| Entry point | Size | When it is in an application |
+| --- | --- | --- |
+| `ng-signal-request` | **15.6 KB** | always |
+| `ng-signal-request/devtools` | 2.3 KB | only if imported |
+| `ng-signal-request/testing` | 0.8 KB | only in tests |
+
+The primary entry point has no imports from the other two and `sideEffects` is
+`false`, so an application that never writes the import never links the code.
+`pnpm check:dist` asserts this against a real production build: the demo is
+compiled, and the output is required to contain core strings and none of the
+`/devtools` ones. The reason to test it rather than trust it is that "separate
+entry point" is an intention and a bundle scan is a fact.
+
+Budgets, so growth is a decision rather than a surprise: the primary entry point
+is not allowed past **20 KB gzip**, and any new secondary entry point past
+**15 KB gzip**. `pnpm check:dist` prints the numbers on every run.
 
 ## Releasing
 

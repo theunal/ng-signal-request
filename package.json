@@ -8,7 +8,9 @@
     "test": "ng test",
     "typecheck": "tsc -p projects/signal-request/tsconfig.lib.json --noEmit && tsc -p projects/signal-request/tsconfig.spec.json --noEmit && tsc -p projects/demo/tsconfig.json --noEmit",
     "start": "ng serve demo",
-    "build:demo": "ng build demo"
+    "build:demo": "ng build demo",
+    "check:dist": "node scripts/check-dist.mjs",
+    "verify": "pnpm run typecheck && pnpm run test && pnpm run build && pnpm run build:demo && pnpm run check:dist"
   },
   "private": true,
   "packageManager": "pnpm@12.6.0+sha512.3ef68f951cb111ac204b4a5a16f0b2ddf0da56a96e0413e81d855d9f0b55ef926714709028e1cd00c405c2c5fb7b9e8ec4dc46777c805d0373c2f2ff00fd20ec",

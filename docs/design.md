@@ -392,3 +392,53 @@ to a list of twenty touches one handle. Identity defaults to `Object.is` on the 
 list of ids — with a `key` escape hatch for objects, since two structurally equal objects are two
 identities. Reordering is the case that makes this visible: the handles come back in the new order
 *as the same objects*, and nothing is refetched to achieve it.
+
+### Phase 6 notes — `/devtools`
+
+The plan said "`/devtools` entry point", and the acceptance criterion was that it be *absent* from
+a production bundle that does not use it. The packaging is therefore the feature: a secondary
+ng-packagr entry point, `sideEffects: false`, and — the part that actually matters — nothing in
+`src/` importing it. There is no `isDevMode()` branch inside the library, and therefore no branch
+that can be mis-trimmed or that a bundler has to be clever about. An application that never writes
+`import … from 'ng-signal-request/devtools'` links none of it, which was checked rather than
+assumed: the demo builds clean, `dist/demo/browser/main-*.js` contains `RequestCancelled` and
+`httpResource` (so it does include the library) and contains none of `ngsr-devtools`,
+`no cached queries`, `[ngsr] +`, `snapshotEntries` or `QueryDevtools`.
+
+**A real bug came out of this phase, and it is worth recording because it would have shipped.** The
+first implementation of `QueryDevtools` kept a `version` signal and bumped it from a
+`cache.subscribeChanges` listener, so that adding or collecting an entry would invalidate the
+`entries` computed. It throws immediately:
+
+```
+NG0600: Writing to signals is not allowed in a `computed`. Signal: 'version'.
+  at QueryCache.notify (query-cache.ts:141)
+  at QueryCache.resolve (query-cache.ts:55)
+  at create-cached-request.ts:173
+  at producerRecomputeValue (computed.ts:147)
+```
+
+`QueryCache.resolve` calls `notify()` **synchronously**, and `resolve` is called from a handle's key
+`computed` — that is how a keyed handle builds its entry. So the listener ran inside a computed
+evaluation. This is not a corner case: it is the first keyed request of any application that has
+injected `QueryDevtools`. The fix is to coalesce the write into a microtask, which moves it outside
+any evaluation; the cost is that `entries()` can be one microtask behind, which is what every other
+signal in an application already is.
+
+The general lesson is worth keeping in mind for the rest of the cache work: **`subscribeChanges`
+listeners run synchronously inside `resolve`, which can be inside a computed, so a listener may
+read the world but may not write a signal.**
+
+Two deliberate omissions in what the panel reports, both because the alternative would be a lie:
+
+- It does not judge freshness. Real staleness is a function of the `staleTime` of whichever handle
+  is asking, which is a per-handle decision the entry does not know, so `'ready'` means "has data
+  and nothing invalidated it" and the exact fact reported is `invalidated`.
+- `observers` is a plain getter rather than a signal, because subscription bookkeeping is not
+  something a template should be able to depend on. The consequence is a column that can lag one
+  change-detection pass, which is stated in the README rather than hidden.
+
+`tsconfig.lib.json` was also widened from `src/**/*.ts` to include `testing/**/*.ts` and
+`devtools/**/*.ts` (with `rootDir` moved to `"."`). Both are published entry points that nothing in
+`src/` reaches, so until now `pnpm typecheck` never compiled them — a gap that predates this phase
+and that the `/devtools` entry point would have doubled.

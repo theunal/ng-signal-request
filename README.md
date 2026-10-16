@@ -308,6 +308,7 @@ await this.save.run({ path: { id: 1 }, body: { name: 'Ada' } });
 | --- | --- |
 | `params()` / `params.set()` | the writable params signal (see above) |
 | `response()` | latest response (never `undefined` when `initialValue` is given) |
+| `select(fn, options?)` | memoized projection of `response()` — the `select` TanStack has as an option (see "Transforming the response") |
 | `success()` | `true` once the last settled attempt succeeded; `false` while idle, loading or retrying |
 | `loading()` | loading / reloading / waiting for the next retry |
 | `initialLoading()` | only the first load, or one caused by changed params — not reload/refresh/retry |
@@ -867,73 +868,116 @@ this.add = createMutation<Todo[], Todo>(
 );
 ```
 
-### Infinite scroll
+### Aggregating several requests
 
-There is no `createInfiniteRequest`, and that is a deliberate omission rather
-than a gap waiting to be filled: a dedicated primitive would have to decide
-`getNextPageParam`'s shape, when a param change resets the pages, and whether
-reloading page 3 replaces it — all of which are specific to your API. The three
-primitives you already have cover the common case:
+`combine` merges handles into one aggregate. The trivial case is a one-line
+`computed`; the reason it exists is the parts that are not — `loading`, `error`,
+`status` and `reload` across a set, which every caller would otherwise write by
+hand and get subtly wrong.
 
 ```ts
-readonly page = signal(1);
-readonly feed = createRequest<Post[], { page: number; perPage: number }>(
-  { url: '/posts' },
-  {
-    params: { page: 1, perPage: 10 },
-    initialValue: [],
-    keepPreviousValue: true,              // old pages stay on screen while the next loads
-    onSuccess: (incoming) => this.append(incoming),
-  },
-);
+readonly user  = createRequest<User>('/me');
+readonly posts = createRequest<Post[]>('/posts');
 
-private appendedPage = 0;
-private append(incoming: Post[]) {
-  if (this.appendedPage === this.page()) return;   // a reload must not duplicate the page
-  this.appendedPage = this.page();
-  this.feed.update((all) => [...all, ...incoming]); // response() *is* the accumulator
-}
-
-loadMore() {
-  this.page.update((p) => p + 1);
-  this.feed.params.set({ page: this.page(), perPage: 10 });
-}
+readonly view = combine({ user: this.user, posts: this.posts });
+view.response();  // { user: User | undefined; posts: Post[] | undefined }
+view.loading();   // any of them
+view.error();     // the first failure, in source order
+view.status();    // 'loading' | 'reloading' | 'resolved' | 'error' | 'idle'
+view.reload();    // all of them
 ```
 
-`keepPreviousValue` is load-bearing here, not cosmetic: without it `response()`
-would drop back to `initialValue` the moment the next page starts loading, and
-the whole list would blink out. `update()` writes into the same `response()`,
-so there is no second signal to keep in sync.
+An array is combined positionally:
 
-The `appendedPage` guard is the honest price. `onSuccess` fires on **every**
-settle, including reloads, so without it `feed.reload()` would append page 3 a
-second time. `useInfiniteQuery` gets this for free from its per-page cache;
-here you get one line and an explanation.
+```ts
+readonly rows = combine(ids.map((id) => this.rowFor(id)));  // readonly (Row | undefined)[]
+```
+
+Three things the aggregate gets right that a hand-written one usually does not:
+
+- **`reload()` asks every source.** `some()`-style short-circuiting reports
+  success while leaving half the screen stale.
+- **`error()` is the *first* failure in source order**, and it goes away when
+  that failure does. Five queries on one screen should not mean five toasts.
+- **`status()` is `'reloading'` only when nothing is *missing*.** One source
+  still empty means the screen is not ready, however much of it is filled in.
+
+`combine` does not own the handles you give it — their injectors destroy them —
+so it has no `destroy()`.
+
+### `createRequests` — a request per item
+
+For a list that grows and shrinks, `createRequests` keeps one handle per item:
+
+```ts
+readonly rows = createRequests(
+  () => this.selectedIds(),
+  (id) => createRequest<Row[]>(() => ({ url: `/rows/${id}` }), { key: () => ['rows', id] }),
+);
+
+rows.response();  // readonly (Row[] | undefined)[], in item order
+rows.handles();   // the per-item handles
+rows.loading();   // any of them
+```
+
+A handle is built once per item **identity** and reused, so adding one id to a
+list of twenty touches one handle, not twenty — with the cache, tearing down and
+re-subscribing every entry on every keystroke would drop each one to zero
+observers and immediately rejoin it. Identity is `Object.is` on the item, which
+is right for the usual list of ids; pass `key` when the items are objects whose
+identity is not stable:
+
+```ts
+createRequests(() => this.rows(), (row) => …, { key: (row) => row.id })
+```
+
+Items that leave the list have their handle destroyed, which releases the cache
+entry's subscription. The entry itself survives, with its own `gcTime` — an item
+scrolling out of a selection is not a reason to evict data.
 
 ### Transforming the response
 
-There is deliberately **no `select` option**, even though TanStack Query has
-one. Making the selector's *return* type inferrable requires a type parameter
-with no default, which means `createRequest<User[]>(…)` stops being callable
-unless you also name the selection type — and giving that parameter a default
-makes TypeScript prefer the default over the selector, so the natural
-`select: (data) => data.map(…)` stops compiling. A plain `computed` does the
-same job, memoizes identically, and infers perfectly:
+Use `.select()`. It is a **method** rather than an option, and the reason is a
+hard TypeScript limitation rather than taste: there is no *partial type-argument
+inference*. Naming one type argument makes every other type parameter fall back
+to its default instead of being inferred:
 
 ```ts
-readonly users = createRequest<User[]>('/users', { initialValue: [] });
-readonly active = computed(() => this.users.response().filter((u) => !u.banned));
+createRequest<User[]>(url, { select: (users) => users.length })  // never infers `number`
 ```
 
-`active()` recomputes only when `response()` does, so the template re-renders
-only when the *filtered* result changes. Pair it with `equal` when the
-transformation is expensive and the payload is large:
+Naming `User[]` there has already switched inference off, and a selector type
+parameter with no default is not a way out — TypeScript then insists you supply
+it (`Expected 3 type arguments, but got 1`). A method has neither problem, since
+`S` is the only type parameter in play at that call site:
 
 ```ts
-createRequest<Item[]>('/items', {
-  equal: (a, b) => a.length === b.length && a.every((v, i) => v === b[i]),
-});
+readonly users  = createRequest<User[]>('/users', { initialValue: [] });
+readonly names  = this.users.select((users) => users.map((u) => u.name));
+// Signal<string[] | undefined>
 ```
+
+The selector is only called when there is data — `undefined` in, `undefined` out
+— so it never needs an "is there anything yet" guard.
+
+A bare `computed(() => this.users.response()?.map((u) => u.name))` already
+memoizes and already stops propagation when the result is `Object.is`-equal. What
+it cannot do is use a *different* equality, which is exactly what a selector
+returning a rebuilt object needs:
+
+```ts
+readonly view = this.user.select(
+  (u) => ({ label: u.name, tone: u.banned ? 'bad' : 'ok' }),
+  { equal: (a, b) => a.label === b.label && a.tone === b.tone },
+);
+```
+
+Without that `equal`, a response that changed some unrelated field still wakes
+every consumer, because `{ label, tone }` is a new object every time.
+
+`select` also exists on `createInfiniteRequest`, where it always has something to
+project — an empty accumulation is `[]`, not `undefined`, so its result is never
+`undefined` either.
 
 ## Testing
 
@@ -1038,6 +1082,9 @@ await settle();
 | `createRequest.<verb>.text` / `.blob` / `.arrayBuffer` | Non-JSON body variants |
 | `createMutation(builder, options?)` | Imperative `POST` write with its own lifecycle |
 | `createMutation.post` / `.put` / `.patch` / `.delete` | Verb variants (`.post` is the bare call) |
+| `createInfiniteRequest(source, options?)` | Paginated query; one cache entry per page, with `createInfiniteRequest.<verb>` and `.<verb>.text` / `.blob` / `.arrayBuffer` variants |
+| `combine(sources)` | Aggregates handles: `response` · `loading` · `status` · `error` · `reload` · `cancel` |
+| `createRequests(items, build, options?)` | One handle per list item, reconciled by identity |
 | `provideSignalRequest(config \| () => config)` | Global `baseUrl`, `retry`, `headers`, `onError`, `onSuccess`. The factory form runs in an injection context |
 | `SIGNAL_REQUEST_CONFIG` | The `InjectionToken` behind it |
 | `RequestCancelledError` | Thrown by `run()` on cancel / disable / destroy |
@@ -1054,6 +1101,12 @@ await settle();
 | `RequestErrorKind` / `RequestErrorOf<K>` | The five kinds, and one union member by name |
 | `RequestErrorContext` | `{ timeout? }` used for timeout classification |
 | `SignalRequest<T, R, TParams>` | Query handle |
+| `CachedRequest<T, R, TParams>` | Query handle backed by a shared cache entry |
+| `InfiniteRequest<TPage, TParam>` | Paginated handle |
+| `FlattenedPages<TPage>` | What `response()` yields: items for an array page, pages otherwise |
+| `Combinable<T>` / `Combined<T>` / `RequestSet<T>` | The shapes `combine` and `createRequests` accept and return |
+| `ResponsesOf<TSources>` | Record→responses mapping used by `combine` |
+| `SelectOptions<S>` | `{ equal }` for `select()` |
 | `SignalMutation<T, TArgs>` | Mutation handle |
 | `RequestOptions<T, TParams, TRaw>` / `MutationOptions<T, TArgs>` | Option shapes |
 | `CreateRequest` / `CreateRequestFn` | The callable variants and their shapes |

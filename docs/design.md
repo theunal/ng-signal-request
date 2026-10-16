@@ -330,3 +330,65 @@ passes on one page — the accumulated list only breaks on the *second* page, be
 does not change `loadedParams()`, so nothing re-invalidates the computed. The reads must be tracked.
 `isFetchingNextPage()` had the same shape. Both are tracked now, and the tests that caught them are
 in `infinite-request.spec.ts`.
+
+### Phase 5 notes — `select`, `combine`, `createRequests`
+
+**`select` is a method, and the reason is measurable.** The brief listed this phase as "`select`
+that does not break inference", and the v0.0.x code already claimed a `select` *option* was
+impossible without saying what actually broke. So the claim was tested rather than repeated. Two
+probes:
+
+```ts
+// Probe 1: a selector type parameter WITH a default.
+declare function f<T, S = T>(src: () => T, opts: { select?: (data: T) => S }): { response: S };
+
+f<{ name: string; age: number }>(() => ({ name: 'x', age: 1 }), { select: (u) => u.name });
+//                    ^ error TS2322: Type 'string' is not assignable to type '{ name: string; age: number }'
+```
+
+```ts
+// Probe 2: the same, with NO default, to see whether inference is merely overridden by one.
+declare function g<T, U, V>(src: () => T, opts: { other?: U; select: (d: T) => V }): { r: V };
+
+g<{ n: string }>(() => ({ n: 'x' }), { select: (d) => d.n });
+//                    ^ error TS2558: Expected 3 type arguments, but got 1
+```
+
+Both fail for one reason, and it is worth naming because it is a TypeScript limitation rather than
+a quirk of this library: **TypeScript has no partial type-argument inference.** Naming even one type
+argument turns inference off for every other type parameter — those fall back to their defaults, and
+a type parameter with no default is not a fallback, it is an error. Since `createRequest<T>(…)` is
+the whole idiom of this library, a `select` option can never be typed well. The probe files were
+temporary; the two snippets above are the record.
+
+`handle.select(…)` has none of that: `S` is the only type parameter in play at the call site,
+nothing is named ahead of it, and `expectTypeOf` pins the inference in `select.spec.ts`.
+
+It also earns its place beyond ergonomics. `computed(() => handle.response()?.map(…))` already
+memoizes and already stops propagation when the result is `Object.is`-equal, so the *only* thing a
+method can add is a different equality — which is exactly what a selector that rebuilds an object
+needs. `select.spec.ts` tests both halves: with `equal` a response that changed an unrelated field
+does not wake the consumer, and without it, it does.
+
+**`combine` returns an aggregate, not a `computed`.** The trivial case is one line either way. What
+a hand-written aggregate tends to get wrong, and what the tests therefore pin:
+
+- `reload()` over `Array.prototype.some()` reports success while leaving every source after the
+  first `true` stale. The aggregate asks all of them, deliberately not short-circuiting.
+- `error()` is the **first** failure in source order, and it clears when that failure does — an
+  aggregate that keeps reporting an arbitrary member's last error is worse than no aggregate.
+- `status()` is `'reloading'` only when **nothing is missing**. A half-loaded screen is `'loading'`
+  however much of it is filled in; `'reloading'` would tell a template it is ready to show.
+
+`Combinable` is structural, so `SignalRequest` and `CachedRequest` both satisfy it without a union,
+and a stub in a test satisfies it too — which is how the aggregate's own logic is tested without an
+HTTP backend.
+
+**`createRequests` reconciles by identity, not by rebuilding.** The obvious implementation is
+`combine(items().map(build))`, and it is wrong for the same reason a `key` is needed at all: every
+list change would destroy and rebuild every handle, so every keyed entry would drop to zero
+observers and immediately rejoin. One handle is built per item identity and reused, so adding one id
+to a list of twenty touches one handle. Identity defaults to `Object.is` on the item — right for a
+list of ids — with a `key` escape hatch for objects, since two structurally equal objects are two
+identities. Reordering is the case that makes this visible: the handles come back in the new order
+*as the same objects*, and nothing is refetched to achieve it.

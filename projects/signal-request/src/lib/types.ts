@@ -247,13 +247,19 @@ export interface ParamsOption<TParams> {
  * - `createRequest<Item[], ListQuery>((p) => …, { params: { … } })` — `TParams` given, so the
  *   request is driven by the params signal and `params.set()` re-fires it.
  *
- * > There is deliberately no `select` option here, even though TanStack Query has one. Making the
- * > selector's **return** type inferrable requires a type parameter with no default, which in
- * > turn means callers cannot pass `createRequest<T>(…)` without also naming the selection type
- * > — and giving that parameter a default makes TypeScript prefer the default over the selector,
- * > so the natural `select: (data) => data.map(…)` stops compiling. A plain `computed` over
- * > `response()` does the same job, memoizes identically, and infers its type perfectly. See
- * > "Transforming the response" in the README.
+ * > There is deliberately no `select` option here, even though TanStack Query has one. The
+ * > mechanism is worth stating because it is a hard TypeScript limitation rather than a preference:
+ * > **there is no partial type-argument inference**. Naming even one type argument makes every
+ * > other type parameter fall back to its default instead of being inferred, so
+ * > `createRequest<User>(url, { select: (u) => u.name })` can never infer the selection type —
+ * > naming `User` has already switched inference off. A selector type parameter with **no** default
+ * > is not a way out either: TypeScript then insists it be supplied
+ * > (`Expected 3 type arguments, but got 1`). Both probes are recorded in `docs/design.md`.
+ * >
+ * > The equivalent is `handle.select(…)`, a **method**. `S` is the only type parameter in play at
+ * > that call site, nothing was named ahead of it, and it infers perfectly. It also carries an
+ * > `equal` for selections that rebuild an object on every response. See "Transforming the
+ * > response" in the README.
  */
 export type RequestOptions<T, TParams = void, TRaw = unknown> =
   RequestOptionsBase<T, TParams, TRaw> & ([TParams] extends [void] ? unknown : ParamsOption<TParams>);
@@ -340,6 +346,18 @@ export interface CacheOptions<T> {
 export type CachedRequestOptions<T, TParams = void, TRaw = unknown> =
   RequestOptions<T, TParams, TRaw> & CacheOptions<T>;
 
+/** Options for {@link RequestBase.select}. */
+export interface SelectOptions<S> {
+  /**
+   * Custom equality for the selected value.
+   *
+   * The default is Angular's `Object.is`, which is right for a primitive and wrong for an object
+   * a selector rebuilds on every fetch (`select: (u) => ({ label: u.name })` would notify on every
+   * response even when nothing on screen changed). Supply a shallow comparison there.
+   */
+  equal?: ValueEqualityFn<S>;
+}
+
 /**
  * @typeParam T       the data type that `run()` resolves with
  * @typeParam R       the type of `response()` (`T` when `initialValue` is given, else `T | undefined`)
@@ -395,6 +413,40 @@ export interface RequestBase<T, R = T | undefined, TParams = void> {
   readonly params: WritableSignal<TParams | undefined>;
   /** Latest response. */
   readonly response: Signal<R>;
+  /**
+   * A memoized projection of the response — the `select` TanStack Query has as an option, as a
+   * method instead.
+   *
+   * ```ts
+   * readonly names = this.users.select((users) => users.map((u) => u.name));
+   * // Signal<string[] | undefined>
+   * ```
+   *
+   * ## Why a method and not an option
+   *
+   * A short answer would be "an option breaks type inference", which is true but does not explain
+   * anything. The mechanism is worth stating, because it is a hard TypeScript limitation rather
+   * than a defect in this library: **there is no partial type-argument inference.** Naming even one
+   * type argument makes every other type parameter fall back to its default instead of being
+   * inferred. So `createRequest<User>(url, { select: (u) => u.name })` can never infer the
+   * selection type — naming `User` has already switched inference off — and a selector type
+   * parameter with no default is not a way out either: TypeScript then demands it be supplied
+   * (`Expected 3 type arguments, but got 1`). Both probes are recorded in `docs/design.md`.
+   *
+   * A method has neither problem. `S` is the only type parameter in play at the call site, nothing
+   * was named ahead of it, and it infers perfectly.
+   *
+   * ## What it adds over writing a `computed`
+   *
+   * A bare `computed(() => this.users.response()?.map((u) => u.name))` already memoizes and already
+   * stops propagation when the result is `Object.is`-equal. What it cannot do is use a *different*
+   * equality, which is exactly what a selector returning a rebuilt object needs. It also gives the
+   * pattern one documented home instead of a paragraph in the README.
+   *
+   * The selector is only called when there is data — `undefined` in, `undefined` out — so it never
+   * has to guard against an empty response.
+   */
+  select<S>(selector: (data: T) => S, options?: SelectOptions<S>): Signal<S | undefined>;
   /** Set only after all retries are exhausted. */
   readonly error: Signal<Error | undefined>;
   /**
@@ -577,6 +629,14 @@ export interface InfiniteRequest<TPage, TParam> {
   readonly isFetchingPreviousPage: Signal<boolean>;
   /** `undefined` before the first page arrives. */
   readonly dataUpdatedAt: Signal<number>;
+  /**
+   * A memoized projection of the flattened pages. See `RequestBase.select` for why this is a
+   * method rather than an option.
+   *
+   * Unlike the other handles' `select`, the result is never `undefined`: an empty accumulation is
+   * an empty array, not an absent one, so a selector over it always has something to work with.
+   */
+  select<S>(selector: (data: FlattenedPages<TPage>) => S, options?: SelectOptions<S>): Signal<S>;
   /** Whether `getNextPageParam` says there is a page after the last one. */
   hasNextPage(): boolean;
   /** Whether `getPreviousPageParam` says there is a page before the first one. */
@@ -595,6 +655,73 @@ export interface InfiniteRequest<TPage, TParam> {
   destroy(): void;
   /** The cache entry for one page. Mostly for devtools and tests. */
   readonly entryFor: (param: TParam) => CacheEntry<TPage> | undefined;
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Aggregation (combine / createRequests)                                    */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The minimum a handle has to offer to be aggregated by {@link combine}.
+ *
+ * Structural rather than a union of the handle types, so `SignalRequest` and `CachedRequest` both
+ * qualify without `combine` knowing which is which — and so a stub in a test qualifies too.
+ */
+export interface Combinable<T> {
+  readonly response: Signal<T | undefined>;
+  readonly error: Signal<Error | undefined>;
+  readonly loading: Signal<boolean>;
+  reload(): boolean;
+  cancel(): void;
+  destroy(): void;
+}
+
+/** The per-source response type of a record passed to {@link combine}. */
+export type ResponsesOf<TSources> = {
+  readonly [K in keyof TSources]: TSources[K] extends Combinable<infer T> ? T | undefined : never;
+};
+
+/**
+ * What `combine` returns.
+ *
+ * Deliberately no `destroy()`: `combine` does not own the handles it is given — their injectors
+ * do. {@link RequestSet}, which *does* own the handles it builds, has one.
+ */
+export interface Combined<T> {
+  /** Every source's response, in the shape they were combined in. */
+  readonly response: Signal<T>;
+  /** `true` while **any** source is loading. */
+  readonly loading: Signal<boolean>;
+  /**
+   * `'error'` if any source failed, `'loading'` / `'reloading'` while any is in flight,
+   * `'resolved'` once at least one has data, `'idle'` before any has.
+   *
+   * An aggregate has to answer "is this screen ready?", which is not the same question as
+   * "what is the slowest source doing".
+   */
+  readonly status: Signal<RequestStatus>;
+  /** The **first** failure in source order. Five queries on one screen should not mean five toasts. */
+  readonly error: Signal<Error | undefined>;
+  /** Reloads every source. `true` if any of them accepted. */
+  reload(): boolean;
+  /** Aborts every source. */
+  cancel(): void;
+}
+
+/**
+ * The dynamic set {@link createRequests} returns: one handle per item, kept in step with the list.
+ */
+export interface RequestSet<T> extends Combined<readonly (T | undefined)[]> {
+  /**
+   * The per-item handles, in item order.
+   *
+   * A handle is built once per item identity and reused across list changes, so reordering a list
+   * does not re-subscribe every entry. Identity is `Object.is` on the item by default; pass
+   * `key` to `createRequests` when the items are objects whose identity is not stable.
+   */
+  readonly handles: Signal<readonly Combinable<T>[]>;
+  /** Destroys every live handle. Happens automatically with the owning injector. */
+  destroy(): void;
 }
 
 /* -------------------------------------------------------------------------- */

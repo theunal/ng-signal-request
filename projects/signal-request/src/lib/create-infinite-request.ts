@@ -11,6 +11,7 @@ import {
   runInInjectionContext,
   signal,
   untracked,
+  type Signal,
 } from '@angular/core';
 import { fromEvent, type Subscription } from 'rxjs';
 import type { HttpResourceRequest } from '@angular/common/http';
@@ -26,7 +27,9 @@ import type {
   InfiniteRequestOptions,
   RequestStatus,
   RequestValue,
+  SelectOptions,
 } from './types';
+import { projectFrom } from './select';
 import {
   debouncedSignal,
   normalizeRetry,
@@ -420,9 +423,18 @@ function buildInfiniteInContext<TPage, TParam>(
     });
   }
 
+  /** The flattened pages, computed once so `response` and `select` share the same node. */
+  const flattened = computed<FlattenedPages<TPage>>(
+    () => flatten(pages()) as FlattenedPages<TPage>,
+  );
+
   return {
     pages,
-    response: computed(() => flatten(pages()) as FlattenedPages<TPage>),
+    response: flattened,
+    select: <S>(
+      selector: (data: FlattenedPages<TPage>) => S,
+      opts?: SelectOptions<S>,
+    ): Signal<S> => projectFrom<FlattenedPages<TPage>, S>(flattened, selector, opts?.equal),
     pageParams: loadedParams,
     loading: computed(() => isFetching()),
     status,

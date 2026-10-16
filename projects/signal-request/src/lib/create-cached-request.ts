@@ -29,7 +29,9 @@ import type {
   RequestSource,
   RequestStatus,
   RunResult,
+  SelectOptions,
 } from './types';
+import { selectFrom } from './select';
 import {
   debouncedSignal,
   nextRetryDelay,
@@ -413,6 +415,8 @@ function buildCachedInContext<T, R, TParams>(
   return {
     params,
     response,
+    select: <S>(selector: (data: T) => S, opts?: SelectOptions<S>): Signal<S | undefined> =>
+      selectFrom<T, S>(response as Signal<T | undefined>, selector, opts?.equal),
     error,
     requestError,
     success,

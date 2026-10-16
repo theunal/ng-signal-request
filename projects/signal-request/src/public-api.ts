@@ -11,6 +11,7 @@ export {
 } from './lib/create-infinite-request';
 export { createMutation } from './lib/create-mutation';
 export type { CreateMutation } from './lib/create-mutation';
+export { combine, createRequests } from './lib/combine';
 export { RequestCancelledError, requestErrorOf, toError, toRequestError } from './lib/errors';
 export type {
   RequestError,
@@ -23,6 +24,8 @@ export type {
   CacheOptions,
   CachedRequest,
   CachedRequestOptions,
+  Combinable,
+  Combined,
   FlattenedPages,
   InfiniteRequest,
   InfiniteRequestOptions,
@@ -40,12 +43,15 @@ export type {
   RequestBase,
   RequestConfig,
   RequestOptions,
+  RequestSet,
   RequestSource,
   RequestStatus,
   RequestValue,
+  ResponsesOf,
   RetryConfig,
   RetryOptions,
   RunResult,
+  SelectOptions,
   SignalMutation,
   SignalRequest,
   SignalRequestConfig,

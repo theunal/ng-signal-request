@@ -11,8 +11,8 @@ triggering with `run()`, method variants (`createRequest.post`,
 `createMutation.put`, …), retry, debounce, polling, `keepPreviousValue`,
 `baseUrl` / `:path` parameters, reactive global headers, normalized errors, a
 `key`-based shared cache with invalidation, mutations with optimistic writes, a
-`select()` projection, `combine` / `createRequests`, and separate `/testing` and
-`/devtools` entry points.
+`select()` projection, `combine` / `createRequests`, and separate `/testing`,
+`/devtools` and `/persist` entry points.
 
 ```ts
 import {
@@ -1025,6 +1025,101 @@ await vi.advanceTimersByTimeAsync(1000);
 await settle();
 ```
 
+## Persistence across reloads
+
+`ng-signal-request/persist` writes the cache to storage and reads it back, so a
+reload starts with data instead of a spinner:
+
+```ts
+bootstrapApplication(App, {
+  providers: [
+    provideHttpClient(),
+    providePersistedCache({
+      maxAge: 24 * 60 * 60_000,     // don't restore what is a day old
+      codec: dateRevivingCodec,      // ISO strings -> Date, on the way back
+    }),
+  ],
+});
+```
+
+That is the whole setup. `providePersistedCache` hydrates during injector
+creation — before any component exists, and therefore before any request can
+resolve — so the first render reads restored data. There is no ordering rule to
+get right and nothing to remember in `main.ts`.
+
+| Option | |
+| --- | --- |
+| `storage` | Defaults to `localStorage` where it is reachable, `null` (disabled) everywhere else. Pass `sessionStorage`, an in-memory object, or `null`. |
+| `key` | Storage key. Default `'ng-signal-request'`. |
+| `include` / `exclude` | Which keys are written — the same filter vocabulary `QueryClient.invalidate` takes. `exclude` wins. |
+| `codec` | `{ serialize, deserialize }`, for values JSON cannot carry. |
+| `maxAge` | Entries older than this are not restored. |
+| `debounce` | Write coalescing, default `1000` ms. |
+
+Three details are worth knowing, because each is a bug that is easy to ship:
+
+- **Entries are restored lazily.** `hydrate` stages values; an entry is created
+  only when a handle actually asks for the key. Writing straight into the cache
+  would create an entry per persisted key at startup, and an entry with no
+  observer never gets a `gcTime` timer, so a hundred restored keys would pin a
+  hundred entries for the life of the tab.
+- **`dataUpdatedAt` is restored with the value.** A value persisted an hour ago
+  comes back an hour old, so `staleTime: 60_000` refetches on mount instead of
+  trusting it. Calling `setData` here would stamp `Date.now()` and the data
+  would look fresh forever.
+- **Writes follow responses**, via `QueryCache.subscribeActivity`. A persister
+  listening to `subscribeChanges` hears an entry *appear* — before it has
+  fetched — and would write that empty snapshot and never correct it.
+
+```ts
+// logout
+inject(CACHE_PERSISTER).clear();
+```
+
+`createPersister(options)` is the manual form, with `hydrate()` · `persist()` ·
+`clear()` · `destroy()` and a `enabled` signal that goes `false` — and every
+method a no-op — when there is no usable storage, or when storage starts
+refusing writes (`QuotaExceededError`, Safari private mode).
+
+## SSR
+
+`provideCacheTransfer()` moves the cache from a server render into the browser
+through `TransferState`, so hydration renders finished data rather than
+repeating every request the server already made:
+
+```ts
+// app.config.ts — shared by app.config.server.ts and main.ts
+export const appConfig: ApplicationConfig = {
+  providers: [
+    provideClientHydration(),
+    provideHttpClient(),
+    provideCacheTransfer(),
+  ],
+};
+```
+
+On the server it writes the snapshot when the injector is destroyed; on the
+client it reads it during injector creation, exactly like the persister. Both
+boundaries are the same `dehydrate` / `hydrate` pair, so a codec written for one
+works for the other.
+
+The other half is warming the cache during the render:
+
+```ts
+// a route resolver
+export const userRoute: ResolveFn<PrefetchReport> = () => {
+  const users = inject(UsersStore);
+  return prefetch([users.list, users.stats]);
+};
+```
+
+`prefetch` runs every handle and **never rejects**: it resolves with
+`{ ok, failures }`. `Promise.all` would reject on the first failure and turn a
+render into a 500, even when every other endpoint answered and the page would
+have rendered fine with one empty panel. It deliberately does not wait for
+`whenStable()` — that never resolves while a request is in flight, which is
+exactly what is being waited for.
+
 ## Behavior notes and limits
 
 - `createRequest` / `createMutation` require an **injection context** (field
@@ -1142,6 +1237,10 @@ await settle();
 
 `QueryDevtools` · `DevtoolsPanel` · `snapshotEntries` · `DevtoolsEntry` · `DevtoolsStatus` · `SnapshotOptions`
 
+### `ng-signal-request/persist`
+
+`providePersistedCache` · `createPersister` · `CACHE_PERSISTER` · `Persister` · `PersistOptions` · `CacheStorage` · `dehydrate` · `hydrate` · `CacheSnapshot` · `CacheSnapshotEntry` · `SNAPSHOT_VERSION` · `SnapshotCodec` · `dateRevivingCodec` · `provideCacheTransfer` · `CACHE_TRANSFER_KEY` · `CacheTransferOptions` · `prefetch` · `Prefetchable` · `PrefetchReport`
+
 ## Devtools
 
 A separate entry point, and that is the feature rather than packaging detail:
@@ -1235,16 +1334,17 @@ than cosmetic. Sizes are the gzipped ESM bundles from a production build:
 
 | Entry point | Size | When it is in an application |
 | --- | --- | --- |
-| `ng-signal-request` | **15.6 KB** | always |
+| `ng-signal-request` | **15.9 KB** | always |
 | `ng-signal-request/devtools` | 2.3 KB | only if imported |
+| `ng-signal-request/persist` | 2.3 KB | only if imported |
 | `ng-signal-request/testing` | 0.8 KB | only in tests |
 
-The primary entry point has no imports from the other two and `sideEffects` is
-`false`, so an application that never writes the import never links the code.
+The primary entry point has no imports from the other three and `sideEffects` is
+`false`, so an application that never writes those imports never links the code.
 `pnpm check:dist` asserts this against a real production build: the demo is
 compiled, and the output is required to contain core strings and none of the
-`/devtools` ones. The reason to test it rather than trust it is that "separate
-entry point" is an intention and a bundle scan is a fact.
+`/devtools` or `/persist` ones. The reason to test it rather than trust it is
+that "separate entry point" is an intention and a bundle scan is a fact.
 
 Budgets, so growth is a decision rather than a surprise: the primary entry point
 is not allowed past **20 KB gzip**, and any new secondary entry point past

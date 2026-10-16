@@ -81,7 +81,8 @@
             "tsConfig": "projects/signal-request/tsconfig.spec.json",
             "include": [
               "**/*.spec.ts",
-              "../devtools/**/*.spec.ts"
+              "../devtools/**/*.spec.ts",
+              "../persist/**/*.spec.ts"
             ]
           }
         }

@@ -31,6 +31,9 @@ const notes = [];
 /** Strings that only exist inside `projects/signal-request/devtools/`. */
 const DEVTOOLS_MARKERS = ['ngsr-devtools', 'no cached queries', '[ngsr] +', 'snapshotEntries'];
 
+/** Strings that only exist inside `projects/signal-request/persist/`. */
+const PERSIST_MARKERS = ['providePersistedCache', 'provideCacheTransfer', 'dateRevivingCodec'];
+
 /** Strings that only exist inside `projects/signal-request/src/`. */
 const CORE_MARKERS = ['RequestCancelled', 'httpResource', 'createInfiniteRequest'];
 
@@ -39,6 +42,7 @@ const BUDGETS = new Map([
   ['ng-signal-request.mjs', 20],
   ['ng-signal-request-devtools.mjs', 15],
   ['ng-signal-request-testing.mjs', 15],
+  ['ng-signal-request-persist.mjs', 15],
 ]);
 
 function checkBundleBoundaries(demoDir, distDir) {
@@ -74,6 +78,16 @@ function checkBundleBoundaries(demoDir, distDir) {
     );
   } else {
     notes.push(`devtools markers absent: ${DEVTOOLS_MARKERS.join(', ')}`);
+  }
+
+  const leakedPersist = PERSIST_MARKERS.filter((marker) => bundle.includes(marker));
+  if (leakedPersist.length > 0) {
+    failures.push(
+      `the /persist entry point leaked into the demo production bundle (${leakedPersist.join(', ')}) ` +
+        '— something under src/ must be importing it',
+    );
+  } else {
+    notes.push(`persist markers absent: ${PERSIST_MARKERS.join(', ')}`);
   }
 
   let fesm;

@@ -1,11 +1,14 @@
 import { isPlatformBrowser } from '@angular/common';
 import { HttpClient } from '@angular/common/http';
 import { inject, Injectable, PLATFORM_ID } from '@angular/core';
-import { CacheEntry } from './cache-entry';
+import { CacheEntry, type SeedValue } from './cache-entry';
 import { matchesFilter, normalizeKey, type QueryKey, type QueryKeyFilter } from './key';
 
 /** Notified whenever an entry is created, written or removed. Devtools subscribe to this. */
 export type CacheChangeListener = () => void;
+
+/** A value waiting for its key to be asked for. See {@link QueryCache.seed}. */
+type Seed = SeedValue<unknown>;
 
 /**
  * The store. One per application instance.
@@ -28,6 +31,10 @@ export type CacheChangeListener = () => void;
 export class QueryCache {
   private readonly entries = new Map<string, CacheEntry<unknown>>();
   private readonly listeners = new Set<CacheChangeListener>();
+  private readonly activityListeners = new Set<CacheChangeListener>();
+  /** Detaches the settle listener of each entry, so a forgotten entry leaves nothing behind. */
+  private readonly settleDetachers = new Map<string, () => void>();
+  private readonly seeds = new Map<string, Seed>();
   private readonly http = inject(HttpClient);
   private readonly isBrowser = isPlatformBrowser(inject(PLATFORM_ID));
 
@@ -42,6 +49,12 @@ export class QueryCache {
     const existing = this.entries.get(normalized.hash) as CacheEntry<T> | undefined;
     if (existing && !existing.isDestroyed) return existing;
 
+    // A seeded value is consumed here and nowhere else, which is the whole point of seeding: an
+    // entry comes into existence exactly when a handle asks for its key, so a persisted payload
+    // that nothing asks for never becomes an entry at all. See `seed`.
+    const seed = this.seeds.get(normalized.hash) as SeedValue<T> | undefined;
+    if (seed !== undefined) this.seeds.delete(normalized.hash);
+
     const entry = new CacheEntry<T>(
       normalized,
       this.http,
@@ -50,10 +63,58 @@ export class QueryCache {
       // The entry cannot reach the map, so it is handed the one operation it
       // needs. Without this a `gcTime`-expired entry would sit in the map forever.
       () => this.forget(entry.hash),
+      // Handed to the constructor rather than written afterwards: this method runs inside the
+      // handle's key `computed`, and a signal write there is `NG0600`. The signals are initialised
+      // with the restored value instead, so a seeded entry is never briefly empty.
+      seed,
     );
     this.entries.set(normalized.hash, entry as CacheEntry<unknown>);
+
+    this.settleDetachers.set(
+      normalized.hash,
+      entry.addSettleListener(() => this.notifyActivity()),
+    );
     this.notify();
+    this.notifyActivity();
     return entry;
+  }
+
+  /**
+   * Stages a value for `key` to be applied if and when an entry for that key is created.
+   *
+   * This is the seam a persistence layer writes into — `localStorage` at startup, or a server
+   * render's `TransferState` on the client. It is deliberate that this does not create an entry.
+   *
+   * Writing straight into the cache would be the obvious implementation and it leaks. The cache
+   * only arms an entry's `gcTime` timer when its **last observer leaves**, so an entry created for
+   * a persisted key that nothing ever reads would have no observers, no timer, and no way to be
+   * collected for the life of the injector. Hydrating a hundred keys would pin a hundred entries.
+   * Seeding makes the cost proportional to the keys actually used, and a seeded payload nobody asks
+   * for is simply replaced by the next `seed` call.
+   *
+   * The value is applied without touching the network, so a handle that finds its key seeded is
+   * immediately `hasData`, and `staleTime` is measured from `dataUpdatedAt` — the moment the value
+   * was originally fetched, not the moment it was restored. That is what makes a persisted entry
+   * refetch on mount exactly when it is actually old.
+   */
+  seed(key: QueryKey, value: unknown, dataUpdatedAt: number): void {
+    const normalized = normalizeKey(key);
+    const existing = this.entries.get(normalized.hash) as CacheEntry<unknown> | undefined;
+    if (existing && !existing.isDestroyed) {
+      existing.restore(value, dataUpdatedAt);
+      return;
+    }
+    this.seeds.set(normalized.hash, { value, dataUpdatedAt });
+  }
+
+  /** How many values are waiting for a key to be asked for. */
+  get pendingSeeds(): number {
+    return this.seeds.size;
+  }
+
+  /** Discards every staged value. Called before a fresh hydrate, so a stale seed cannot outlive it. */
+  clearSeeds(): void {
+    this.seeds.clear();
   }
 
   /** The entry for `key`, or `undefined`. Never creates one. */
@@ -65,7 +126,14 @@ export class QueryCache {
 
   /** Drops an entry from the map without touching it. Private: the gc hook is the only caller. */
   private forget(hash: string): void {
-    if (this.entries.delete(hash)) this.notify();
+    if (this.entries.delete(hash)) {
+      // The entry is going away; its settle listener must go with it or the cache would hold a
+      // closure per forgotten key for the life of the injector.
+      this.settleDetachers.get(hash)?.();
+      this.settleDetachers.delete(hash);
+      this.notify();
+      this.notifyActivity();
+    }
   }
 
   /** Every live entry. Iteration order is insertion order. */
@@ -118,9 +186,12 @@ export class QueryCache {
 
   /** Empties the cache and destroys every entry. Mainly for tests and devtools. */
   clear(): void {
+    for (const detach of this.settleDetachers.values()) detach();
+    this.settleDetachers.clear();
     for (const entry of this.entries.values()) entry.destroy();
     this.entries.clear();
     this.notify();
+    this.notifyActivity();
   }
 
   /**
@@ -136,8 +207,32 @@ export class QueryCache {
     };
   }
 
+  /**
+   * Registers a listener for *everything*: entries appearing and disappearing, and every settle of
+   * every entry.
+   *
+   * `subscribeChanges` is the narrower one and stays that way, because "the set of entries changed"
+   * and "some data changed" are genuinely different questions and a caller that wants one rarely
+   * wants the other. A persistence layer wants this one: a write that only fired when the entry set
+   * changed would miss every response.
+   *
+   * Kept as a listener rather than a `Signal<number>` for a reason recorded the hard way in
+   * `devtools.ts`: `resolve` calls its notifications synchronously and can itself be running inside
+   * a `computed`, so anything hung off these must not write a signal.
+   */
+  subscribeActivity(listener: CacheChangeListener): () => void {
+    this.activityListeners.add(listener);
+    return () => {
+      this.activityListeners.delete(listener);
+    };
+  }
+
   private notify(): void {
     // Copied first: a listener may unsubscribe itself while we are iterating.
     for (const listener of [...this.listeners]) listener();
+  }
+
+  private notifyActivity(): void {
+    for (const listener of [...this.activityListeners]) listener();
   }
 }

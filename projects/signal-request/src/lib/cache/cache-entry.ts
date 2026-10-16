@@ -10,6 +10,22 @@ import type { StructuralSharingFn } from './structural-sharing';
 /** How a fetch ended, as reported to {@link CacheEntry.addSettleListener}. */
 export type SettleOutcome<T> = { readonly ok: true; readonly value: T } | { readonly ok: false; readonly error: Error };
 
+/**
+ * A value that did not come from the network — a persisted snapshot, or a server render's transfer
+ * state.
+ *
+ * Deliberately **constructor input** rather than a write after the fact. `QueryCache.resolve` runs
+ * inside the handle's key `computed`, and Angular 22 forbids writing a signal from inside a
+ * `computed` (`NG0600`). Initialising the signals with the value gives the same result with no
+ * write at all, and it does so before anyone can read the entry, so there is no window in which a
+ * handle sees an empty entry and starts a fetch the seed was supposed to prevent.
+ */
+export interface SeedValue<T> {
+  readonly value: T;
+  /** Epoch ms of the original fetch. Restored so `staleTime` measures real age, not a fresh copy. */
+  readonly dataUpdatedAt: number;
+}
+
 /** One fetch's worth of configuration, supplied by the handle that starts it. */
 export interface FetchPlan<T> {
   readonly request: HttpResourceRequest;
@@ -131,6 +147,7 @@ export class CacheEntry<T = unknown> {
     readonly debugName: string | undefined,
     isBrowser: boolean,
     onDestroy: () => void = () => {},
+    seed?: SeedValue<T>,
   ) {
     this.hash = key.hash;
     this.segments = key.segments;
@@ -139,12 +156,16 @@ export class CacheEntry<T = unknown> {
     this.isBrowser = isBrowser;
     this.onDestroy = onDestroy;
 
-    this.data = signal<T | undefined>(undefined);
+    // A seeded entry starts life already holding its value. Everything else stays at its empty
+    // default, so a restored entry is an ordinary entry that happens to have old data: it is not
+    // `local`, it is not `invalidated`, and `fetchCount` is 0 because nothing has hit the network.
+    const restoredAt = seed?.dataUpdatedAt ?? 0;
+    this.data = signal<T | undefined>(seed?.value);
     this.error = signal<Error | undefined>(undefined);
     this.errorTimeout = signal<number | undefined>(undefined);
     this.isFetching = signal(false);
-    this.dataUpdatedAt = signal(0);
-    this.updatedAt = signal(0);
+    this.dataUpdatedAt = signal(seed === undefined ? 0 : restoredAt);
+    this.updatedAt = signal(seed === undefined ? 0 : restoredAt);
     this.fetchCount = signal(0);
     this.retryAttempt = signal(0);
     this.progress = signal<HttpProgressEvent | undefined>(undefined);
@@ -479,6 +500,30 @@ export class CacheEntry<T = unknown> {
   /** Marks the entry as owing a fetch, whatever `staleTime` says. */
   markInvalidated(): void {
     this.invalidated.set(true);
+  }
+
+  /**
+   * Applies a value that came from somewhere other than a fetch — a persisted snapshot, or a server
+   * render's transfer state — to an entry that **already exists**.
+   *
+   * A new entry takes its seed through the constructor instead ({@link SeedValue}), because
+   * `restore` writes signals and creation happens inside a `computed`. This method is the other half
+   * of that pair, for the case where the cache already holds the key when the snapshot arrives.
+   *
+   * Deliberately **not** `setData`, which is right for a user edit and wrong here in two ways that
+   * would both be silent bugs. `setData` stamps `Date.now()`, so restored data would look freshly
+   * fetched and `staleTime` would never expire it; and it sets `local`, so restored data would
+   * report as a local write — which is what `status()` says, what optimistic mutations look like,
+   * and what the devtools panel would show. Here the original fetch time is restored with the value
+   * and the entry stays an ordinary fetched entry that happens to be old.
+   */
+  restore(value: T, dataUpdatedAt: number): void {
+    this.data.set(value);
+    this.dataUpdatedAt.set(dataUpdatedAt);
+    this.updatedAt.set(dataUpdatedAt);
+    this.error.set(undefined);
+    this.errorTimeout.set(undefined);
+    this.invalidated.set(false);
   }
 
   /**

@@ -16,7 +16,8 @@
   "include": [
     "src/**/*.d.ts",
     "src/**/*.spec.ts",
-    "devtools/**/*.spec.ts"
+    "devtools/**/*.spec.ts",
+    "persist/**/*.spec.ts"
   ],
   "angularCompilerOptions": {
     "extendedDiagnostics": {

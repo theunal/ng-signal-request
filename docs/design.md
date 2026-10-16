@@ -442,3 +442,87 @@ Two deliberate omissions in what the panel reports, both because the alternative
 `devtools/**/*.ts` (with `rootDir` moved to `"."`). Both are published entry points that nothing in
 `src/` reaches, so until now `pnpm typecheck` never compiled them — a gap that predates this phase
 and that the `/devtools` entry point would have doubled.
+
+### Phase 7 notes — `/persist` and SSR
+
+The reload boundary and the SSR boundary are the same problem — take the cache out, put the cache
+back — so they share one `dehydrate`/`hydrate` pair rather than two dialects of the same snapshot.
+`providePersistedCache` covers `localStorage`; `provideCacheTransfer` covers `TransferState`; both
+are the pair plus a provider that puts the call at the right moment.
+
+**The design decision that mattered most was not to create entries when hydrating.** The obvious
+implementation of `hydrate` is to walk the snapshot, `cache.resolve(key)` each entry and write the
+value in. It leaks, and quietly. `QueryCache` arms an entry's `gcTime` timer in `release()` — the
+moment the **last observer leaves** — so an entry that is never subscribed to has no observers, no
+timer, and nothing that will ever remove it. Every persisted key would become an entry at startup
+and stay for the life of the injector. Hydrating a hundred keys would pin a hundred entries,
+including the ninety-five the application never asks for. `TtlCache`-style timers do not help; the
+timer is armed by refcount, not by creation.
+
+So `hydrate` **seeds** instead: `QueryCache.seed(key, value, dataUpdatedAt)` stages a value, and
+`resolve` applies it at the moment an entry for that key is created. A payload nobody asks for is
+dropped by the next hydrate and costs a `Map` entry until then. The cost is that seeded values are
+invisible until consumed, which does make one assertion awkward — `cache().pendingSeeds` exists
+partly so a test can see the staging at all.
+
+**Seeding has to happen in the constructor, and this was a real bug, not a nicety.** `resolve` runs
+inside the handle's key `computed` (see the Phase 6 note for the same stack), and Angular 22 forbids
+writing a signal from inside a `computed`. Writing the restored value after construction —
+`entry.restore(...)` — throws `NG0600` on the first keyed request of every application that
+uses hydration. It typechecks, it reads perfectly, and it fails at runtime the first time a
+persisted key is used. The fix is `SeedValue<T>` as a **constructor parameter**: the signals are
+initialised with the value, which is creation rather than writing, so nothing is written at all, and
+a seeded entry is never even briefly empty — which also removes the race where a handle reads an
+empty entry and starts a fetch the seed was meant to prevent.
+
+`restore()` still exists for the other half — a `seed` for a key that already has an entry — where
+there is no constructor to hand anything to. That path is safe because `seed` is only called from
+hydration, which happens at injector creation or in `main.ts`, never inside a computed.
+
+**The other real bug was the destroy order.** `createPersister` registers its own `onDestroy(stop)`
+when the persister is built, and `providePersistedCache` registers one afterwards to flush. Angular
+runs `DestroyRef` callbacks in registration order, so `stop()` ran first, set `destroyed = true`,
+and then the flush was a no-op — the one write that matters, because the debounce window is open and
+the page is going away. The fix was to make the flush part of `destroy()` rather than something a
+caller has to remember to do first: `stop()` flushes and *then* stops. `Persister.destroy()` is now
+documented as flushing, which is what its only real call site needs.
+
+Notifications: persistence needs to hear about **data**, and `subscribeChanges` only reports the set
+of entries. Reusing it would have produced a persister that writes an empty snapshot when an entry
+appears and never writes again — the entry is created before it fetches, so the one interesting
+event never fires that listener. Rather than build an `effect` that reads every entry (an O(n)
+dependency graph, and one that would run a tick late), `QueryCache` gained a second, narrower
+notification: `subscribeActivity`, which fires on the set changing *and* on every settle. It is a
+listener rather than a `Signal<number>` for the reason the devtools found the hard way, and its
+listener must obey the same rule — which is why a failed write defers `enabled.set(false)` into a
+microtask instead of writing it inline.
+
+Smaller calls, each with a reason:
+
+- **A snapshot is versioned and an unknown version is ignored**, not best-effort parsed. The storage
+  key is global: the payload may have been written by an older build of the application, or by a
+  different application that picked the same key. Reading a stale shape as if it were current is
+  silent corruption with no way to notice afterwards.
+- **`dataUpdatedAt` is restored with the value, and does not go through `setData`.** `setData`
+  stamps `Date.now()` and sets `local`. Both are wrong here in ways that are invisible until they
+  matter: the first makes persisted data permanently fresh, the second makes it report as a user
+  edit.
+- **`prefetch` returns a report instead of throwing.** A server render must render whatever it
+  managed to fetch; `Promise.all` turns one failed endpoint into a 500 for a page that would have
+  been fine.
+- **`dateRevivingCodec` requires a full ISO instant with a zone.** `"2024-01-01"` is far more likely
+  to be a slug, an order number or a version than a date, and a resolver eager enough to guess there
+  corrupts data that never was a date. The codec also passes an existing `Date` through, because
+  `provideCacheTransfer` can hand a snapshot over in memory rather than through JSON, and
+  `Object.entries(new Date())` is `[]` — the first version of that function turned every `Date` into
+  `{}`.
+- **Storage failures disable the persister rather than throwing.** The worst outcome of a failed
+  write is a slower first paint; the worst outcome of an unhandled `QuotaExceededError` inside a
+  fetch's settle path is a broken application.
+- **`localStorage` is probed in a `try`.** It is not enough to check `typeof` — in a sandboxed
+  iframe or with cookies blocked, the global exists and *throws on access*.
+
+Rejected: putting `dehydrate`/`hydrate` on `QueryCache` itself. They are serialisation policy —
+what a codec is, what a version means, how old is too old — and the cache is the one class in the
+library that deliberately has no options. Keeping them in `/persist` also keeps the snapshot code,
+the codec and the storage probing in the bundle that only persistence users download.

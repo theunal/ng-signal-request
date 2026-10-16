@@ -1171,7 +1171,7 @@ you give up when you stay inside Angular.
 | Persistence | `/persist`: synchronous storage, a codec, a version, key filters, and a `TransferState` path for SSR | `persistQueryClient`: async storages, `maxAge`, busters, migrations |
 | Devtools | `/devtools`, 2.3 KB gzip, entry list and a few actions, imported in dev only | A mature panel with a query explorer and timings |
 | SSR | `providedIn: 'root'` already means one cache per render, with `TransferState` hydration | A `QueryClient` you create per request in the server handler |
-| Errors | A normalized `RequestError` view with predicates (`isHttp`, `isTimeout`, …), so templates do not need `@switch` | `Error`, narrowed by hand |
+| Errors | A normalized `RequestError` view with per-kind predicates (`http()`, `timeout()`, `network()`, …) and a `message` getter, so templates do not need `@switch` | `Error`, narrowed by hand |
 | Framework scope | Angular 22 | React, Vue, Svelte, Solid, Angular |
 
 Where TanStack Query is simply ahead, with no clever reframing:
@@ -1360,7 +1360,7 @@ enough that the translation is mechanical.
 
 ### `ng-signal-request/testing`
 
-`setup` · `settle` · `respond` · `fail` · `isHttpError`
+`setup` · `settle` · `respond` · `fail` · `isHttpError` · `cache` · `advanceClock` · `TestSetup` · `ChildScope`
 
 ### `ng-signal-request/devtools`
 
@@ -1458,7 +1458,7 @@ pnpm check:dist  # post-build assertions (see "Bundle" below)
 
 ## Bundle
 
-The library ships as three entry points, and the split is load-bearing rather
+The library ships as four entry points, and the split is load-bearing rather
 than cosmetic. Sizes are the gzipped ESM bundles from a production build:
 
 | Entry point | Size | When it is in an application |

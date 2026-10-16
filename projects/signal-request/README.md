@@ -606,6 +606,65 @@ navigation guard needs — neither holds references to your mutations.
 - **`gcTime`'s timer is browser-only.** On the server it would only hold
   stability.
 
+### Infinite scroll
+
+There is a `createInfiniteRequest`. What it does **not** have is a page cache of
+its own — each page is an ordinary cache entry keyed `base key + page param`,
+which is what makes the rest of this page work on a paginated list for free.
+
+```ts
+readonly feed = createInfiniteRequest<Item>(
+  (page) => ({ url: '/items', params: { page, size: 20 } }),
+  {
+    key: () => ['items', { filter: filter() }],
+    initialPageParam: 0,
+    getNextPageParam: (last, _all, param) => (last.length === 20 ? param + 1 : undefined),
+    maxPages: 5,
+  },
+);
+
+feed.pages();                 // [Item[], Item[], …]
+feed.response();              // every item, flattened
+feed.hasNextPage();
+await feed.fetchNextPage();
+```
+
+Because the entries are `['items', 0]`, `['items', 1]`, …, `client.invalidate(['items'])`
+— prefix-matched — refreshes **every** page without knowing anything about
+pagination. Page 1 of a paginated list and a `createRequest` on `['items', 0]`
+are the same entry and dedup against each other.
+
+| Member | |
+| --- | --- |
+| `pages()` | Every loaded page, in order |
+| `response()` | The pages, **flattened** when a page is an array |
+| `pageParams()` | The params of the loaded pages |
+| `fetchNextPage()` / `fetchPreviousPage()` | Load one more. Resolve when that page has settled |
+| `hasNextPage()` / `hasPreviousPage()` | What the getters say |
+| `isFetchingNextPage()` / `isFetchingPreviousPage()` | Which page is loading |
+| `reload()` | Re-fetch every loaded page, **in order** |
+| `remove()` | Drop the accumulation. The page entries stay cached |
+
+Three things worth knowing:
+
+- **`getPreviousPageParam` is optional, and its absence is visible.**
+  `hasPreviousPage()` is permanently `false` rather than pretending the feature
+  exists.
+- **`response()` flattens only when a page is an array.** An envelope like
+  `{ items, cursor }` is returned as-is, because the library cannot know which
+  of its fields is the list — and the return type follows, so
+  `InfiniteRequest<Item[], P>` gives `readonly Item[]` while
+  `InfiniteRequest<Envelope, P>` gives `readonly Envelope[]`.
+- **Changing a signal in `key` restarts the accumulation, not the cache.** The
+  old page entries stay, with their own `gcTime`, because they are usually
+  exactly what someone flipping a filter back and forth wants. `maxPages`
+  drops a page the same way — it releases the subscription, it does not delete.
+
+This replaces the hand-written recipe that used to live here. That recipe
+needed an `appendedPage` guard because `onSuccess` fires on **every** settle
+and a reload would append a page twice. With one entry per page, a reload
+*replaces* page N, and there is no guard to write.
+
 ## `createMutation(builder, options?)` — and `.post` / `.put` / `.patch` / `.delete`
 
 `httpResource` is for reads: it is eager and cancels the previous request,

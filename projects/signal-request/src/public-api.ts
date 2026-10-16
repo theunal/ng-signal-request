@@ -4,6 +4,11 @@
 export { provideSignalRequest, SIGNAL_REQUEST_CONFIG } from './lib/config';
 export { createRequest } from './lib/create-request';
 export type { CreateRequest, CreateRequestFn } from './lib/create-request';
+export {
+  createInfiniteRequest,
+  type CreateInfiniteRequest,
+  type CreateInfiniteRequestFn,
+} from './lib/create-infinite-request';
 export { createMutation } from './lib/create-mutation';
 export type { CreateMutation } from './lib/create-mutation';
 export { RequestCancelledError, requestErrorOf, toError, toRequestError } from './lib/errors';
@@ -18,6 +23,9 @@ export type {
   CacheOptions,
   CachedRequest,
   CachedRequestOptions,
+  FlattenedPages,
+  InfiniteRequest,
+  InfiniteRequestOptions,
   InvalidationTarget,
   MutationOptions,
   MutationStatus,

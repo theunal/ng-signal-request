@@ -297,3 +297,36 @@ Going with 1, in Phase 1, so the SSR story is not retrofitted in Phase 7.
 | 6 | `/devtools` entry point | 1, 2 |
 | 7 | `/persist` entry point; `TransferState` dehydrate/hydrate, `prefetch` | 1, 2 |
 | 8 | Fix the documented sharp edges | 1–7 |
+
+### Phase 4 notes — `createInfiniteRequest`
+
+The plan said "`createInfiniteRequest`". Three decisions were not in the plan and are worth
+recording, because each one is a place where the obvious implementation lies.
+
+**No page cache of its own.** The tempting design is an accumulator signal inside the handle that
+collects pages. It would work, and it would be isolated — `client.invalidate(['items'])` would not
+reach it, `staleTime` would not apply per page, and page 1 would be fetched twice if anything else
+wanted it. Instead each page is an ordinary `QueryCache` entry keyed `base key + page param`, and
+`pages()` / `response()` are derived from those entries. Everything else in the library then applies
+to a paginated list without the paginated code knowing: prefix invalidation, per-page `staleTime`
+and `gcTime`, and dedup against a plain `createRequest` on the same key.
+
+**`response()` flattens only when a page *is* an array.** `TPage` is opaque — a page may be
+`Item[]` or `{ items, cursor }`, and there is no way to know which field of an envelope is the
+list. Guessing produces a plausible-looking list that is wrong for some API. So the runtime flattens
+arrays and passes anything else through, and the *type* follows the same condition via
+`FlattenedPages<TPage>`: `InfiniteRequest<Item[], P>` has `Signal<readonly Item[]>`,
+`InfiniteRequest<Envelope, P>` has `Signal<readonly Envelope[]>`. The type and the runtime agree
+because they are guarded by the same predicate.
+
+**`reload()` is sequential, not parallel.** Pages are independent entries and could be refetched
+concurrently, which would be faster. Offset pagination is only coherent when the pages are requested
+in sequence, though, and a page that comes back with a different set of rows is far easier to reason
+about when the pages are not racing each other. Sequential is slower on purpose.
+
+One bug worth naming, because it is the class of bug the `untracked` helper invites: `pages()` was
+first written with `untracked(page.entry.data)` inside the `computed`. That reads correctly and
+passes on one page — the accumulated list only breaks on the *second* page, because a page arriving
+does not change `loadedParams()`, so nothing re-invalidates the computed. The reads must be tracked.
+`isFetchingNextPage()` had the same shape. Both are tracked now, and the tests that caught them are
+in `infinite-request.spec.ts`.

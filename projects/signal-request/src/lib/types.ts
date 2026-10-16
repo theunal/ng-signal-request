@@ -6,6 +6,7 @@ import type {
 } from '@angular/common/http';
 import type { RequestErrorView } from './errors';
 import type { QueryKey, QueryKeyFactory } from './cache/key';
+import type { CacheEntry } from './cache/cache-entry';
 import type { StructuralSharingFn } from './cache/structural-sharing';
 import type {
   Injector,
@@ -457,6 +458,144 @@ export interface RequestBase<T, R = T | undefined, TParams = void> {
 export type RunResult<T> =
   | { ok: true; response: T; error?: undefined }
   | { ok: false; error: Error; response?: undefined };
+
+/* -------------------------------------------------------------------------- */
+/*  Infinite query (createInfiniteRequest)                                    */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Options for {@link createInfiniteRequest}.
+ *
+ * Every page is an ordinary cache entry keyed `base key + page param`, so a paginated list
+ * participates in `client.invalidate(['items'])`, `staleTime`, `gcTime` and sharing with a
+ * `createRequest` on the same key — without knowing any of that exists.
+ */
+export interface InfiniteRequestOptions<TPage, TParam> {
+  /**
+   * The **base** key. The page param is appended to it, so `['items', { page: 3 }]` is the entry
+   * for page 3 and `client.invalidate(['items'])` — prefix-matched — reaches every page.
+   *
+   * Called reactively, exactly like `createRequest`'s `key`. A filter change resets the
+   * accumulation; the page entries themselves stay in the cache, which is usually what you want
+   * when someone switches a filter back and forth.
+   */
+  key: () => QueryKey;
+  /** The param for page 1. Reused whenever the accumulation restarts. */
+  initialPageParam: TParam;
+  /**
+   * The param for the page after `lastParam`, or `undefined` when there is no next page.
+   *
+   * Receives the page data as it is cached, which is how a cursor-based API works:
+   * `getNextPageParam: (last) => last.cursor`, and `undefined` when the server says it is done.
+   */
+  getNextPageParam: (lastPage: TPage | undefined, pages: readonly TPage[], lastParam: TParam) => TParam | undefined;
+  /**
+   * The mirror of `getNextPageParam` for `fetchPreviousPage()`.
+   *
+   * Optional: most infinite scroll is one-directional, and leaving this out keeps `hasPreviousPage()`
+   * permanently `false` rather than pretending a feature exists.
+   */
+  getPreviousPageParam?: (firstPage: TPage | undefined, pages: readonly TPage[], firstParam: TParam) => TParam | undefined;
+  /**
+   * Keep at most this many pages in memory, dropping the oldest.
+   *
+   * The default is unbounded, which is right for cursor pagination and wrong for offset
+   * pagination over a large list. Dropping a page releases its cache entry's subscription, so it
+   * can be collected on `gcTime` — it is not deleted.
+   */
+  maxPages?: number;
+  /** See `createRequest`. */
+  staleTime?: number;
+  /** See `createRequest`. */
+  gcTime?: number;
+  /** Parse each page body. See `createRequest`. */
+  parse?: (raw: unknown) => TPage;
+  /** Retry each page. Off by default, like every other write. */
+  retry?: RetryConfig;
+  /** Headers for every page. */
+  headers?: HttpResourceRequest['headers'];
+  /** Abort a page after this many ms. */
+  timeout?: number;
+  /** Refetch when the tab becomes visible again. */
+  refetchOnWindowFocus?: boolean;
+  /** Refetch when the browser reports it is back online. */
+  refetchOnReconnect?: boolean;
+  /** See `createRequest`'s `equal` — composes with the default structural sharing. */
+  equal?: ValueEqualityFn<NoInfer<TPage>>;
+  /** See `createRequest`'s `structuralSharing`. */
+  structuralSharing?: StructuralSharingFn<TPage>;
+  /** Required if called outside an injection context. */
+  injector?: Injector;
+  /** Debounce for key changes, in ms. Browser only. */
+  debounce?: number;
+  debugName?: string;
+  onSuccess?: (pages: readonly TPage[]) => void;
+  onError?: (error: Error) => void;
+}
+
+/**
+ * What `response()` yields for a given page type.
+ *
+ * A page that **is** an array flattens into its items; an envelope like `{ items, cursor }` cannot,
+ * because the library does not know which of its fields is the list. So the type follows rather
+ * than the runtime lying: array pages give their items, envelope pages give the pages.
+ */
+export type FlattenedPages<TPage> = TPage extends readonly (infer TItem)[]
+  ? readonly TItem[]
+  : readonly TPage[];
+
+/**
+ * A paginated handle.
+ *
+ * Deliberately not `RequestBase`: `response()` means something different here — the pages
+ * themselves rather than whatever the last request returned — and pretending otherwise would be
+ * the kind of shape-fitting that makes an API hard to learn.
+ */
+export interface InfiniteRequest<TPage, TParam> {
+  /** Every loaded page, in order, skipping pages that have not resolved yet. */
+  readonly pages: Signal<readonly TPage[]>;
+  /**
+   * What a list template renders.
+   *
+   * A page that **is** an array flattens into its items; an envelope like `{ items, cursor }` does
+   * not, because the library cannot know which of its fields is the list — in that case this is
+   * the same as `pages()`.
+   */
+  readonly response: Signal<FlattenedPages<TPage>>;
+  /** The params of the loaded pages, in order. */
+  readonly pageParams: Signal<readonly TParam[]>;
+  /** The page currently being fetched, if any. */
+  readonly loading: Signal<boolean>;
+  readonly status: Signal<RequestStatus>;
+  readonly error: Signal<Error | undefined>;
+  readonly requestError: Signal<RequestErrorView | undefined>;
+  /** Whether any page is on the network. */
+  readonly isFetching: Signal<boolean>;
+  /** Whether the page being appended right now is still loading. */
+  readonly isFetchingNextPage: Signal<boolean>;
+  /** Whether a page is being prepended. Always `false` without `getPreviousPageParam`. */
+  readonly isFetchingPreviousPage: Signal<boolean>;
+  /** `undefined` before the first page arrives. */
+  readonly dataUpdatedAt: Signal<number>;
+  /** Whether `getNextPageParam` says there is a page after the last one. */
+  hasNextPage(): boolean;
+  /** Whether `getPreviousPageParam` says there is a page before the first one. */
+  hasPreviousPage(): boolean;
+  /** Loads and appends the next page. Resolves when it has settled. */
+  fetchNextPage(): Promise<void>;
+  /** Loads and prepends the previous page. Resolves when it has settled. */
+  fetchPreviousPage(): Promise<void>;
+  /** Re-fetches every loaded page, in order. Returns `false` when there is nothing loaded. */
+  reload(): boolean;
+  /** Aborts every page fetch in flight. */
+  cancel(): void;
+  /** Drops every loaded page from the accumulation. The cache entries stay. */
+  remove(): void;
+  /** Stops everything. Happens automatically with the owning injector. */
+  destroy(): void;
+  /** The cache entry for one page. Mostly for devtools and tests. */
+  readonly entryFor: (param: TParam) => CacheEntry<TPage> | undefined;
+}
 
 /* -------------------------------------------------------------------------- */
 /*  Mutation (createMutation)                                                 */

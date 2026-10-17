@@ -475,6 +475,7 @@ entry.
 | `key` | — | **The opt-in.** Must be sufficient to determine the request |
 | `staleTime` | `0` | How long a value counts as fresh. `0` = always stale |
 | `gcTime` | `5 min` | How long an entry with no subscribers is kept |
+| `maxEntries` | unlimited | A cap for the whole cache. See below |
 | `refetchOnMount` | `'stale'` | `'stale'` · `'always'` · `false` |
 | `structuralSharing` | walk-and-reuse | What to store when nothing changed |
 
@@ -489,6 +490,60 @@ that is exactly why the request can be shared — so `.resource` is a type error
 rather than a silent `undefined`, and `ctx.chain()` gets an explanatory error
 instead of chaining against nothing.
 
+### Bounding the cache in space — `maxEntries`
+
+`gcTime` bounds the cache in **time**. It does not bound it in **space**: a
+typeahead keyed on the query string, a virtualised list keyed on the row id, or
+a detail screen keyed on the record id all produce a new key per interaction, and
+inside one 5-minute window that is unbounded.
+
+```ts
+provideSignalRequest({ maxEntries: 500 });
+```
+
+```ts
+createRequest('/users', { key: () => ['users'], maxEntries: 100 });
+```
+
+The policy is one sentence: **evict the least recently used entry that has no
+subscriber and nothing in flight.** Both guards are load-bearing. An entry with a
+subscriber is someone's rendered data; taking it would turn a cache hit back into
+a spinner. An entry with a request in flight has a `run()` promise waiting on it.
+If neither applies to anything, the cache **overshoots** rather than mangling a
+live component, and says so in dev mode:
+
+```
+[ngsr] maxEntries: the cache holds 32 entries against a cap of 25. Every entry
+that could be dropped has a subscriber or a request in flight, …
+```
+
+Enforcement happens **as entries arrive**, synchronously, so the cap is a memory
+bound rather than a report. The consequence worth knowing: a burst of components
+unmounting does not immediately trim the cache — the next new entry does. Between
+those two moments `gcTime` is still the only thing collecting, which is exactly
+what it was before.
+
+A per-request `maxEntries` can only **tighten** the global one, never raise it.
+There is one cache per application and nothing owns a subset of it, so a
+per-request cap is a budget for the whole cache: the smallest value anyone
+declared wins, and the global value is a ceiling no leaf request can exceed. That
+makes the outcome independent of the order requests are constructed in. The cost
+is honest and worth stating: a screen that genuinely needs more room than the
+global setting has to raise the global value.
+
+```ts
+const client = inject(QueryClient);
+
+client.size();            // Signal<number> — the whole cache
+client.evict(['users']);  // number — idle ['users', …] entries only
+client.evict();           // number — every idle entry
+```
+
+`size()` is a signal, coalesced to a microtask because the notifications it
+follows fire from inside a key `computed`. `evict()` is the rule above as
+something you can run by hand; `remove()` stays the unconditional one, and
+`QueryCache.maxEntries` tells you the effective cap.
+
 ### Invalidating by key
 
 `QueryClient` is the imperative half. Inject it anywhere.
@@ -501,6 +556,8 @@ this.client.invalidate((s) => s === 'todos');  // a predicate over each segment
 this.client.getData<User[]>(['users', 1]);      // read without a handle
 this.client.setData(['users', 1], (list) => …); // write without a handle
 this.client.isFetching();                       // global or per filter
+this.client.size();                             // how many entries, as a signal
+this.client.evict(['users']);                   // drop the idle ones under ['users']
 ```
 
 `['users']` is a **prefix**, not an equality test: it reaches `['users', 1]` and
@@ -1052,11 +1109,16 @@ for a request that never arrives.
 
 `pnpm test` runs v8 coverage and fails if the totals drop below the thresholds in
 `angular.json` (`90%` statements, `85%` branches, `90%` functions, `90%` lines).
-Current totals are ~96% statements, ~90% branches, ~97% functions and ~98% lines,
+Current totals are ~96% statements, ~90% branches, ~96% functions and ~98% lines,
 so the distance to the threshold is the regression margin rather than the target.
 The gate is verified rather than trusted: raising a threshold above the current
 number fails the run with
 `ERROR: Coverage for lines (…) does not meet global threshold`.
+
+The exact figures, the commands behind them, and what they do *not* prove are in
+[`docs/verification.md`](docs/verification.md). The `resolve()` benchmark, with a
+measured before/after for the `maxEntries` work, is in
+[`docs/perf.md`](docs/perf.md).
 
 ## Persistence across reloads
 
@@ -1169,7 +1231,9 @@ you give up when you stay inside Angular.
 | Infinite queries | `createInfiniteRequest`, **one entry per page**, so prefix invalidation and cross-component sharing work on a feed | `injectInfiniteQuery`, one entry per list |
 | `select` | A **method**: `.select(fn, { equal })`, so the handle's own `response()` is untouched | An option on the query observer |
 | Persistence | `/persist`: synchronous storage, a codec, a version, key filters, and a `TransferState` path for SSR | `persistQueryClient`: async storages, `maxAge`, busters, migrations |
-| Devtools | `/devtools`, 2.3 KB gzip, entry list and a few actions, imported in dev only | A mature panel with a query explorer and timings |
+| Devtools | `/devtools`, 2.5 KB gzip, entry list and a few actions, imported in dev only | A mature panel with a query explorer and timings |
+| Bounding the cache | `maxEntries`, LRU over idle entries only, with a per-request value that can tighten it | `gcTime` per query, plus explicit removal |
+| Invalidating by key | `invalidates: [['users']]` refreshes every open `['users', …]` query | `invalidateQueries({ queryKey })` |
 | SSR | `providedIn: 'root'` already means one cache per render, with `TransferState` hydration | A `QueryClient` you create per request in the server handler |
 | Errors | A normalized `RequestError` view with per-kind predicates (`http()`, `timeout()`, `network()`, …) and a `message` getter, so templates do not need `@switch` | `Error`, narrowed by hand |
 | Framework scope | Angular 22 | React, Vue, Svelte, Solid, Angular |
@@ -1184,10 +1248,6 @@ Where TanStack Query is simply ahead, with no clever reframing:
   IndexedDB, a WASM call — is a query there. This library is HTTP only, which is
   exactly what lets the request stay declarative, but it is a real limit.
 - **Devtools depth**, and an ecosystem: plugins, years of answered questions.
-- **Bounding the cache in space.** TanStack removes entries explicitly;
-  `gcTime` here bounds the cache in *time* only, so a workload with a very large
-  number of distinct keys inside one `gcTime` window is unbounded. A `maxEntries`
-  cap is the obvious follow-up and is not in 0.1.0.
 
 Where this library is ahead, in an Angular-only codebase:
 
@@ -1297,6 +1357,37 @@ enough that the translation is mechanical.
   infinite-query primitive (see "Infinite scroll"), `combine` / `createRequests`
   aggregate handles, and `/persist` restores the cache across a reload.
 
+## Known limitations
+
+Stated plainly, because a limitation you find out about in production is a bug
+report and one you read here is a design decision.
+
+- **`maxEntries` does not bound the persisted seeds.** `QueryCache.seed` stages a
+  value until a handle asks for its key, and that staging area has no cap. In
+  normal use it is proportional to what is rendered — a seed is consumed the first
+  time its key is resolved — but a snapshot with far more keys than any render
+  touches holds them all. Introduce an include/exclude filter in
+  `providePersistedCache` if that is your shape.
+- **Offline is not supported.** There is no `networkMode`, no `onlineManager` and
+  no mutation replay. A query that fails while the network is down fails;
+  `refetchOnReconnect` refetches what is on screen once the browser reports it is
+  back. `RequestError` does carry an `offline?: boolean` on the `network` kind,
+  so a UI can at least say why.
+- **Persistence is synchronous only.** `/persist` storage is `localStorage`-shaped.
+  There is no IndexedDB storage, so a very large snapshot will block the main
+  thread on write. A ready-made async storage is the next step for `/persist`.
+- **Errors are HTTP-shaped.** A `queryFn`-style source — GraphQL, IndexedDB, a
+  WASM call — is not a query here. Everything goes through `HttpClient`.
+- **`status: 0` stays ambiguous.** A CORS block, an extension, offline and a
+  transport failure the browser will not name all arrive as `status: 0`. What can
+  be distinguished is distinguished (`aborted`, `timeout`, `offline`); nothing is
+  invented.
+- **No ESLint or Prettier config.** The project's style rules live in review and
+  in the type checker, not in a linter. Adding one to an existing codebase is a
+  large diff that would drown the changes it accompanies.
+- **Coverage is a floor, not a grade.** The thresholds guard against silent
+  regression. They say nothing about whether the assertions meant anything.
+
 ## API
 
 ### `ng-signal-request`
@@ -1348,10 +1439,10 @@ enough that the translation is mechanical.
 
 | Export | Description |
 | --- | --- |
-| `QueryClient` | Injectable: `invalidate` · `refetch` · `cancel` · `getData` · `setData` · `remove` · `isFetching` · `count` · `clear` · `isMutating` · `mutatingCount` |
+| `QueryClient` | Injectable: `invalidate` · `refetch` · `cancel` · `getData` · `setData` · `remove` · `evict` · `size` · `isFetching` · `count` · `clear` · `isMutating` · `mutatingCount` |
 | `MutationRegistry` | In-flight mutation counts, globally and per `mutationKey` |
-| `QueryCache` | The store: `resolve` · `peek` · `matching` · `markInvalidated` · `remove` · `all` · `subscribeChanges` · `clear` |
-| `CacheEntry` | One cached resource: `data` · `status` signals, `refetch()` · `subscribe()` · `setData()` · `isStale()` |
+| `QueryCache` | The store: `resolve` · `peek` · `matching` · `markInvalidated` · `remove` · `evictIdle` · `size` · `maxEntries` · `tightenMaxEntries` · `all` · `subscribeChanges` · `clear` |
+| `CacheEntry` | One cached resource: `data` · `status` signals, `refetch()` · `subscribe()` · `setData()` · `evict()` · `isStale()` |
 | `QueryKey` / `QueryKeyFactory` / `QueryKeyFilter` / `QueryKeyPredicate` | Key shapes and the matching filter |
 | `normalizeKey` · `matchesFilter` · `startsWith` · `formatKey` | Key helpers, exported for devtools and custom stores |
 | `defaultStructuralSharing` · `StructuralSharingFn` | The default sharing walk, and its type |
@@ -1420,7 +1511,9 @@ Two things the panel reports that deserve a word:
   substitute.
 
 The snapshot is a `computed` over the entries' own signals — no polling, no
-interval to forget to clear.
+interval to forget to clear. The header shows the entry count against
+`maxEntries` when one is set, and flags an overshoot, since "32 entries, cap 25"
+is the readout that sends you looking for the leak.
 
 ## Demo
 
@@ -1449,7 +1542,13 @@ pnpm typecheck   # tsc --noEmit over the lib, spec, devtools and demo projects
 pnpm watch       # rebuild on change (development configuration)
 pnpm verify      # typecheck + test + build + build:demo + check:dist
 pnpm check:dist  # post-build assertions (see "Bundle" below)
+pnpm check:api   # export diff against a git ref: `pnpm check:api v0.1.0`
+pnpm bench       # the resolve() benchmark at 200k iterations (see docs/perf.md)
 ```
+
+`pnpm check:api` fails only when a name that existed before is gone, so it is the
+command behind every "no breaking change" claim in this repository. Its output is
+recorded in [`docs/verification.md`](docs/verification.md).
 
 > On Windows, `packageManager` pins a pnpm version newer than the one on
 > `PATH`. If `pnpm install` fails with *"is not recognized as an internal or
@@ -1463,8 +1562,8 @@ than cosmetic. Sizes are the gzipped ESM bundles from a production build:
 
 | Entry point | Size | When it is in an application |
 | --- | --- | --- |
-| `ng-signal-request` | **15.9 KB** | always |
-| `ng-signal-request/devtools` | 2.3 KB | only if imported |
+| `ng-signal-request` | **16.7 KB** | always |
+| `ng-signal-request/devtools` | 2.5 KB | only if imported |
 | `ng-signal-request/persist` | 2.3 KB | only if imported |
 | `ng-signal-request/testing` | 0.8 KB | only in tests |
 

@@ -1,7 +1,7 @@
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { describe, expect, expectTypeOf, it, vi } from 'vitest';
 import { inject } from '@angular/core';
-import { createRequest, QueryClient } from 'ng-signal-request';
+import { createRequest, provideSignalRequest, QueryClient } from 'ng-signal-request';
 import {
   DevtoolsPanel,
   QueryDevtools,
@@ -325,6 +325,35 @@ describe('DevtoolsPanel — the table', () => {
     expect(cells[4]).toBe('4s');
 
     handle.destroy();
+  });
+
+  it('shows the entry count against the cap, and flags an overshoot', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { create } = setup([provideSignalRequest({ maxEntries: 1 })]);
+    // Two live handles against a cap of one: nothing may be taken, so the cache overshoots and the
+    // panel says so rather than silently reporting a number that looks fine.
+    const a = keyed<Row[]>(create, ['a']);
+    const b = keyed<Row[]>(create, ['b']);
+    await settle();
+
+    const fixture = TestBed.createComponent(DevtoolsPanel);
+    fixture.detectChanges();
+    const button = fixture.nativeElement.querySelector('button') as HTMLButtonElement;
+
+    expect(button.textContent).toContain('cache 2 / 1');
+    expect(button.textContent).toContain('over cap');
+
+    a.destroy();
+    b.destroy();
+    warn.mockRestore();
+  });
+
+  it('shows no cap when the cache is unbounded', async () => {
+    const fixture = mount();
+    const button = fixture.nativeElement.querySelector('button') as HTMLButtonElement;
+
+    expect(button.textContent).toContain('cache 0');
+    expect(button.textContent).not.toContain('/');
   });
 
   it('formats an age in ms, seconds and minutes', () => {

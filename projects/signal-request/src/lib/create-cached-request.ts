@@ -128,6 +128,10 @@ function buildCachedInContext<T, R, TParams>(
   const debounceMs = isBrowser ? (options.debounce ?? 0) : 0;
   const staleTime = options.staleTime ?? globalConfig.staleTime ?? 0;
   const gcTime = options.gcTime ?? globalConfig.gcTime ?? DEFAULT_GC_TIME;
+  // Only the per-request value, and only if it is there: the global cap is the cache's own property
+  // and it read that itself. `tightenMaxEntries` ignores anything that would raise the cap, which is
+  // what keeps the global setting a ceiling and makes the outcome order-independent.
+  if (options.maxEntries !== undefined) cache.tightenMaxEntries(options.maxEntries);
   const refetchOnMount: RefetchOnMount = options.refetchOnMount ?? globalConfig.refetchOnMount ?? 'stale';
   const refetchOnWindowFocus = options.refetchOnWindowFocus ?? globalConfig.refetchOnWindowFocus ?? false;
   const refetchOnReconnect = options.refetchOnReconnect ?? globalConfig.refetchOnReconnect ?? false;

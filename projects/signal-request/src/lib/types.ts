@@ -126,6 +126,23 @@ export interface SignalRequestConfig {
    */
   gcTime?: number;
   /**
+   * Upper bound on the number of **idle** entries the cache may hold — entries with no subscriber
+   * and nothing in flight. Unlimited by default.
+   *
+   * `gcTime` bounds the cache in *time*; this bounds it in *space*, which is the half a workload
+   * with many distinct keys inside one `gcTime` window does not have a bound on. A typeahead keyed
+   * on the query string, or a virtualised list keyed on the row id, can produce hundreds of entries
+   * that nothing will read again, and each is a `CacheEntry` plus its signals.
+   *
+   * Eviction is least-recently-used and never touches an entry that has a subscriber or a request
+   * in flight, so it cannot turn a mounted component's data back into a spinner. When every entry
+   * is live the cache overshoots and says so in dev mode.
+   *
+   * `500` is a reasonable value for an application that has not measured. See
+   * {@link CacheOptions.maxEntries} for how a per-request value interacts with this one.
+   */
+  maxEntries?: number;
+  /**
    * Default `refetchOnMount` for cached requests. Default `'stale'`.
    */
   refetchOnMount?: RefetchOnMount;
@@ -312,6 +329,20 @@ export interface CacheOptions<T> {
    * The gc timer is browser-only: on the server it would only hold stability.
    */
   readonly gcTime?: number;
+  /**
+   * A cap for the cache, on top of the global `maxEntries`.
+   *
+   * There is **one** cache per application and nothing owns a subset of it, so this is a budget for
+   * the whole cache rather than an allowance for the request that declares it. The effective cap is
+   * the smallest value anyone declared: a per-request value can only tighten the global one, never
+   * raise it. That is order-independent by construction, which last-writer-wins would not be, and it
+   * means no leaf request can grow the cache past what the application configured.
+   *
+   * The cost is real and deliberate: a request cannot ask for *more* room than the global setting,
+   * so a screen that needs a large budget has to raise the global value. `docs/design-0.2.md`
+   * records the per-key-prefix reading that was rejected, and why.
+   */
+  readonly maxEntries?: number;
   /**
    * What to do when this handle becomes the first subscriber of an entry.
    *

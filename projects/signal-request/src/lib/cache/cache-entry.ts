@@ -277,13 +277,41 @@ export class CacheEntry<T = unknown> {
     this.gcTimer = setTimeout(() => this.destroy(), this.gcMs);
   }
 
-  /** Tears the entry down and releases its timers. Idempotent. */
+  /**
+   * Tears the entry down and releases its timers. Idempotent.
+   *
+   * Writes signals, through `cancel()`. That is why {@link evict} exists: `QueryCache.resolve` runs
+   * inside a handle's key `computed`, and it is where `maxEntries` eviction happens, so eviction
+   * cannot come through here.
+   */
   destroy(): void {
     if (this.destroyed) return;
     this.destroyed = true;
     this.plan = undefined;
     this.settleListeners.clear();
     this.cancel();
+    this.teardown();
+  }
+
+  /**
+   * `destroy()` for an entry with **nothing in flight**, and therefore without a single signal write.
+   *
+   * Only valid where `observerCount === 0 && !isFetching()` — the entries the cache is allowed to
+   * take. For those, `cancel()` had nothing left to do: an entry loses its last observer through
+   * `release()`, which cancels on the way out, and the eviction selector refuses anything with a
+   * request in flight. Skipping it is what makes eviction callable from `resolve`, which runs inside
+   * a `computed`, where writing a signal is `NG0600`.
+   */
+  evict(): void {
+    if (this.destroyed) return;
+    this.destroyed = true;
+    this.plan = undefined;
+    this.settleListeners.clear();
+    this.teardown();
+  }
+
+  /** The tail `destroy()` and `evict()` share: a timer to clear, and an owner to tell. */
+  private teardown(): void {
     clearTimeout(this.gcTimer);
     this.gcTimer = undefined;
     this.onDestroy();

@@ -1,5 +1,12 @@
-import { ChangeDetectionStrategy, Component, computed, inject, signal } from '@angular/core';
-import { createMutation, createRequest, QueryClient } from 'ng-signal-request';
+import {
+  ChangeDetectionStrategy,
+  Component,
+  computed,
+  inject,
+  input,
+  signal,
+} from '@angular/core';
+import { createMutation, createRequest, QueryCache, QueryClient } from 'ng-signal-request';
 
 import type { Post } from '../models';
 
@@ -36,9 +43,33 @@ export class CacheTwinSection {
 }
 
 @Component({
+  selector: 'demo-cache-visit',
+  changeDetection: ChangeDetectionStrategy.OnPush,
+  template: `
+    <span class="badge" [class]="'badge ' + detail.status()">#{{ id() }} {{ detail.status() }}</span>
+  `,
+})
+export class CacheVisitSection {
+  /** Which post this stand-in for "a screen somebody visited" reads. */
+  readonly id = input.required<number>();
+
+  /**
+   * One key per id, so every visit is a distinct cache entry.
+   *
+   * `staleTime` is generous because the point is not the data, it is that each visit is an entry
+   * and each entry is a candidate for eviction once this component goes away.
+   */
+  protected readonly detail = createRequest<Post>(() => ({ url: `/posts/${this.id()}` }), {
+    key: () => ['demo', 'cache', 'visit', this.id()],
+    staleTime: 60_000,
+    debugName: 'demo:visit',
+  });
+}
+
+@Component({
   selector: 'demo-cache',
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [CacheTwinSection],
+  imports: [CacheTwinSection, CacheVisitSection],
   template: `
     <section class="card">
       <h2>5 · Paylaşılan önbellek — <code>key</code> + <code>invalidate</code></h2>
@@ -133,14 +164,83 @@ export class CacheTwinSection {
         izlenebilir.
       </p>
     </section>
+
+    <section class="card">
+      <h2>Önbelleği uzayda sınırlamak — <code>maxEntries</code></h2>
+
+      <p class="hint">
+        <code>gcTime</code> önbelleği <em>zamanda</em> sınırlar. Aynı pencereye çok sayıda farklı
+        anahtar girerse tavan yoktur — bir arama kutusu, sanallaştırılmış bir liste ya da aşağıdaki
+        gibi gezilen detay ekranları. <code>maxEntries</code> bu boşluğu kapatır. Bu demoda global
+        tavan <strong>{{ cap() }}</strong> (<code>main.ts</code>).
+      </p>
+
+      <div class="status">
+        <span class="badge">size(): {{ size() }}</span>
+        <span class="badge">maxEntries: {{ cap() }}</span>
+        @if (overCap() > 0) {
+          <span class="badge err">tavan aşıldı: +{{ overCap() }}</span>
+        }
+        @if (dropped(); as count) {
+          <span class="badge ok">evict(): {{ count }} kayıt atıldı</span>
+        }
+      </div>
+
+      <div class="row">
+        <button (click)="openMany()">30 farklı anahtar aç</button>
+        <button (click)="closeAll()" [disabled]="visits().length === 0">hepsini kapat</button>
+        <button (click)="trim()">evict() — boşları at</button>
+      </div>
+
+      <div class="status">
+        @for (id of visits(); track id) {
+          <demo-cache-visit [id]="id" />
+        } @empty {
+          <span class="hint">Açık ziyaret yok.</span>
+        }
+      </div>
+
+      <p class="hint">
+        <strong>30 farklı anahtar aç</strong> tek seferde 30 kayıt üretiyor ve hepsi
+        <em>izlendiği</em> için hiçbiri atılamaz: tavan aşılır ve panel bunu söyler — tavanı
+        tutturmak için ekranda duran bir bileşenin verisini çöpe atmak yanlış olurdu.
+        <strong>hepsini kapat</strong> onları boşa çıkarır. Atma işi
+        <em>yeni kayıt geldiğinde</em> yapılır, bu yüzden tavan tam olarak o anda tutturulur;
+        <strong>evict()</strong> aynı kuralı elle çalıştırır ve yalnızca kimsenin bakmadığı
+        kayıtları alır.
+      </p>
+    </section>
   `,
 })
 export class CacheSection {
   private readonly client = inject(QueryClient);
+  private readonly cache = inject(QueryCache);
 
   protected readonly draft = signal('');
   protected readonly outcome = signal<string | null>(null);
   protected readonly invalidated = signal<number | null>(null);
+  protected readonly dropped = signal<number | null>(null);
+
+  /**
+   * The ids of the stand-in "detail screens" currently on the page.
+   *
+   * Rendering one component per id is what makes them real cache entries with real observers: the
+   * moment they are removed from this array their components are destroyed, their entries go idle,
+   * and they become eviction candidates.
+   */
+  protected readonly visits = signal<readonly number[]>([]);
+  private nextId = 1;
+
+  /** The whole cache, live. A signal, so the readout needs nothing to re-read it. */
+  protected readonly size = this.client.size;
+
+  protected cap(): number {
+    return this.cache.maxEntries;
+  }
+
+  protected overCap(): number {
+    return Math.max(0, this.size() - this.cache.maxEntries);
+  }
 
   protected readonly posts = createRequest<Post[]>('/posts?_limit=5', {
     key: () => [...POSTS_KEY],
@@ -222,5 +322,28 @@ export class CacheSection {
   protected addFailing(): void {
     this.outcome.set(null);
     void this.addRejecting.run('bu kayıt kaybolacak');
+  }
+
+  /** Opens 30 distinct keys at once, which is more than the cap allows to sit idle. */
+  protected openMany(): void {
+    this.dropped.set(null);
+    const start = this.nextId;
+    this.nextId += 30;
+    this.visits.set(Array.from({ length: 30 }, (_, i) => start + i));
+  }
+
+  /** Removes every stand-in screen, so their entries lose their last observer. */
+  protected closeAll(): void {
+    this.visits.set([]);
+  }
+
+  /**
+   * Runs the eviction rule by hand.
+   *
+   * The same policy `maxEntries` applies on its own, exposed so a debug screen can ask for it. It
+   * reports how many went, which is how you tell "nothing was idle" from "nothing matched".
+   */
+  protected trim(): void {
+    this.dropped.set(this.client.evict());
   }
 }

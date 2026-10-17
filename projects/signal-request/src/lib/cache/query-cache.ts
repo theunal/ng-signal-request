@@ -1,6 +1,7 @@
 import { isPlatformBrowser } from '@angular/common';
 import { HttpClient } from '@angular/common/http';
-import { inject, Injectable, PLATFORM_ID } from '@angular/core';
+import { inject, Injectable, isDevMode, PLATFORM_ID } from '@angular/core';
+import { SIGNAL_REQUEST_CONFIG } from '../config';
 import { CacheEntry, type SeedValue } from './cache-entry';
 import { matchesFilter, normalizeKey, type QueryKey, type QueryKeyFilter } from './key';
 
@@ -9,6 +10,16 @@ export type CacheChangeListener = () => void;
 
 /** A value waiting for its key to be asked for. See {@link QueryCache.seed}. */
 type Seed = SeedValue<unknown>;
+
+/**
+ * A cap is a count, so it is floored and never negative. `undefined` and `NaN` both mean "no cap" —
+ * the second because every comparison against `NaN` is false, which would silently disable eviction
+ * if it reached `cap`.
+ */
+function normalizeCap(cap: number | undefined): number {
+  if (cap === undefined || Number.isNaN(cap)) return Number.POSITIVE_INFINITY;
+  return Math.max(0, Math.floor(cap));
+}
 
 /**
  * The store. One per application instance.
@@ -37,6 +48,134 @@ export class QueryCache {
   private readonly seeds = new Map<string, Seed>();
   private readonly http = inject(HttpClient);
   private readonly isBrowser = isPlatformBrowser(inject(PLATFORM_ID));
+  private readonly config = inject(SIGNAL_REQUEST_CONFIG);
+
+  /* --------------------------------------------------------------------- */
+  /*  maxEntries                                                             */
+  /* --------------------------------------------------------------------- */
+
+  /**
+   * How many idle entries may stay. `Infinity` until something declares a cap.
+   *
+   * The global value is read straight from {@link SIGNAL_REQUEST_CONFIG} — it is a property of the
+   * store, so the store owns it. Per-request values arrive through {@link tightenMaxEntries}, which
+   * is the only way a handle can have a say.
+   */
+  private cap = normalizeCap(this.config.maxEntries);
+
+  /** Monotonic counter behind {@link recency}. Plain, because nothing renders it. */
+  private useSeq = 0;
+
+  /**
+   * When each entry was last used, keyed like {@link settleDetachers}.
+   *
+   * A parallel map rather than a field on `CacheEntry`, because `CacheEntry` is exported and read by
+   * the devtools panel: a bookkeeping detail should not become public API, let alone a column.
+   *
+   * Ordering is what matters, not the numbers, so it is a counter rather than `Date.now()` — two
+   * entries touched in the same millisecond would otherwise tie, and a tie makes eviction order
+   * depend on `Map` iteration order.
+   */
+  private readonly recency = new Map<string, number>();
+
+  /** Set while the cache is over its cap, so an undersized cap does not log on every insert. */
+  private capWarned = false;
+
+  /** The effective cap. `Infinity` when nothing configured one. */
+  get maxEntries(): number {
+    return this.cap;
+  }
+
+  /**
+   * Narrows the cap, and drops whatever no longer fits.
+   *
+   * A cap is a budget for the whole cache rather than an allowance for the request that asked for
+   * it, so this can only ever **lower** the value — the global setting stays a ceiling that no leaf
+   * request can raise. That makes the outcome independent of the order requests are constructed in,
+   * which a last-writer-wins rule would not be. See `docs/design-0.2.md`.
+   */
+  tightenMaxEntries(cap: number): void {
+    const next = normalizeCap(cap);
+    // `!(next < cap)` also rejects `NaN`, which would otherwise poison every comparison.
+    if (!(next < this.cap)) return;
+    this.cap = next;
+    this.evictUntilAtMost(next);
+    this.warnIfOverCap();
+  }
+
+  /**
+   * Removes matching entries that have **no observer and nothing in flight**, and reports how many.
+   *
+   * The `maxEntries` policy as something a caller can invoke. `remove()` is the unconditional
+   * version, for when you know what you are doing; this one refuses to take an entry that a mounted
+   * component is reading or that a `run()` is waiting on.
+   *
+   * The default filter is the empty prefix, which `startsWith` treats as matching everything: that
+   * is "trim the cache", which is what a debug screen's button wants.
+   */
+  evictIdle(filter: QueryKeyFilter = []): number {
+    let removed = 0;
+    for (const entry of this.matching(filter)) {
+      if (!this.isEvictable(entry)) continue;
+      entry.evict();
+      removed++;
+    }
+    this.warnIfOverCap();
+    return removed;
+  }
+
+  /** Whether an entry may be taken: nobody is watching, and no request is waiting on an answer. */
+  private isEvictable(entry: CacheEntry<unknown>): boolean {
+    return entry.observerCount === 0 && !entry.isFetching();
+  }
+
+  /** Drops least-recently-used idle entries until at most `target` remain. */
+  private evictUntilAtMost(target: number): void {
+    while (this.entries.size > target) {
+      const victim = this.leastRecentlyUsedIdle();
+      if (victim === undefined) return;
+      const before = this.entries.size;
+      victim.evict();
+      // A teardown that removed nothing would spin this loop forever. `forget` is the only route
+      // out and it always deletes, so this is insurance rather than an expected branch.
+      if (this.entries.size >= before) return;
+    }
+  }
+
+  private leastRecentlyUsedIdle(): CacheEntry<unknown> | undefined {
+    let best: CacheEntry<unknown> | undefined;
+    let bestSeq = Number.POSITIVE_INFINITY;
+    for (const entry of this.entries.values()) {
+      if (!this.isEvictable(entry)) continue;
+      const seq = this.recency.get(entry.hash) ?? 0;
+      if (seq < bestSeq) {
+        bestSeq = seq;
+        best = entry;
+      }
+    }
+    return best;
+  }
+
+  /**
+   * Says so, in dev mode, when the cap cannot be met without taking a live entry.
+   *
+   * Overshoot is the designed outcome here — the alternative is evicting something a component is
+   * rendering — but it is almost always a sign that `maxEntries` is smaller than the working set, and
+   * silence would make that a mystery. Logged once per episode rather than once per insert.
+   */
+  private warnIfOverCap(): void {
+    if (this.entries.size <= this.cap) {
+      this.capWarned = false;
+      return;
+    }
+    if (this.capWarned || !isDevMode()) return;
+    this.capWarned = true;
+    console.warn(
+      `[ngsr] maxEntries: the cache holds ${this.entries.size} entries against a cap of ${this.cap}. ` +
+        'Every entry that could be dropped has a subscriber or a request in flight, so the cache ' +
+        'stays over its cap until one goes idle. Raise `maxEntries` if this is not a burst.',
+    );
+  }
 
   /**
    * The entry for `key`, created on first use.
@@ -55,6 +194,11 @@ export class QueryCache {
     const seed = this.seeds.get(normalized.hash) as SeedValue<T> | undefined;
     if (seed !== undefined) this.seeds.delete(normalized.hash);
 
+    // Before the new entry joins the map, so the entry somebody just asked for is never the one
+    // that gets taken. Enforced here — on insert — because this is the only moment the cache grows,
+    // and it has to be synchronous for the cap to be a memory bound rather than a report.
+    this.evictUntilAtMost(this.cap - 1);
+
     const entry = new CacheEntry<T>(
       normalized,
       this.http,
@@ -69,13 +213,21 @@ export class QueryCache {
       seed,
     );
     this.entries.set(normalized.hash, entry as CacheEntry<unknown>);
+    this.recency.set(normalized.hash, ++this.useSeq);
 
     this.settleDetachers.set(
       normalized.hash,
-      entry.addSettleListener(() => this.notifyActivity()),
+      entry.addSettleListener(() => {
+        // A response makes an entry more valuable than one that has merely sat there, so it moves to
+        // the back of the eviction queue. Guarded by `has` because a settle can arrive after the
+        // entry was forgotten, and re-adding the stamp would leak a map entry per forgotten key.
+        if (this.recency.has(normalized.hash)) this.recency.set(normalized.hash, ++this.useSeq);
+        this.notifyActivity();
+      }),
     );
     this.notify();
     this.notifyActivity();
+    this.warnIfOverCap();
     return entry;
   }
 
@@ -131,6 +283,7 @@ export class QueryCache {
       // closure per forgotten key for the life of the injector.
       this.settleDetachers.get(hash)?.();
       this.settleDetachers.delete(hash);
+      this.recency.delete(hash);
       this.notify();
       this.notifyActivity();
     }
@@ -173,6 +326,7 @@ export class QueryCache {
     const matched = this.matching(filter);
     for (const entry of matched) {
       this.entries.delete(entry.hash);
+      this.recency.delete(entry.hash);
       entry.destroy();
     }
     if (matched.length > 0) this.notify();
@@ -190,6 +344,8 @@ export class QueryCache {
     this.settleDetachers.clear();
     for (const entry of this.entries.values()) entry.destroy();
     this.entries.clear();
+    this.recency.clear();
+    this.capWarned = false;
     this.notify();
     this.notifyActivity();
   }

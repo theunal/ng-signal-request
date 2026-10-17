@@ -223,6 +223,21 @@ export class QueryDevtools {
   /** Total number of cached entries. */
   readonly count: Signal<number> = computed(() => this.entries().length);
 
+  /**
+   * The cache's effective cap, or `Infinity` when nothing configured one.
+   *
+   * A plain getter rather than a signal: a cap only changes when a keyed request is constructed, and
+   * a panel re-reads it on every change-detection pass anyway.
+   */
+  get cap(): number {
+    return this.cache.maxEntries;
+  }
+
+  /** How far over its cap the cache is, or `0`. */
+  get overCap(): number {
+    return Math.max(0, this.count() - this.cap);
+  }
+
   /** Entries currently on the network. */
   readonly fetching: Signal<number> = computed(
     () => this.entries().filter((entry) => entry.status === 'loading').length,
@@ -305,9 +320,12 @@ export class QueryDevtools {
   template: `
     <div class="ngsr-devtools">
       <button type="button" (click)="devtools.toggle()">
-        cache {{ devtools.count() }}
+        cache {{ devtools.count() }}{{ capLabel() }}
         @if (devtools.fetching(); as running) {
           <span class="busy">({{ running }} loading)</span>
+        }
+        @if (devtools.overCap > 0) {
+          <span class="over-cap" title="every dropable entry is in use">(over cap)</span>
         }
       </button>
 
@@ -359,6 +377,9 @@ export class QueryDevtools {
     .ngsr-devtools .busy {
       color: #b26a00;
     }
+    .ngsr-devtools .over-cap {
+      color: #b00020;
+    }
     .ngsr-devtools table {
       border-collapse: collapse;
       width: 100%;
@@ -380,6 +401,12 @@ export class QueryDevtools {
 })
 export class DevtoolsPanel {
   protected readonly devtools = inject(QueryDevtools);
+
+  /** `" / 500"`, or nothing when the cache is unbounded. Templates have no `Infinity`. */
+  protected capLabel(): string {
+    const cap = this.devtools.cap;
+    return Number.isFinite(cap) ? ` / ${cap}` : '';
+  }
 
   /** ms as something a human can scan. */
   protected formatAge(ms: number): string {

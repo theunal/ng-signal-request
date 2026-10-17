@@ -1,4 +1,4 @@
-import { computed, inject, Injectable, type Signal } from '@angular/core';
+import { computed, DestroyRef, inject, Injectable, signal, type Signal } from '@angular/core';
 import type { CacheEntry } from './cache-entry';
 import type { QueryKey, QueryKeyFilter } from './key';
 import { MutationRegistry } from './mutation-registry';
@@ -41,6 +41,44 @@ export class QueryClient {
    */
   private readonly pending = new Map<string, CacheEntry<unknown>>();
   private scheduled = false;
+
+  /** Bumped when the *set* of entries changes; {@link size} is a `computed` over it. */
+  private readonly sizeVersion = signal(0);
+  private sizeBumpScheduled = false;
+
+  /**
+   * How many entries the cache holds, as a live signal.
+   *
+   * The whole cache, which is the number `QueryCache.maxEntries` is compared against — that
+   * comparison is what the cap is for. For "how many match this filter", use {@link count}, which is
+   * a plain read.
+   *
+   * ```html
+   * cache {{ client.size() }} / 500
+   * ```
+   *
+   * Coalesced to a microtask: the notifications it follows fire from `QueryCache.resolve`, which runs
+   * inside a key `computed` where writing a signal is `NG0600`. A readout one tick behind is the
+   * trade, and it is the same one the devtools service makes.
+   */
+  readonly size: Signal<number> = computed(() => {
+    this.sizeVersion();
+    return this.cache.size;
+  });
+
+  constructor() {
+    // Unsubscribed on destroy so a long-lived root injectable does not outlive its own listener.
+    inject(DestroyRef).onDestroy(this.cache.subscribeChanges(() => this.scheduleSizeBump()));
+  }
+
+  private scheduleSizeBump(): void {
+    if (this.sizeBumpScheduled) return;
+    this.sizeBumpScheduled = true;
+    queueMicrotask(() => {
+      this.sizeBumpScheduled = false;
+      this.sizeVersion.update((n) => n + 1);
+    });
+  }
 
   /**
    * Marks matching entries as owing a fetch, and refetches the ones somebody is watching.
@@ -102,6 +140,24 @@ export class QueryClient {
   /** Removes matching entries, aborting anything in flight. */
   remove(filter: QueryKeyFilter): number {
     return this.cache.remove(filter);
+  }
+
+  /**
+   * Removes matching entries that nothing is watching, and reports how many went.
+   *
+   * The difference from {@link remove} is the guarantee, and it is the same guarantee `maxEntries`
+   * makes: an entry with a subscriber is somebody's rendered data, and an entry with a request in
+   * flight has a `run()` promise waiting on it. `evict` refuses both, so it cannot turn a cache hit
+   * into a spinner or leave a promise hanging. Use `remove` when you know what you are doing; use
+   * this from a debug screen's "trim the cache" button.
+   *
+   * ```ts
+   * client.evict(['users']);  // drop idle ['users', …] entries
+   * client.evict();           // drop every idle entry
+   * ```
+   */
+  evict(filter: QueryKeyFilter = []): number {
+    return this.cache.evictIdle(filter);
   }
 
   /**

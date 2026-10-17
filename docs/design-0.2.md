@@ -1,0 +1,431 @@
+# Design — 0.2.0
+
+Written 2026-10-16, before the code, continuing `docs/design.md`. The same rule
+applies as there: the plan is a plan, and where the code and this document
+disagree the code is right; disagreements get written down.
+
+## Scope of this document
+
+The 0.2.0 brief has six phases. They are not equally hard, and the brief says so:
+two of them are small and mostly additive, and two change the request lifecycle
+itself.
+
+| Phase | Subject | Status |
+| --- | --- | --- |
+| 0 | Verify the 0.1.0 claims | **Done** — see `docs/verification.md` |
+| 1 | Bound the cache in space (`maxEntries`) | **Done** in this session |
+| 5 | Remove the known traps | **Done** in this session |
+| 2 | Offline / `networkMode` | Designed here, deferred to its own session |
+| 3 | Async persistence and migrations | Designed here, deferred to its own session |
+| 4 | Non-HTTP sources (`queryFn`) | Designed here, deferred to its own session |
+| 6 | Devtools depth | Designed here, deferred to its own session |
+
+Phases 2 and 4 change how a request is *driven*: an offline query does not fetch
+until the network returns, and a `queryFn` query has no `HttpClient` behind it at
+all. Both reach into `CacheEntry.execute`, which is the one method every keyed
+request goes through. Doing them in the same session as two safe phases would put
+the risky change and the safe change in one diff, and a bisect would not be able
+to tell them apart. Phases 1 and 5 are shape-preserving: new options, new
+signals, better messages, no change to how a fetch is executed.
+
+## Global constraints, restated as decisions
+
+- **Zero new runtime dependencies.** `tslib` plus Angular peers only. Anything
+  that looks like it needs a library (a migration library, an IndexedDB wrapper)
+  is written by hand or is not done.
+- **No breaking change.** `pnpm check:api v0.1.0` must keep reporting
+  `removed 0`. That means every new option is optional, every new signal is
+  additive, and the `RequestErrorKind` union may gain optional *fields* but never
+  new or renamed members.
+- **A handle without a `key` behaves exactly as it does today.** Nothing in
+  Phase 1 or 5 touches the `httpResource` path except a dev-mode warning.
+- **Tree-shakeable.** Phase 1 and 5 add code to the core entry point, which is
+  under a 20 KB gzip budget and was at 15.9 KB. Phase 2 and 3 add code to
+  secondary entry points. `pnpm check:dist` must keep proving that an unused
+  entry point never reaches a production bundle.
+- **Strict TypeScript, inference intact.** `createRequest<User[]>(url, { key })`
+  must stay callable with one type argument.
+
+---
+
+## Phase 1 — `maxEntries`
+
+### The problem, precisely
+
+`gcTime` bounds the cache in time. Every entry that loses its last observer arms
+a timer and is dropped when it fires, so a cache with 10 keys touched once a
+minute stays small. What `gcTime` does not bound is the number of *distinct* keys
+touched inside one window. A typeahead that keys on the query string, a
+virtualised list that keys on the row id, or a `createRequests` over a large
+array all produce a new key per interaction. With a 5 minute `gcTime`, a minute
+of typing can hold hundreds of entries that nothing will ever read again, and the
+memory cost of each is a `CacheEntry` plus five or six signals.
+
+### API
+
+```ts
+// Global. Default: unlimited, so 0.1.0 applications are unaffected.
+provideSignalRequest({ maxEntries: 500 });
+
+// Per request. Optional; the effect on the shared cache is described below.
+createRequest('/users', { key: () => ['users'], maxEntries: 100 });
+
+// Reading it back.
+inject(QueryClient).size();     // Signal<number> — the whole cache
+inject(QueryClient).evict(['users']);  // number — matching *and idle* entries only
+inject(QueryCache).maxEntries;  // number — the effective cap, Infinity when none
+```
+
+Signatures:
+
+```ts
+interface SignalRequestConfig {
+  /** Upper bound on unobserved entries. Default unlimited. 500 is a sane value. */
+  maxEntries?: number;
+}
+
+interface CacheOptions<T> {
+  /** Can only tighten the global cap, never loosen it. See "why min()" below. */
+  readonly maxEntries?: number;
+}
+
+class QueryClient {
+  /** Number of entries in the cache, as a signal. Coalesced to a microtask. */
+  size(): Signal<number>;
+  /** Removes matching entries that nothing is watching. Returns how many went. */
+  evict(filter?: QueryKeyFilter): number;
+}
+
+class QueryCache {
+  /** The effective cap. `Infinity` when nothing configured one. */
+  get maxEntries(): number;
+  /** Narrows the cap. A cap is a budget: this can only lower it. */
+  tightenMaxEntries(cap: number): void;
+}
+```
+
+### Eviction policy
+
+Enforcement runs **on insert**, synchronously, inside `QueryCache.resolve`.
+
+A candidate is an entry with `observerCount === 0` **and** no request in flight.
+Among candidates the least recently used goes first. That is the whole policy;
+the two guards are the load-bearing part:
+
+- An entry with a subscriber is someone's data. Evicting it would make a mounted
+  component's `response()` go to `undefined` and turn a cache hit into a spinner,
+  which is the opposite of the feature.
+- An entry with a request in flight has a caller waiting on a promise. Evicting
+  it would leave that promise unresolved until its timeout, or reject it with a
+  `RequestCancelledError` the caller never asked for.
+
+If there is no candidate — everything is live — the cap is *not* met, the cache
+overshoots, and a dev-mode warning explains why:
+
+```
+[ngsr] maxEntries: 120 entries with nothing watching, cap is 100; every other
+entry has a subscriber or a request in flight, so the cache is over its cap
+until something goes idle.
+```
+
+The warning is guarded by a flag that resets the moment the cache comes back
+under the cap, so a permanently undersized cap does not log on every insert.
+
+Recency is a monotonic counter held by the cache, stamped onto the hash on
+`resolve` and on every settle. It is deliberately **not** a signal and
+deliberately not in `CacheEntry`: nothing renders it, and `CacheEntry`'s
+surface is exported.
+
+### Why `min()` and not a per-request allowance
+
+The brief asks for the option globally *and* per request. There is one cache for
+the application, so a per-request cap has to mean something about that shared
+store. Three readings are possible:
+
+1. **Per key-prefix budget.** `maxEntries: 100` on `['users', id]` caps the
+   `'users'` domain at 100 entries, independently of other domains. This is the
+   most useful reading and was rejected as too much machinery for a small phase:
+   it needs a prefix→cap registry with its own lifecycle, a rule for two requests
+   declaring caps for overlapping prefixes, and a way for the devtools to show
+   every domain.
+2. **Last writer wins.** A request declaring `maxEntries` replaces the cache's
+   cap. Order-dependent (whichever request was constructed last decides, which is
+   a constructor-order accident), and a request could *raise* the cap above what
+   the application owner configured. Rejected.
+3. **The tightest budget wins: `min(global, every declared per-request)`.**
+
+Chosen. It is order-independent, it means the global value is a hard ceiling that
+no leaf request can exceed, and it is trivially explainable: *a per-request
+`maxEntries` can only make the cache smaller.* The cost is real and is documented
+rather than hidden — a request cannot ask for a larger budget than the global
+one, so a screen that genuinely needs 1000 entries while the rest of the app
+needs 50 has to raise the global value.
+
+### Why eviction cannot use `destroy()`
+
+`resolve` runs inside the handle's key `computed`. That is a constraint the
+codebase has already been bitten by twice, and it is why `SeedValue` is a
+constructor parameter and why the devtools listener defers to a microtask.
+
+`destroy()` writes signals (`cancel()` sets `isFetching`, `retryAttempt` and
+`progress`), so calling it from `resolve` is `NG0600`. The fix is to split the
+method:
+
+```ts
+destroy(): void {                 // unchanged behaviour, signal writes included
+  if (this.destroyed) return;
+  this.destroyed = true;
+  this.cancel();
+  this.teardown();
+}
+
+/** `destroy()` for an entry with nothing in flight: identical, minus the signal writes. */
+evict(): void {
+  if (this.destroyed) return;
+  this.destroyed = true;
+  this.teardown();
+}
+
+private teardown(): void {        // plan, settle listeners, gc timer, onDestroy
+  ...
+}
+```
+
+Skipping `cancel()` is safe *by construction*, not by optimism: eviction only
+ever selects entries with no observers, and an entry loses its observers only
+through `release()`, which cancels the request on its way out. So for a candidate,
+`cancel()` was a no-op apart from its signal writes. The guard in the selector
+(`!isFetching()`) is what keeps that argument true, and there is a test that
+fails if it is removed.
+
+### A parallel recency map, not a field on `CacheEntry`
+
+`CacheEntry` is exported and is what the devtools panel reads. A `lastUsedAt`
+field on it would be public API for a bookkeeping detail, and would survive into
+`DevtoolsEntry` as a column nobody asked for. The cache keeps
+`Map<hash, number>`, maintained alongside `settleDetachers` — the same pattern,
+the same lifecycle points (`resolve` adds, `forget`/`remove`/`clear` delete).
+
+### Cost
+
+Enforcement is a scan of the entry map per insert, picking the minimum recency
+among candidates: `O(entries)` per insert, and `entries` is bounded by the cap,
+so a cache at its cap pays `O(cap)` per insert and never grows. At the
+recommended 500 that is 500 comparisons on a cache miss, against a network
+request that costs thousands of times more. A heap was rejected as unearned
+complexity for a small phase — it is the obvious optimisation if a benchmark ever
+shows this matters, and there is a benchmark in `docs/perf.md` to find out.
+
+### What the cap deliberately does **not** cover
+
+`QueryCache.seeds` — values persisted and waiting for their key to be asked for
+— is not bounded by `maxEntries`. Seeding is consumed the first time a handle
+resolves the key, so in the normal case it is proportional to the keys rendered,
+which is what the feature was designed around. The residual case is a snapshot
+with many more keys than any render asks for, and it is recorded as a known
+limitation rather than papered over: a `dehydrateFilter` (Phase 3) or an explicit
+`maxSeeds` is the right lever, and neither belongs in this phase.
+
+---
+
+## Phase 5 — the known traps
+
+Five items. Each is either fixed, or fixed where a fix exists and documented
+where it does not.
+
+### 5.1 A timeout is retried by default
+
+Today: `timeout` produces a `status: 0` failure, the default retry predicate
+treats `status: 0` as transient, so `timeout: 5000` with `retry: 2` takes ~15
+seconds to fail. That is documented in `types.ts` as a caveat rather than fixed,
+which is exactly the kind of documentation that becomes a bug report.
+
+The brief asks for a behaviour change gated behind an option so 0.2.0 stays
+compatible, with a dev-mode warning and a migration path. Design:
+
+```ts
+interface SignalRequestConfig {
+  /**
+   * Whether a timeout counts as retryable. Default `true` in 0.2.0 — the 0.1.0
+   * behaviour. **Set this to `false`**; the default flips in 0.3.0.
+   */
+  retryTimeouts?: boolean;
+}
+
+interface RequestOptionsBase<T, TParams, TRaw> {
+  /** Per-request override of the global `retryTimeouts`. */
+  retryTimeouts?: boolean;
+}
+```
+
+When it is `false`, a timeout is not retried by the **default** predicate. An
+explicit `retry.when` is a user decision and is left alone entirely — the option
+only governs what the library decides on its own.
+
+Detecting "this failure was a timeout" needs no new plumbing: `errors.ts`
+already classifies a `TimeoutError` abort, and `RequestErrorContext.timeout`
+already exists for it. The retry predicate can route through the same
+classification instead of re-deriving it from `status === 0`.
+
+Dev-mode warning, when a request declares both a `timeout` and a retry and says
+nothing about `retryTimeouts`:
+
+```
+[ngsr] `timeout: 5000` with `retry: 2` can take ~15000 ms to give up, because a
+timeout is retried by default. Pass `retryTimeouts: false` to stop at the first
+timeout, or set `retry: { when: … }` to decide for yourself.
+```
+
+Migration path, as the brief requires: 0.2.0 default `true` + warning; 0.3.0
+default `false` and the warning becomes an error path in the changelog. The
+README's `timeout` row gains the option rather than the warning it has today.
+
+### 5.2 A non-GET `createRequest` fires writes
+
+`createRequest.post('/x')` builds a reactive resource. Change a signal its source
+reads and it POSTs again. Nobody means that; they mean a mutation.
+
+A dev-mode-only warning when a non-GET variant is created without `lazy: true`:
+
+```
+[ngsr] `createRequest.put(...)` is reactive: it will re-send whenever a signal
+its source reads changes. For a write, use `createMutation.put(...)`, or pass
+`lazy: true` and call `run()` yourself.
+```
+
+"Dev-mode only" is `isDevMode()` guarding a `console.warn`. There is no
+production behaviour, and the check is a string comparison on the method plus a
+boolean read, behind a branch that minifiers keep but that costs nothing on the
+happy path. This is the one place the library deliberately reports something the
+user did not ask it to.
+
+### 5.3 `status: 0` ambiguity
+
+What `status: 0` can mean: the network is down, the request was blocked (CORS,
+an extension, mixed content), the request was aborted, or the fetch failed for a
+reason the browser will not name. What can be distinguished:
+
+| Situation | Signal available | Verdict |
+| --- | --- | --- |
+| Aborted on purpose | `AbortError` / `TimeoutError` name on the cause | Already classified as `aborted` / `timeout` |
+| Off by the browser's own account | `navigator.onLine === false` | New: `offline: true` on the `network` member |
+| Blocked, CORS, opaque | nothing — the browser hides it | Stays `network`, honestly unclassified |
+| Everything else | nothing | `unknown` |
+
+The change is one optional field:
+
+```ts
+| { readonly kind: 'network'; readonly cause: unknown; readonly offline?: boolean };
+```
+
+`kind` gains no members and no member is renamed, per the brief. It is optional
+so a consumer's `if (error.kind === 'network')` narrowing keeps compiling.
+
+`navigator.onLine` is read defensively (`typeof navigator` guard) so the server
+reports `offline: undefined` rather than throwing. Phase 2 replaces the source
+with `OnlineManager.online()`, which is the same value with an override seam;
+`offline` stays the field either way, so this is not throwaway work.
+
+What is deliberately **not** done: inventing a `cors` kind. There is no reliable
+signal, and a guess that is sometimes wrong is worse than an honest `network`.
+
+### 5.4 Cached handles have no `.resource` and no `ctx.chain()`
+
+The question the brief asks is whether dependent queries can be supported on a
+cached handle — a `dependsOn` / `enabled` option, or a chain helper built on
+handles.
+
+Investigation first, because the answer decides which of three things to do. A
+cached handle's key is a `computed` that reads the caller's key factory. If that
+factory reads another handle's signal, the dependency is already reactive *and*
+already correct: the argument — the upstream value — is part of the cache
+identity, so two consumers of the same derived key share one entry. That is
+strictly better than `ctx.chain()`, which transports an argument without making
+it part of the identity.
+
+What is genuinely absent on the cached path is `enabled`: "do not fetch until X".
+On the uncached path that is a source returning `undefined`. On the cached path
+the equivalent is a key that declines to resolve. The decision is made in the
+"code" section below, after the implementation, per the disagreement rule at the
+top of this document.
+
+Whichever way it goes, the runtime message already points at the recommended
+alternative, and the type error is checked: `.resource` must be a compile error
+on `CachedRequest`, not a `undefined` that fails at runtime.
+
+### 5.5 `onMutate`'s `TContext` is only inferred when no type arguments are written
+
+Today, `createMutation<T, TArgs>(...)` forces `TContext` to its default because
+TypeScript has no partial type-argument inference — the same wall Phase 5 of the
+0.1.0 plan hit with `select`, which is why `select` is a method rather than an
+option.
+
+The brief asks for overloads or a builder. Both are tried as probes against the
+real declaration, and the outcome is recorded verbatim either way: if it cannot
+be done, the current behaviour stays and an `expectTypeOf` test pins it so nobody
+"fixes" it into something worse.
+
+---
+
+## Phase 2 — offline / `networkMode` (deferred, sketch)
+
+```ts
+@Injectable({ providedIn: 'root' })
+class OnlineManager {
+  readonly online: Signal<boolean>;
+  setOnline(value: boolean): void;   // the test seam
+}
+
+interface SignalRequestConfig {
+  networkMode?: NetworkMode;         // 'online' (default) | 'always' | 'offlineFirst'
+}
+
+class RequestBase {
+  paused: Signal<boolean>;
+}
+```
+
+`OnlineManager` owns one `window` listener pair and one `WritableSignal`, and is
+the only place in the library that touches connectivity. `'online'` pauses a
+query with no network and a status of `loading`; a new `paused()` signal says
+why, since `loading` alone cannot. A paused retry must not burn an attempt, which
+means the pause check belongs *around* the retry scheduling in
+`CacheEntry.execute` — the same method Phase 4 rewrites, which is why both are
+deferred together. Mutation replay is an ordered queue owned by the cache, with
+`persist`-style opt-in for surviving a reload.
+
+## Phase 3 — async persistence (deferred, sketch)
+
+`CacheStorage` becomes `MaybePromise`-returning; `indexedDbStorage()` is a
+hand-written ~100 line wrapper in `/persist`; `isRestoring()` plus a hold on the
+first fetch of a restorable key; `buster` and `migrate(snapshot, fromVersion)`
+around `SNAPSHOT_VERSION`. The hard part is not IndexedDB, it is the restore
+race: `resolve` runs inside a `computed`, so "wait for the restore" cannot block
+there, and the design is a seed that arrives late and is applied to the existing
+entry via `restore()` — which already exists for exactly this reason.
+
+## Phase 4 — `queryFn` (deferred, sketch)
+
+```ts
+createQuery<T>({
+  key: () => ['user', id()],
+  queryFn: ({ signal, params }) => fetch(...),
+});
+```
+
+A second *plan* for the same `CacheEntry`, not a second cache. `FetchPlan` is
+already the seam: today it carries an `HttpClient` request, and a query would
+carry a function plus an `AbortSignal` built from the subscription the entry
+already owns. The acceptance criterion — a keyed `createRequest` and a
+`createQuery` on one key share one entry and one in-flight call — is a decoder
+requirement: the plan must be re-buildable when *either* kind of handle built it,
+which is why `FetchPlan` already stores the request rather than a closure.
+
+## Phase 6 — devtools depth (deferred, sketch)
+
+Per-entry detail (data preview, timings, observers, retry history) and actions
+(invalidate, refetch, cancel, remove, set stale). The entry point must stay under
+15 KB gzip and stay absent from a bundle that does not import it, both already
+asserted by `check:dist`. The one invariant to preserve is the reason the panel
+works at all: nothing under `/devtools` may write a signal from a
+`subscribeChanges` listener, because those fire inside a `computed`.

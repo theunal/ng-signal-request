@@ -12,6 +12,42 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 > **The public API of `v0.0.4` is a strict subset of 0.1.0**: diffing the export
 > list of `public-api.ts` between the two tags gives 0 removed, 40 added.
 
+## [Unreleased]
+
+### Added
+
+- **`maxEntries` — the cache is now bounded in space as well as in time.** `gcTime`
+  collected entries nobody was watching, but only after the fact: a workload that
+  touched many distinct keys inside one window — a typeahead keyed on the query
+  string, a virtualised list keyed on the row id — had no bound at all.
+  - Global through `provideSignalRequest({ maxEntries })`, and per request through
+    the `maxEntries` cache option. A per-request value can only **tighten** the
+    global one, never raise it: there is one cache and nothing owns a subset of it,
+    so the smallest declared budget wins and the global value is a ceiling. That is
+    order-independent, which last-writer-wins would not be.
+  - The policy is LRU over **idle** entries only — no subscriber, no request in
+    flight. If nothing qualifies, the cache overshoots rather than taking data out
+    from under a mounted component, and warns once per episode in dev mode.
+  - Eviction runs synchronously as entries arrive, so the cap is a memory bound
+    rather than a report.
+  - `QueryClient.size` (`Signal<number>`) and `QueryClient.evict(filter)`; on the
+    store, `QueryCache.maxEntries`, `tightenMaxEntries` and `evictIdle`, and
+    `CacheEntry.evict()` for a teardown that writes no signals.
+  - The devtools panel shows the entry count against the cap and flags an
+    overshoot.
+  - `docs/design-0.2.md` records the per-key-prefix reading that was rejected, and
+    why eviction cannot go through `destroy()`.
+
+### Fixed
+
+- The 0.1.0 changelog claimed every new `QueryCache` member was a signal. Only
+  `CacheEntry.data` and `CacheEntry.status` are.
+- README corrections, found by auditing every claim against the code: the error
+  predicates are methods (`http()`, `timeout()`, `network()`, …) with a `message`
+  getter, not `isHttp` / `isTimeout`; the `/testing` export list was missing
+  `cache`, `advanceClock`, `TestSetup` and `ChildScope`; and the library ships four
+  entry points, not three. `docs/verification.md` has the full audit.
+
 ## [0.1.0] - 2026-10-16
 
 Server state: a shared cache, key invalidation, infinite queries and persistence,
@@ -30,9 +66,11 @@ garbage collection involved in that path.
   which is precisely why the keyed path is driven by `HttpClient` rather than by
   `httpResource`.
   - `QueryCache` — `peek`, `size`, `seed`, `remove`, `clear`, `markInvalidated`,
-    `subscribeChanges`, `subscribeActivity`, all as signals.
+    `subscribeChanges`, `subscribeActivity`.
   - `CacheEntry` — the unit of fetching, with `fetchCount`, `dataUpdatedAt`,
-    `observerCount`, `isStale`, `local`, and the retry/cancel/settle plumbing.
+    `observerCount`, `isStale`, `local`, and the retry/cancel/settle plumbing. Its
+    `data` and `status` are signals; the rest are plain reads, because subscription
+    bookkeeping is not something a template should key off.
 - **Key invalidation and `QueryClient`** — `invalidate`, `refetch`, `getData`,
   `setData`, `remove`, `isMutating`, `mutatingCount`. `invalidate` marks, batches
   by microtask and refetches what is on screen. Keys compare **by value**,

@@ -13,6 +13,10 @@ bootstrapApplication(AppComponent, {
       baseUrl: 'https://jsonplaceholder.typicode.com',
       // Default retry for queries. The "retry" section shows a per-request override.
       retry: 1,
+      // A space bound on the cache: at most 25 entries may sit around with nobody watching.
+      // `gcTime` bounds it in time only. A small number on purpose, so the "maxEntries" demo has
+      // something to show; 500 is a more realistic production value.
+      maxEntries: 25,
       // Global error hook: fires once per request, after retries are exhausted.
       onError: (error, { url, method }) => {
         console.warn(`[global onError] ${method} ${url} -> ${error.message}`);

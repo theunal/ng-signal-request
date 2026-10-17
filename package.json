@@ -11,6 +11,7 @@
     "build:demo": "ng build demo",
     "check:dist": "node scripts/check-dist.mjs",
     "check:api": "node scripts/api-diff.mjs",
+    "bench": "node scripts/bench.mjs",
     "verify": "pnpm run typecheck && pnpm run test && pnpm run build && pnpm run build:demo && pnpm run check:dist"
   },
   "private": true,

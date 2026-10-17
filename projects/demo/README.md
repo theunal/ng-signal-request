@@ -75,16 +75,25 @@ Every other request goes to the real API.
 - `createRequest.text()` — the body read as text
 - The `equal`, `debugName` and `injector` options pass straight through
 
-**4 · Infinite list & optimistic** — `createRequest` + `createMutation`
+**4 · Sonsuz liste** — `createInfiniteRequest`
 
-- Infinite scroll without a dedicated primitive: `params` carries the page,
-  `keepPreviousValue` holds the loaded pages on screen, `update()` accumulates,
-  and an `appendedPage` guard keeps a reload from duplicating a page
-- `optimistic` + `target` writing into that same query — the new row is visible
-  before the request goes out
-- The rollback, twice over: **Ekle** succeeds (and the demo API drops the write,
-  so `invalidates` shows you the server's truth), **Hata ile ekle** hits
-  `/api/reject` and the row disappears on its own
+- `_page` / `_limit` paging through the real API, ten pages deep
+- `fetchNextPage()` / `hasNextPage()` / `pageParams()`, and `response()` flattening
+  the pages into one array
+- One cache entry **per page**, keyed `['demo', 'feed', run, page]`, so
+  `invalidate(['demo', 'feed'])` reaches every loaded page by prefix
+- **Baştan başlat** as a key change rather than an imperative reset
+
+**5 · Paylaşılan önbellek** — `key`, `QueryClient`, `maxEntries`
+
+- Two independent components on one key: one request, one entry, `fetchCount`
+  identical on both
+- `invalidate(['demo', 'cache'])` by prefix, and `setData` as a local write
+- Optimistic append addressed by **key** — the mutation holds no handle — with the
+  rollback observable through `/api/reject`
+- **30 farklı anahtar aç**: thirty live entries against a cap of twenty-five, so the
+  overshoot and its dev-mode warning are visible, then **hepsini kapat** and
+  **evict()** to watch the cache trim itself
 
 ## Not covered
 

@@ -58,6 +58,17 @@ describe('toRequestError', () => {
     expect(toRequestError(cause)).toEqual({ kind: 'network', cause });
   });
 
+  it('omits the status text when the cause carries none', () => {
+    // Angular's own constructor substitutes `'Unknown Error'` for a missing reason phrase, so this
+    // shape only reaches the classifier through a custom backend or a hand-built cause. It still
+    // matters: interpolating unconditionally would produce `HTTP 500 ` with a trailing space, which
+    // is the kind of string somebody eventually `===`-compares.
+    const cause = new HttpErrorResponse({ status: 500, statusText: 'Server Error' });
+    Object.defineProperty(cause, 'statusText', { value: '' });
+
+    expect(toRequestError(cause).message).toBe('HTTP 500');
+  });
+
   it('adds `offline: true` when the browser reports no connection', () => {
     // The one case where the library can do better than "no connection": the browser itself said so,
     // and that is worth telling a user, because "you are offline" has an action and "check your

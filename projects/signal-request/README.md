@@ -468,6 +468,12 @@ loading cycles before reporting the timeout. That default is unchanged from
 0.1.x, and in dev mode the library warns you when you combine the two options and
 say nothing about the timeout.
 
+> **This default changes in 0.3.0**, to `false`. It is not changed here because a
+> retry policy is not something to alter underneath a caller in a minor release —
+> the timing of every failing request would move. Set `retryTimeouts` explicitly
+> (either value) before then and the change is a non-event. The CHANGELOG's
+> Deprecated section has the same note.
+
 `retryTimeouts: false` is the way out — the timeout is reported as soon as it
 happens:
 

@@ -99,6 +99,25 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   Behaviour is unchanged; use `createMutation` or `lazy: true`.
 - No export was removed: `pnpm check:api v0.1.0` reports 0 removed.
 
+### Deprecated
+
+- **`retryTimeouts`'s `true` default.** The option is not deprecated and will not be
+  — what changes is the value you get when you do not set it. **In 0.3.0 the default
+  flips to `false`**, so a `timeout` stops being retried unless you ask for it. It
+  stays `true` in 0.2.0 because flipping it here would silently change how long a
+  failing request takes for everyone upgrading from 0.1.x, and a retry policy is not
+  something to change underneath a caller in a minor release.
+
+  What to do now, if you combine a `timeout` with a `retry`:
+
+  - want the 0.3.0 behaviour today → `retryTimeouts: false`, globally in
+    `provideSignalRequest` or on the request;
+  - want today's behaviour to survive the flip → `retryTimeouts: true`;
+  - not sure whether you are affected → the dev-mode warning says so, once per
+    combination, the first time it is built.
+
+  Set it explicitly and the flip is a non-event.
+
 ## [0.1.0] - 2026-10-16
 
 Server state: a shared cache, key invalidation, infinite queries and persistence,

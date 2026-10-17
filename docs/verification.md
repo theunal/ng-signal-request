@@ -180,3 +180,51 @@ exports.
 - The bundle budgets are gzip sizes with no transfer-encoding applied. A real
   server with Brotli would report smaller numbers; the comparison between entry
   points is unaffected.
+
+## 7. Reality check, re-run during the 0.2.0 work (2026-10-17)
+
+The plan for 0.2.0 asks for the 0.1.0 numbers to be re-measured rather than
+inherited, and they were — on the Phase 5 tree, before Step 0.1 touched anything.
+The figures in sections 1–4 held. Two *other* things did not, and both are recorded
+where they belong rather than quietly fixed:
+
+| Check | Previous report | This machine, this run |
+| --- | --- | --- |
+| Test suite on the clean tree | 413 passing | 413 collected, **2 failed** — the two perf ceilings |
+| Coverage on the clean tree | 96.06 / 90.39 / 96.65 / 97.95 | the failing run printed no summary; after the fixes, 96.49 / 91.02 / 96.88 / 98.19 |
+| `pnpm verify` | exit 0 | **exit 1** |
+| `pnpm bench` | exit 0, four lines | exit 0 on the first run, **5 s timeout** on a later one |
+
+The `check:api` figure (76 exports, 0 removed) and the core bundle size were
+re-measured after Step 0.1 and are recorded in the 0.2.0 report; they did not move.
+
+1. **The 50 µs/op ceiling was calibrated for a run without coverage and enforced
+   in a run with it.** Under `pnpm test`, v8 coverage inflates the capped loop to
+   67–71 µs/op, so `pnpm verify` — which is the command the acceptance criteria name
+   — was red. Fixed by scoping the tight ceiling to `pnpm bench` and adding a
+   machine-independent *shape* assertion; the full account is in `docs/perf.md`
+   under "Two ceilings, not one".
+2. **The default 5-second test timeout is too short for a 200,000-iteration loop**
+   on a loaded machine, so `pnpm bench` could report a timeout instead of a number.
+   Fixed with an explicit 120-second timeout on the perf tests. The same audit
+   caught a docstring in `perf.spec.ts` claiming "the ceiling scales with `N`",
+   which was never true.
+
+The audit also produced `scripts/uncovered-branches.mjs` (throwaway tooling, kept
+because it is how the next reader can repeat it):
+
+```bash
+pnpm exec ng test --coverage --coverage-reporters=json
+node scripts/uncovered-branches.mjs            # everything
+node scripts/uncovered-branches.mjs error      # one file
+```
+
+It listed the branch paths no test had taken. The ones reachable through the public
+API became tests — `summarize`'s empty status text, `CacheEntry.fetch()` on a
+destroyed entry, `subscribe()` on a destroyed entry, `clear()` and the staged
+values, `refetch()` with no subscriber, `destroy()`/`evict()` idempotence, the
+devtools label counting staged values — which is what moved branches from 90.27 to
+91.02. The rest are defensive paths (a callback reassigned twice, a plan that was
+never built) and are listed here rather than tested so that nobody mistakes them
+for coverage.
+

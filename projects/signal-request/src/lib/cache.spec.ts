@@ -961,3 +961,94 @@ describe('cached request — options and the disabled state', () => {
     users.destroy();
   });
 });
+
+/**
+ * Entry-level branches the coverage audit found untaken.
+ *
+ * Each is a guard the code depends on, reachable only through a particular interleaving or through
+ * the exported `CacheEntry` itself: an entry destroyed between a handle's plan and its fetch, a
+ * `refetch()` on an entry nobody watches any more, a release called twice. They are tested rather
+ * than left uncovered because a guard nobody has run is a guard that can be inverted unnoticed —
+ * and because the last observer leaving is exactly when the cache is most interesting.
+ */
+describe('cached request — entry lifecycle edges', () => {
+  it('fetch() on a destroyed entry rejects instead of opening a request', async () => {
+    const { http, create } = setup();
+    create(() => createRequest<User[]>('/users', { key: () => ['users'], refetchOnMount: false }));
+    await settle();
+
+    const entry = cache().peek<User[]>(['users'])!;
+    entry.destroy();
+
+    // A removal during a load has to surface as a rejection rather than a promise that never
+    // settles: `run()` is the caller's handle on the answer.
+    await expect(
+      entry.fetch({
+        request: { url: '/users' },
+        structuralSharing: (_previous, next) => next,
+        retry: undefined,
+        parse: undefined,
+        responseType: 'json',
+      }),
+    ).rejects.toBeInstanceOf(RequestCancelledError);
+    http.expectNone(() => true);
+  });
+
+  it('subscribe() on a destroyed entry returns a no-op release', async () => {
+    const { create } = setup();
+    const handle = create(() =>
+      createRequest<User[]>('/users', { key: () => ['users'], refetchOnMount: false }),
+    );
+    await settle();
+    handle.destroy();
+    await settle();
+
+    const entry = cache().peek<User[]>(['users'])!;
+    entry.destroy();
+
+    // The entry was evicted between a handle building its plan and its subscription effect running,
+    // which `maxEntries` makes ordinary. The handle must not refcount an entry that is gone.
+    const release = entry.subscribe(60_000);
+    expect(entry.observerCount).toBe(0);
+    release();
+    expect(entry.observerCount).toBe(0);
+  });
+
+  it('is idempotent: a double release, a double destroy and an evict after destroy', () => {
+    setup();
+    const entry = cache().resolve(['x']);
+
+    const release = entry.subscribe(60_000);
+    release();
+    // Documented: a handle hands this to a `DestroyRef` without tracking whether it already ran.
+    release();
+    expect(entry.observerCount).toBe(0);
+
+    entry.destroy();
+    entry.destroy();
+    // `evict` is the same teardown without the signal writes, and is reachable here if the cache
+    // ever selected an entry that had already been destroyed.
+    entry.evict();
+    expect(entry.isDestroyed).toBe(true);
+  });
+
+  it('refetch() without a subscriber is undefined rather than a guess', async () => {
+    const { http, create } = setup();
+    const handle = create(() => createRequest<User[]>('/users', { key: () => ['users'] }));
+    await settle();
+    http.expectOne('/users').flush([{ id: 1, name: 'Ada' }]);
+    await settle();
+
+    const entry = cache().peek<User[]>(['users'])!;
+    expect(entry.hasPlan).toBe(true);
+
+    handle.destroy();
+    await settle();
+
+    // The last observer left, and with it the only description of what a refetch should send.
+    // Guessing would send something the user never asked for, so the answer is `undefined`.
+    expect(entry.hasPlan).toBe(false);
+    expect(entry.refetch()).toBeUndefined();
+    http.expectNone(() => true);
+  });
+});

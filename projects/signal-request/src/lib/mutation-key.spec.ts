@@ -436,6 +436,25 @@ describe('createMutation — context typing', () => {
     expectTypeOf(save.context).toEqualTypeOf<Signal<undefined>>();
   });
 
+  it('fails loudly rather than silently when a returning onMutate skips `TContext`', () => {
+    // The trap in the test above, from the other side: writing `<number, string>` means the callback
+    // has to satisfy `() => undefined`, so this is a compile error. That is the *good* outcome — the
+    // alternative fix (capturing the options object in a type parameter) compiles but degrades
+    // `context()` to `unknown`, which is a silent loss of the type this feature exists to carry.
+    // `docs/design-0.2.md` §5.5 records the probe.
+    const { create } = setup();
+    const save = create(() =>
+      createMutation<number, string>((t) => ({ url: '/x', body: { t } }), {
+        // @ts-expect-error `TContext` defaults to `undefined` when it is not written.
+        onMutate: (t) => ({ title: t }),
+      }),
+    );
+
+    // The consequence, not just the error: there is nothing to read back, which is exactly why the
+    // compile error above is the *better* failure mode.
+    expectTypeOf(save.context).toEqualTypeOf<Signal<undefined>>();
+  });
+
   it('an old two-argument callback still type-checks', () => {
     const { create } = setup();
     // The pre-v0.1.0 signature. Adding a trailing optional parameter is a widening, so every

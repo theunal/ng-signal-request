@@ -135,7 +135,10 @@ function buildInfiniteInContext<TPage, TParam>(
   const destroyRef = inject(DestroyRef);
   const isBrowser = isPlatformBrowser(inject(PLATFORM_ID));
 
-  const retryPolicy = normalizeRetry(options.retry);
+  const retryPolicy = normalizeRetry(options.retry, {
+    timeout: options.timeout,
+    timeouts: options.retryTimeouts ?? globalConfig.retryTimeouts,
+  });
   const staleTime = options.staleTime ?? globalConfig.staleTime ?? 0;
   const gcTime = options.gcTime ?? globalConfig.gcTime ?? DEFAULT_GC_TIME;
   const share = resolveStructuralSharing<TPage>(options.structuralSharing, options.equal);

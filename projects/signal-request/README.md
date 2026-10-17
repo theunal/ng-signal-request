@@ -74,6 +74,7 @@ because those callbacks run outside an injection context.
 | --- | --- |
 | `baseUrl` | Prepended to every relative url. Absolute urls are left alone |
 | `retry` | Default retry policy **for queries only**. Mutations never retry by default |
+| `retryTimeouts` | Whether an elapsed `timeout` counts as worth retrying. Default `true` (0.1.x behaviour). See "The timeout + retry caveat" |
 | `headers` | `Record<string, string>`, or a function for reactive headers. Merged *under* per-request headers |
 | `onError` | Called once per request **or mutation** that ends in a final error, after retries. Good for toasts / logging |
 | `onSuccess` | The mirror image: called once per successful request or mutation. For logging / analytics — a toast belongs in the per-call `onSuccess`, where you know what happened |
@@ -180,6 +181,7 @@ bag it is just an ordinary query value (`?method=PUT`).
 | `debounce` | ms; delays source changes. **The very first request is never delayed.** Browser only |
 | `retry` | `3` \| `{ count, delay, when }`. Default: network errors, 408/425/429 and every 5xx; exponential back-off 1s, 2s, 4s… capped at 30s |
 | `timeout` | Abort after N ms. Surfaces as `{ kind: 'timeout', ms }`. Overrides a `timeout` the source sets; a source-level `timeout` alone is classified the same way. See the caveat below |
+| `retryTimeouts` | Whether this request's `timeout` is retried. Default `true` (0.1.x behaviour); the global value is the fallback. See the caveat below |
 | `pollInterval` | ms, or `() => number \| false` (reactive on/off). Browser only |
 | `pollWhenHidden` | Keep polling while the tab is hidden (default `false`) |
 | `refetchOnWindowFocus` | Re-fetch when the tab becomes visible again (default `false`). Browser only |
@@ -348,7 +350,7 @@ type RequestError =
   | { kind: 'aborted' }
   | { kind: 'timeout'; ms: number }
   | { kind: 'http'; status: number; statusText: string; url: string | null; body: unknown }
-  | { kind: 'network'; cause: unknown }
+  | { kind: 'network'; cause: unknown; offline?: true }
   | { kind: 'unknown'; cause: unknown };
 ```
 
@@ -422,6 +424,24 @@ Both places count: the `timeout` option, and a `timeout` set on the request
 object itself (the `createRequest` source or the `createMutation` builder). When
 both are present, the option wins.
 
+One thing *is* known rather than guessed: when the browser itself says it has no
+connection, the `network` member carries `offline: true`, so a UI can say "you
+are offline" instead of "check your connection":
+
+```ts
+const error = this.list.requestError();
+
+if (error.network()?.offline) {
+  // navigator.onLine === false — the browser is certain, so this is worth saying
+}
+```
+
+The field is present **only** in that case: absent when the browser believes it
+is online (a CORS block and a dropped socket arrive here too, and neither means
+"offline"), and absent on the server, where there is no `navigator` to ask. There
+is no `false`, which is why the type is `offline?: true` rather than
+`offline?: boolean` — an absence is not a claim.
+
 Note that `httpResource` cancels by unsubscribing rather than by failing, so
 `{ kind: 'aborted' }` mostly comes from your own `cancel()` and from mutations.
 
@@ -441,9 +461,25 @@ try {
 
 ### The timeout + retry caveat
 
-A timeout reaches the retry policy as a `status: 0` failure, so **it is retried
-by default**: `timeout: 5_000` with `retry: 2` can take up to ~15s and show
-three loading cycles. Exclude it if that is not what you want:
+A timeout reaches the retry policy as a `status: 0` failure, which by status
+alone is indistinguishable from a dropped connection — so **it is retried by
+default**: `timeout: 5_000` with `retry: 2` can take about 15s and show three
+loading cycles before reporting the timeout. That default is unchanged from
+0.1.x, and in dev mode the library warns you when you combine the two options and
+say nothing about the timeout.
+
+`retryTimeouts: false` is the way out — the timeout is reported as soon as it
+happens:
+
+```ts
+// one request, { kind: 'timeout', ms: 5_000 } as soon as the 5s elapses
+createRequest<User[]>('/users', { timeout: 5_000, retry: 2, retryTimeouts: false });
+```
+
+It can be set globally (`provideSignalRequest({ retryTimeouts: false })`) and
+overridden per request, and it is deliberately narrow: a genuine network failure
+still retries, because that is the case retries exist for. An explicit
+`retry: { when }` wins over both, since it answers the same question:
 
 ```ts
 retry: { count: 2, when: (e) => (e as HttpErrorResponse).status !== 0 }
@@ -489,6 +525,33 @@ A cached handle has **no `.resource`**. There is no `httpResource` behind it —
 that is exactly why the request can be shared — so `.resource` is a type error
 rather than a silent `undefined`, and `ctx.chain()` gets an explanatory error
 instead of chaining against nothing.
+
+### Dependent queries on a cached handle
+
+The replacement for `ctx.chain()` on the cached path is better than a
+workaround: put the thing the request depends on into its **key**. The dependency
+is then part of the cache identity, so two upstream values can never share one
+downstream entry.
+
+```ts
+readonly post = createRequest<Post>(
+  () => `/posts/${this.id()}`,
+  { key: () => ['post', this.id()] },
+);
+
+readonly comments = createRequest<Comment[]>(
+  () =>
+    // Nothing to ask for until the post has a value: no request, and no entry either.
+    this.post.response() ? `/posts/${this.post.response()!.id}/comments` : undefined,
+  { key: () => ['comments', this.post.response()?.id] },
+);
+```
+
+Two halves, and both matter. The **source** returns `undefined` while there is
+nothing to depend on, which is how a request is disabled: it is not sent, and no
+entry is created for the not-yet-meaningful key. The **key** carries the upstream
+value, so switching to another post re-points the handle at another pair of
+entries and the previous pair stays a cache hit until `gcTime`.
 
 ### Bounding the cache in space — `maxEntries`
 
@@ -680,6 +743,9 @@ readonly feed = createInfiniteRequest<Item>(
     initialPageParam: 0,
     getNextPageParam: (last, _all, param) => (last.length === 20 ? param + 1 : undefined),
     maxPages: 5,
+    retry: 2,
+    timeout: 10_000,
+    retryTimeouts: false,
   },
 );
 
@@ -787,6 +853,7 @@ becomes the query string, exactly as in `createRequest`.
 | `headers` | Headers for this call, merged over the global defaults |
 | `retry` | **Off by default**, because writes are rarely idempotent. The global `retry` is *not* inherited |
 | `timeout` | Abort the call after N ms. Wins over a `timeout` returned by the builder; without it, the builder's value is used as is |
+| `retryTimeouts` | Whether this call's `timeout` is retried. Default `true`; the global value is the fallback. See "The timeout + retry caveat" |
 | `invalidates` | `Reloadable[]`, or a function returning one. Use the function form to avoid field-ordering problems |
 | `onSuccess` / `onError` / `onSettled` | Lifecycle hooks |
 | `injector` | Required if called outside an injection context |
@@ -1236,6 +1303,7 @@ you give up when you stay inside Angular.
 | Invalidating by key | `invalidates: [['users']]` refreshes every open `['users', …]` query | `invalidateQueries({ queryKey })` |
 | SSR | `providedIn: 'root'` already means one cache per render, with `TransferState` hydration | A `QueryClient` you create per request in the server handler |
 | Errors | A normalized `RequestError` view with per-kind predicates (`http()`, `timeout()`, `network()`, …) and a `message` getter, so templates do not need `@switch` | `Error`, narrowed by hand |
+| Timeouts | `timeout` per request, classified as its own kind, and `retryTimeouts: false` to stop a timeout from being retried as a `status: 0` failure | No built-in timeout; abandoned by composing an `AbortSignal` |
 | Framework scope | Angular 22 | React, Vue, Svelte, Solid, Angular |
 
 Where TanStack Query is simply ahead, with no clever reframing:
@@ -1331,7 +1399,16 @@ enough that the translation is mechanical.
 - `ctx.chain()` is unavailable in lazy mode for the same reason — the source is
   evaluated by `run()`, not by the resource — and also throws an explanatory
   error instead of chaining against a stale context. It lives on the source's
-  **second** argument; the first one is `params`.
+  **second** argument; the first one is `params`. On the **cached** path it is
+  unavailable outright, and the error says what to do instead: put the upstream
+  value in the key (see "Dependent queries on a cached handle").
+- Two combinations print a dev-mode warning, once each per page load, because
+  neither is visible at the call site and neither can be a type error without
+  splitting an API in two: a `timeout` combined with retry (see "The timeout +
+  retry caveat"), and a **non-`lazy`, non-`GET` `createRequest`**. The second one
+  is reactive like every other query, so `createRequest.post(...)` re-fires
+  whenever a signal its source reads changes — for a write, use `createMutation`
+  or `lazy: true`.
 - SSR: `pollInterval` and `debounce` are ignored on the server so timers do not
   hold stability. Retry delays and `timeout` do apply.
 - SSR + `transferCache`: Angular's transfer cache only replays `GET`. A
@@ -1371,8 +1448,17 @@ report and one you read here is a design decision.
 - **Offline is not supported.** There is no `networkMode`, no `onlineManager` and
   no mutation replay. A query that fails while the network is down fails;
   `refetchOnReconnect` refetches what is on screen once the browser reports it is
-  back. `RequestError` does carry an `offline?: boolean` on the `network` kind,
-  so a UI can at least say why.
+  back. `RequestError` reports `offline: true` on the `network` kind **only** when
+  the browser itself says there is no connection, so a UI can say why.
+- **`onMutate`'s context type is not inferred once you write type arguments.**
+  `createMutation` infers `TContext` from `onMutate`, but TypeScript fills any
+  type argument you skip with its **default**, so `createMutation<Todo, Draft>(…)`
+  locks `TContext` to `undefined` before `onMutate` is looked at. Write it
+  explicitly — `createMutation<Todo, Draft, Snapshot>(…)` — or write no type
+  arguments at all and let everything infer. A returning `onMutate` in the skipped
+  form is a compile error rather than a silently-`unknown` context; capturing the
+  options object in a type parameter would do the latter, which is why it is not
+  done. (`select()` is a method for the same underlying reason.)
 - **Persistence is synchronous only.** `/persist` storage is `localStorage`-shaped.
   There is no IndexedDB storage, so a very large snapshot will block the main
   thread on write. A ready-made async storage is the next step for `/persist`.
@@ -1381,7 +1467,7 @@ report and one you read here is a design decision.
 - **`status: 0` stays ambiguous.** A CORS block, an extension, offline and a
   transport failure the browser will not name all arrive as `status: 0`. What can
   be distinguished is distinguished (`aborted`, `timeout`, `offline`); nothing is
-  invented.
+  invented, and `offline` is present only when the browser is certain.
 - **No ESLint or Prettier config.** The project's style rules live in review and
   in the type checker, not in a linter. Adding one to an existing codebase is a
   large diff that would drown the changes it accompanies.
@@ -1402,7 +1488,7 @@ report and one you read here is a design decision.
 | `createInfiniteRequest(source, options?)` | Paginated query; one cache entry per page, with `createInfiniteRequest.<verb>` and `.<verb>.text` / `.blob` / `.arrayBuffer` variants |
 | `combine(sources)` | Aggregates handles: `response` · `loading` · `status` · `error` · `reload` · `cancel` |
 | `createRequests(items, build, options?)` | One handle per list item, reconciled by identity |
-| `provideSignalRequest(config \| () => config)` | Global `baseUrl`, `retry`, `headers`, `onError`, `onSuccess`. The factory form runs in an injection context |
+| `provideSignalRequest(config \| () => config)` | Global `baseUrl`, `retry`, `retryTimeouts`, `headers`, `onError`, `onSuccess`, and the cache defaults. The factory form runs in an injection context |
 | `SIGNAL_REQUEST_CONFIG` | The `InjectionToken` behind it |
 | `RequestCancelledError` | Thrown by `run()` on cancel / disable / destroy |
 | `toError(value)` | Normalizes an `unknown` into an `Error` without wrapping an `HttpErrorResponse` |

@@ -108,6 +108,19 @@ export interface SignalRequestConfig {
   /** Default retry policy for queries (`createRequest`). Mutations never retry by default. */
   retry?: RetryConfig;
   /**
+   * Whether a timeout counts as a failure worth retrying. Default `true`.
+   *
+   * A timeout arrives as `status: 0`, so the default retry predicate cannot tell it apart from a
+   * dropped connection and retries it. That can be surprising — `timeout: 5000` with `retry: 2` may
+   * take about 15s — but it is the 0.1.x behaviour, so 0.2.0 keeps it. Set this to `false` to report
+   * `{ kind: 'timeout' }` as soon as the timeout elapses.
+   *
+   * A request's own `retryTimeouts` wins over this one, and an explicit `retry.when` wins over both.
+   * In dev mode the library warns when a `timeout` is combined with retry and neither escape hatch is
+   * used.
+   */
+  retryTimeouts?: boolean;
+  /**
    * Headers added to every request. A plain object is used as-is; a **function** is
    * re-evaluated inside each request's reactive chain, so signals it reads (a token, a locale)
    * make every live request refetch when they change.
@@ -202,12 +215,17 @@ interface RequestOptionsBase<T, TParams, TRaw> {
    * Abort the request after this many ms. A timeout shows up as
    * `requestError() === { kind: 'timeout', ms }`, not `{ kind: 'aborted' }`.
    *
-   * Note that a timeout reaches `retry` as a `status: 0` failure, so it is retried by
-   * default — `timeout: 5000` with `retry: 2` can therefore take up to ~15s. Exclude it
-   * with `retry: { when: (e) => (e as HttpErrorResponse).status !== 0 }` if that is not
-   * what you want.
+   * A timeout reaches `retry` as a `status: 0` failure, so it is retried by default —
+   * `timeout: 5000` with `retry: 2` can therefore take up to ~15s. Set
+   * `retryTimeouts: false` to report the timeout as soon as it elapses, or write an explicit
+   * `retry: { when }` to decide per failure. In dev mode the library warns when neither is used.
    */
   timeout?: number;
+  /**
+   * Whether this call's timeout counts as a failure worth retrying. Falls back to the global
+   * `retryTimeouts`, then to `true` — see {@link SignalRequestConfig.retryTimeouts}.
+   */
+  retryTimeouts?: boolean;
   /**
    * Re-fetch every N ms after each settled request. Pass a function to make it reactive
    * (`() => visible() ? 5000 : false`). Browser only.
@@ -599,6 +617,11 @@ export interface InfiniteRequestOptions<TPage, TParam> {
   headers?: HttpResourceRequest['headers'];
   /** Abort a page after this many ms. */
   timeout?: number;
+  /**
+   * Whether a page's timeout counts as a failure worth retrying. Falls back to the global
+   * `retryTimeouts`, then to `true` — see {@link SignalRequestConfig.retryTimeouts}.
+   */
+  retryTimeouts?: boolean;
   /** Refetch when the tab becomes visible again. */
   refetchOnWindowFocus?: boolean;
   /** Refetch when the browser reports it is back online. */
@@ -810,6 +833,11 @@ export interface MutationOptions<T, TArgs = void, TContext = undefined> {
   /** Abort the call after this many ms. Surfaced as `requestError() === { kind: 'timeout' }`. */
   timeout?: number;
   /**
+   * Whether this call's timeout counts as a failure worth retrying. Falls back to the global
+   * `retryTimeouts`, then to `true` — see {@link SignalRequestConfig.retryTimeouts}.
+   */
+  retryTimeouts?: boolean;
+  /**
    * Groups this mutation so it can be found without holding a reference to it.
    *
    * Read by `QueryClient.isMutating(mutationKey)`, which is how a global "saving…" indicator
@@ -839,6 +867,12 @@ export interface MutationOptions<T, TArgs = void, TContext = undefined> {
    * Awaited when it returns a promise, so an async preparation delays the request rather than
    * racing it. A rejection here fails the whole call — **nothing is sent**, and the optimistic
    * value is never written.
+   *
+   * When `TContext` is inferred from this callback it needs no annotation. If you write `T` and
+   * `TArgs` explicitly you have to write `TContext` too — `createMutation<T, TArgs, TContext>` —
+   * because TypeScript does not infer a type argument you have skipped
+   * ([#26242](https://github.com/microsoft/TypeScript/issues/26242)); it falls back to the default,
+   * and this callback then fails to compile rather than being silently `unknown`.
    */
   onMutate?: (args: TArgs) => TContext | Promise<TContext>;
   /**

@@ -57,8 +57,15 @@ export type RequestError =
    * `HttpClient` reports "no response" as `status: 0`, which covers both a network
    * failure and a cancellation. An abort is only recognized when the reason names
    * itself `AbortError`/`TimeoutError`; an opaque `status: 0` lands here.
+   *
+   * `offline` is present and `true` **only** when the browser itself reports
+   * `navigator.onLine === false` — so its presence is a fact rather than a guess, and a UI can say
+   * "you are offline" instead of "check your connection". It is absent on the server, where there
+   * is nobody to ask, and it is absent when the browser believes it is online, because "the browser
+   * thinks it is online" and "the request reached a server" are different claims: a CORS rejection
+   * and a dropped socket both land in this same member.
    */
-  | { readonly kind: 'network'; readonly cause: unknown }
+  | { readonly kind: 'network'; readonly cause: unknown; readonly offline?: true }
   /** Not classifiable. */
   | { readonly kind: 'unknown'; readonly cause: unknown };
 
@@ -79,8 +86,13 @@ const ABORT_ERROR_NAMES: ReadonlySet<string> = new Set(['AbortError', 'TimeoutEr
 /**
  * `HttpClient` reports an abort as `status: 0` carrying the abort reason, while the
  * fetch backend may hand the `TimeoutError` DOMException over directly. Look at both.
+ *
+ * Exported for the default retry predicate in `utils.ts`, which has to answer the same question for
+ * the same input — a timeout arrives as an abort carrying `status: 0`, so a second copy of this rule
+ * would be a second thing to keep in sync. `public-api.ts` lists its exports by name, so this stays
+ * out of the public surface.
  */
-function isAbortLike(cause: unknown): boolean {
+export function isAbortLike(cause: unknown): boolean {
   const candidate = cause instanceof HttpErrorResponse ? cause.error : cause;
 
   return (
@@ -89,6 +101,21 @@ function isAbortLike(cause: unknown): boolean {
     'name' in candidate &&
     ABORT_ERROR_NAMES.has((candidate as { name: unknown }).name as string)
   );
+}
+
+/**
+ * Whether the browser is willing to say it has no connection.
+ *
+ * Read defensively because this can run on a server build: there is no `navigator` in Node, and
+ * `navigator` is itself optional on the DOM lib, so the check is written against a structural
+ * `globalThis` rather than against `Navigator`. Anything but an explicit `false` means "no report".
+ *
+ * There is no `OnlineManager` behind this yet — Phase 2 introduces one with an override seam, and
+ * this function becomes its only reader. The field it feeds is the same field either way.
+ */
+function isOffline(): boolean {
+  const navigator = (globalThis as { navigator?: { onLine?: unknown } }).navigator;
+  return navigator?.onLine === false;
 }
 
 /** The five classifications, for narrowing without matching on the literal. */
@@ -142,7 +169,7 @@ function summarize(error: RequestError): string {
     case 'timeout':
       return `Timed out after ${error.ms}ms`;
     case 'network':
-      return 'No connection';
+      return error.offline ? 'Offline' : 'No connection';
     case 'aborted':
       return 'Request cancelled';
     case 'unknown': {
@@ -211,7 +238,7 @@ function classify(cause: unknown, context: RequestErrorContext): RequestError {
 
   if (cause instanceof HttpErrorResponse) {
     return cause.status === 0
-      ? { kind: 'network', cause }
+      ? networkFailure(cause)
       : {
         kind: 'http',
         status: cause.status,
@@ -224,10 +251,21 @@ function classify(cause: unknown, context: RequestErrorContext): RequestError {
   // The fetch backend rejects a raw `TypeError` for network failures when it is not
   // wrapped in an `HttpErrorResponse`.
   if (cause instanceof TypeError) {
-    return { kind: 'network', cause };
+    return networkFailure(cause);
   }
 
   return { kind: 'unknown', cause };
+}
+
+/**
+ * The `network` member, with `offline: true` added only when the browser reports no connection.
+ *
+ * Built as two object shapes rather than one shape with an `undefined` field: a `network` error
+ * serializes as plain data, and a property that is present but meaningless is a property somebody
+ * will branch on. Absent means "nobody said".
+ */
+function networkFailure(cause: unknown): RequestErrorOf<'network'> {
+  return isOffline() ? { kind: 'network', cause, offline: true } : { kind: 'network', cause };
 }
 
 /** Builds the `requestError` signal that sits next to a raw `error` signal. */

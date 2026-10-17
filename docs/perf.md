@@ -81,9 +81,45 @@ recommended 500, against a network request that costs thousands of times more. I
 a future workload makes that visible, a heap ordered by recency is the obvious
 replacement, and this file is where it should be measured first.
 
+## Phase 5 does not get a row here
+
+The Phase 5 changes are: a flag on the retry predicate, one `navigator.onLine`
+read on the failure path, and `warnDevOnce` behind a build-time branch. None of
+them is on a hot path, and the reason is structural rather than a measurement:
+
+- The retry predicate runs only after a request has **already failed**, and at
+  most `count + 1` times per call. It cannot be reached on a success.
+- `offline` is read when a `network` failure is *classified* — the same failure
+  path, once per failure, not once per render.
+- Both dev warnings are evaluated when a handle is **built** (once per component
+  instance, deduplicated to one line per session) and are behind `isDevMode()`.
+
+The one number that would move is `resolve`, which does not call any of them; the
+benchmark above covers it. Measuring the failure path would need a harness that
+fails 200,000 requests, which is more machinery than the change justifies — so the
+record is the reasoning above plus the re-run below, which is the review step the
+flag rule asks for.
+
+`pnpm bench` was re-run on the Phase 5 tree (200,000 iterations, same four cases,
+recorded from `[bench]` output):
+
+| Case | Phase 1 | Phase 5 | Δ |
+| --- | --- | --- | --- |
+| `resolve`, warm key — no entry is created | 0.47 µs/op | 0.44 µs/op | faster by 6% |
+| `resolve` + `subscribe` + release, no cap | 14.99 µs/op | 15.60 µs/op | slower by 4% |
+| `resolve` + `subscribe` + release, cap 100 | 11.71 µs/op | 11.96 µs/op | slower by 2% |
+| At-cap inserts, cap 100 pre-warmed | 6.72 µs/op | 6.67 µs/op | faster by 1% |
+
+Nothing crosses the 10% flag, and the two cases that moved are the two whose loops
+do the most work per insert — which is the same shape seen in the probe table
+above, where a *smaller* change produced an 11% "regression". No case needed a
+re-run to dismiss; if one had, the ±11% noise floor is the standard the rule was
+written against.
+
 ## The regression flag
 
 A change is flagged when a case in this file moves by more than 10% **and** the
 move survives a re-run. Anything smaller than that, or that does not reproduce, is
 noise — as the table above demonstrates by producing an 11% "regression" in a
 build that does less work.
+

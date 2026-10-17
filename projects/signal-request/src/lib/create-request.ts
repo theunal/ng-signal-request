@@ -41,6 +41,7 @@ import {
   noop,
   normalizeRetry,
   resolveRequest,
+  warnIfNonGetQuery,
   withGlobalHeaders,
   type Kind,
 } from './utils';
@@ -88,7 +89,7 @@ function buildRequest<T, R, TParams>(
     injector = inject(Injector);
   }
   return runInInjectionContext(injector, () =>
-    buildInContext<T, R, TParams>(kind, method, source, options, injector),
+    buildInContext<T, R, TParams>(kind, method, source, options, injector, caller),
   );
 }
 
@@ -98,6 +99,7 @@ function buildInContext<T, R, TParams>(
   source: RequestSource<TParams>,
   options: RequestOptions<T, TParams, unknown>,
   injector: Injector,
+  caller: () => void,
 ): SignalRequest<T, R, TParams> {
   const globalConfig = inject(SIGNAL_REQUEST_CONFIG);
   const errorHandler = inject(ErrorHandler);
@@ -106,9 +108,14 @@ function buildInContext<T, R, TParams>(
 
   const lazy = options.lazy ?? false;
   const initial = options.initialValue as T | undefined;
-  const retryPolicy = normalizeRetry(options.retry ?? globalConfig.retry);
+  const retryPolicy = normalizeRetry(options.retry ?? globalConfig.retry, {
+    timeout: options.timeout,
+    timeouts: options.retryTimeouts ?? globalConfig.retryTimeouts,
+  });
   const debounceMs = isBrowser ? (options.debounce ?? 0) : 0;
   const timeout = options.timeout;
+
+  warnIfNonGetQuery(method, lazy, caller);
 
   /* ------------------------------ request pipeline ----------------------------- */
 

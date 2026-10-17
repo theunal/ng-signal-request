@@ -46,7 +46,14 @@ const LAST_PAGE = 10;
         }
         @if (feed.requestError(); as error) {
           <span class="badge err">
-            {{ error.http() ? 'HTTP ' + error.http()!.status : error.message }}
+            @if (error.network()?.offline) {
+              <!-- Present only when the browser itself reports no connection. -->
+              çevrimdışısın
+            } @else if (error.http()) {
+              HTTP {{ error.http()!.status }}
+            } @else {
+              {{ error.message }}
+            }
           </span>
         }
       </div>

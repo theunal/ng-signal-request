@@ -1,5 +1,5 @@
 import { HttpErrorResponse } from '@angular/common/http';
-import { describe, expect, expectTypeOf, it } from 'vitest';
+import { afterEach, describe, expect, expectTypeOf, it } from 'vitest';
 
 import { createRequest, toRequestError, type RequestError, type RequestErrorOf, type RequestErrorView } from '../public-api';
 import { fail, respond, settle, setup } from '../../testing/testing';
@@ -13,6 +13,27 @@ import { fail, respond, settle, setup } from '../../testing/testing';
 function abortEvent(name: 'AbortError' | 'TimeoutError'): ProgressEvent {
   return { name } as unknown as ProgressEvent;
 }
+
+/* `offline` reads a global, so the three cases (offline / online / no `navigator` at all) are set up
+ * by shadowing it and put back afterwards. `onLine` is a getter on `Navigator.prototype` in jsdom, so
+ * an own property on the instance is the only way to change it. */
+const navigatorDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+const onLineDescriptor = Object.getOwnPropertyDescriptor(globalThis.navigator, 'onLine');
+
+function setOnLine(onLine: boolean | undefined): void {
+  if (onLine === undefined) {
+    Object.defineProperty(globalThis, 'navigator', { configurable: true, value: undefined });
+    return;
+  }
+  Object.defineProperty(globalThis.navigator, 'onLine', { configurable: true, value: onLine });
+}
+
+afterEach(() => {
+  if (navigatorDescriptor) Object.defineProperty(globalThis, 'navigator', navigatorDescriptor);
+  const navigator: { onLine?: unknown } = globalThis.navigator;
+  if (onLineDescriptor) Object.defineProperty(navigator, 'onLine', onLineDescriptor);
+  else delete navigator.onLine;
+});
 
 describe('toRequestError', () => {
   it('classifies an HTTP status response', () => {
@@ -35,6 +56,40 @@ describe('toRequestError', () => {
   it('classifies an opaque status 0 as a network failure', () => {
     const cause = new HttpErrorResponse({ status: 0, error: new ProgressEvent('error') });
     expect(toRequestError(cause)).toEqual({ kind: 'network', cause });
+  });
+
+  it('adds `offline: true` when the browser reports no connection', () => {
+    // The one case where the library can do better than "no connection": the browser itself said so,
+    // and that is worth telling a user, because "you are offline" has an action and "check your
+    // connection" does not.
+    setOnLine(false);
+    const cause = new HttpErrorResponse({ status: 0, error: new ProgressEvent('error') });
+
+    expect(toRequestError(cause)).toEqual({ kind: 'network', cause, offline: true });
+    expect(toRequestError(cause).message).toBe('Offline');
+  });
+
+  it('omits `offline` when the browser believes it is online', () => {
+    // "The browser thinks it is online" is not "the request reached a server": a CORS rejection and
+    // a dropped socket land in this same member, so `offline: false` would be a claim it cannot back.
+    setOnLine(true);
+    expect(toRequestError(new TypeError('Failed to fetch'))).toEqual({
+      kind: 'network',
+      cause: expect.any(TypeError),
+    });
+  });
+
+  it('omits `offline` where there is no `navigator` to ask', () => {
+    setOnLine(undefined);
+    const error = toRequestError(new TypeError('Failed to fetch'));
+
+    expect('offline' in error).toBe(false);
+    expect(error.message).toBe('No connection');
+  });
+
+  it('types `offline` as `true`, so its presence is the whole statement', () => {
+    const network = toRequestError(new TypeError('Failed to fetch')).network();
+    expectTypeOf(network?.offline).toEqualTypeOf<true | undefined>();
   });
 
   it('classifies an abort, and a timeout when one is configured', () => {

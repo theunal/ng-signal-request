@@ -72,6 +72,8 @@ Every other request goes to the real API.
 - `pollInterval` switched on and off reactively: `() => (running() ? 2000 : false)`
 - `parse` to validate / map the body (`{ count }`)
 - `cancel()` really aborting a 3-second request
+- `timeout: 900` against the 3-second `/api/slow`, with `retryTimeouts: false` on one
+  handle and the (retrying) default on the other, side by side
 - `createRequest.text()` — the body read as text
 - The `equal`, `debugName` and `injector` options pass straight through
 

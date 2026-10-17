@@ -1,5 +1,6 @@
 import { HttpHeaders, HttpParams, type HttpResourceRequest } from '@angular/common/http';
-import { effect, signal, untracked, type Signal } from '@angular/core';
+import { effect, isDevMode, signal, untracked, type Signal } from '@angular/core';
+import { isAbortLike } from './errors';
 import type {
   PathParams,
   QueryParams,
@@ -268,7 +269,13 @@ export interface NormalizedRetry {
   when: (error: Error, attempt: number) => boolean;
 }
 
-function isTransient(error: Error): boolean {
+function isTransient(error: Error, retryTimeouts: boolean): boolean {
+  // A timeout arrives as an abort carrying `status: 0`, which by status alone is indistinguishable
+  // from a dropped socket — so it is identified with the same rule the classifier uses, rather than a
+  // second copy of it. `retryTimeouts` decides this case and only this case: a genuine network failure
+  // stays transient whichever way it is set.
+  if (isAbortLike(error)) return retryTimeouts;
+
   const status = (error as { status?: unknown }).status;
   if (typeof status !== 'number') return false; // parse / programming errors are not worth retrying
   return status === 0 || status === 408 || status === 425 || status === 429 || status >= 500;
@@ -276,15 +283,58 @@ function isTransient(error: Error): boolean {
 
 const defaultDelay = (attempt: number): number => Math.min(1000 * 2 ** (attempt - 1), 30_000);
 
-export function normalizeRetry(config: RetryConfig | undefined): NormalizedRetry | undefined {
+/** What the caller knows that the retry config does not. */
+export interface RetryDefaults {
+  /** The call's own `timeout`, used only for the dev-mode warning below. */
+  readonly timeout?: number;
+  /**
+   * `retryTimeouts` from the request, or from the global config if the request did not set it.
+   *
+   * `false` takes a timeout out of what the *default* predicate considers transient. An explicit
+   * `when` always wins, because it is an answer to the same question.
+   */
+  readonly timeouts?: boolean;
+}
+
+/**
+ * Dev-mode nudge for the one combination 0.2.0 kept but changed the meaning of.
+ *
+ * Before 0.2.0 a timeout was retried together with the network failures, silently: `timeout: 5000`
+ * with `retry: 2` could spend about 15s before reporting `{ kind: 'timeout' }`. 0.2.0 keeps that as
+ * the default so no existing application changes behaviour, which means an application that never
+ * asked for it is now told it is happening and how to stop it.
+ *
+ * Deduplicated per message, so this costs one line in the console rather than one per request.
+ */
+function warnIfTimeoutRetried(
+  timeout: number | undefined,
+  retryTimeouts: boolean,
+  when: ((error: Error, attempt: number) => boolean) | undefined,
+): void {
+  if (timeout === undefined || !retryTimeouts || when !== undefined) return;
+
+  warnDevOnce(
+    `ng-signal-request: \`timeout: ${timeout}\` is combined with retry, so an elapsed timeout is ` +
+      `retried like a network failure and the call can take several multiples of the timeout before ` +
+      `it reports \`{ kind: 'timeout' }\`. Pass \`retryTimeouts: false\` to report it as soon as it ` +
+      `happens, or \`retry: { when }\` to decide per failure.`,
+  );
+}
+
+export function normalizeRetry(
+  config: RetryConfig | undefined,
+  defaults: RetryDefaults = {},
+): NormalizedRetry | undefined {
   if (config === undefined || config === false) return undefined;
   const options = typeof config === 'number' ? { count: config } : config;
   if (!(options.count > 0)) return undefined;
+  const retryTimeouts = defaults.timeouts !== false;
+  warnIfTimeoutRetried(defaults.timeout, retryTimeouts, options.when);
   const { delay } = options;
   return {
     count: options.count,
     delay: typeof delay === 'function' ? delay : () => (typeof delay === 'number' ? delay : NaN),
-    when: options.when ?? ((error) => isTransient(error)),
+    when: options.when ?? ((error) => isTransient(error, retryTimeouts)),
   };
 }
 
@@ -296,6 +346,50 @@ export function nextRetryDelay(retry: NormalizedRetry | undefined, attempt: numb
 }
 
 export const noop = (): void => {};
+
+/* --------------------------------- dev warnings -------------------------------- */
+
+/**
+ * Messages already printed, so a warning about a *static* combination of options is printed once.
+ *
+ * These warnings describe something the developer cannot see from the call itself (a timeout being
+ * retried, a `POST` that re-fires) and the natural place to detect it is when the handle is built —
+ * which happens once per component instance. A message that repeats on every navigation is a message
+ * that gets filtered, and a filtered warning helps nobody. So: per message, per page load.
+ *
+ * Module state, therefore also shared by tests in one file — a test that wants to observe a warning
+ * should use inputs that produce a *distinct* message.
+ */
+const warnedOnce = new Set<string>();
+
+/** Logs `message` once per session, in dev mode only. */
+function warnDevOnce(message: string): void {
+  if (!isDevMode() || warnedOnce.has(message)) return;
+  warnedOnce.add(message);
+  console.warn(message);
+}
+
+/**
+ * Dev-mode warning for a write-shaped `createRequest`.
+ *
+ * `createRequest.post` and friends are **reactive** exactly like the `GET` form: the request re-fires
+ * whenever a signal read by its source changes, which for a write means a second `POST` nobody asked
+ * for. The trap is that this is invisible — the call looks like a mutation and behaves like a query.
+ *
+ * A warning rather than a throw, and a warning rather than a type error: the behaviour is legitimate
+ * (`lazy: true` is a real way to use these verbs, and so is a re-firing write), and splitting the
+ * verbs into "queries" and "writes" at the type level would break every existing call.
+ */
+export function warnIfNonGetQuery(method: string, lazy: boolean, caller: () => void): void {
+  if (method === 'GET' || lazy) return;
+
+  const name = caller.name || 'createRequest';
+  warnDevOnce(
+    `ng-signal-request: ${name} is not \`lazy\`, so this ${method} re-fires whenever a signal read by ` +
+      `its source changes. For a write, \`createMutation\` runs on demand and gives you optimistic ` +
+      `updates and \`invalidates\`; pass \`lazy: true\` if you do want a query.`,
+  );
+}
 
 /* ------------------------------ shared primitives ------------------------------ */
 

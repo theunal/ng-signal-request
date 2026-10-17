@@ -37,6 +37,37 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
     overshoot.
   - `docs/design-0.2.md` records the per-key-prefix reading that was rejected, and
     why eviction cannot go through `destroy()`.
+- **`retryTimeouts` — the timeout + retry caveat, now controllable.** A timeout
+  arrives as a `status: 0` abort, so the default retry predicate cannot tell it
+  apart from a dropped connection and retries it: `timeout: 5_000` with `retry: 2`
+  could spend about 15s before reporting `{ kind: 'timeout' }`.
+  - `retryTimeouts: false` takes the timeout out of what the **default** predicate
+    considers transient — per request, or globally through
+    `provideSignalRequest({ retryTimeouts: false })`. A genuine network failure
+    still retries, because that is the case retries exist for, and an explicit
+    `retry: { when }` still wins over both.
+  - **The default is `true`, unchanged from 0.1.x.** Setting `retryTimeouts` is
+    opt-in; nobody's timing changes on upgrade. In dev mode the library now warns,
+    once per combination, when a `timeout` is combined with retry and neither
+    escape hatch is used — see the migration note below.
+- **`RequestError`'s `network` kind carries `offline: true` when the browser says
+  there is no connection.** `navigator.onLine` is consulted only where it exists,
+  so the field is absent on the server and absent when the browser believes it is
+  online. It is typed `offline?: true` rather than `offline?: boolean` because an
+  absence is not a claim — a CORS block and a dropped socket land in the same
+  member. `message` becomes `Offline` in that case.
+- **A dev-mode warning for a non-`lazy`, non-`GET` `createRequest`.** These verbs
+  are reactive exactly like the `GET` form, so `createRequest.post(...)` re-fires
+  whenever a signal its source reads changes — invisible at the call site, and a
+  second write nobody asked for. The warning points at `createMutation` and at
+  `lazy: true`. It cannot be a type error without splitting the verbs in two, which
+  would break every existing call.
+- **Dependent queries on the cached path are documented and tested.** `ctx.chain()`
+  stays unavailable there (a shared entry has no single `httpResource` to chain
+  against), and the error message points at the replacement: read the upstream
+  handle and put its value in the key, and return `undefined` from the source while
+  there is nothing to ask for. `projects/signal-request/src/lib/cache/dependent-queries.spec.ts`
+  pins both halves.
 
 ### Fixed
 
@@ -47,6 +78,19 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   getter, not `isHttp` / `isTimeout`; the `/testing` export list was missing
   `cache`, `advanceClock`, `TestSetup` and `ChildScope`; and the library ships four
   entry points, not three. `docs/verification.md` has the full audit.
+
+### Changed
+
+- **`timeout` + retry now warns, and has a way out.** The behaviour is unchanged —
+  a timeout is still retried by default — so nothing you have today needs a change.
+  If that is not what you want, add `retryTimeouts: false`: globally in
+  `provideSignalRequest`, or on the request. The old workaround
+  (`retry: { when: (e) => (e as HttpErrorResponse).status !== 0 }`) still works and
+  still takes precedence. In dev mode you will now see one console warning the first
+  time the combination is built, which is what this entry is for.
+- A non-`lazy`, non-`GET` `createRequest` also warns in dev mode, once per verb.
+  Behaviour is unchanged; use `createMutation` or `lazy: true`.
+- No export was removed: `pnpm check:api v0.1.0` reports 0 removed.
 
 ## [0.1.0] - 2026-10-16
 

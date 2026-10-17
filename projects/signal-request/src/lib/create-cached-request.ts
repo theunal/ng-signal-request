@@ -39,6 +39,7 @@ import {
   normalizeRetry,
   RESPONSE_TYPE,
   resolveRequest,
+  warnIfNonGetQuery,
   withGlobalHeaders,
   type Kind,
 } from './utils';
@@ -94,7 +95,7 @@ export function buildCachedRequest<T, R, TParams>(
   const explicit = (options as { injector?: Injector }).injector;
   const injector = explicit ?? injectionContextInjector(caller);
   return runInInjectionContext(injector, () =>
-    buildCachedInContext<T, R, TParams>(kind, method, source, options, injector),
+    buildCachedInContext<T, R, TParams>(kind, method, source, options, injector, caller),
   );
 }
 
@@ -115,6 +116,7 @@ function buildCachedInContext<T, R, TParams>(
   source: RequestSource<TParams>,
   options: CachedRequestOptions<T, TParams, unknown>,
   injector: Injector,
+  caller: () => void,
 ): CachedRequest<T, R, TParams> {
   const cache = inject(QueryCache);
   const globalConfig = inject(SIGNAL_REQUEST_CONFIG);
@@ -124,8 +126,13 @@ function buildCachedInContext<T, R, TParams>(
 
   const lazy = options.lazy ?? false;
   const initial = options.initialValue as T | undefined;
-  const retryPolicy = normalizeRetry(options.retry ?? globalConfig.retry);
+  const retryPolicy = normalizeRetry(options.retry ?? globalConfig.retry, {
+    timeout: options.timeout,
+    timeouts: options.retryTimeouts ?? globalConfig.retryTimeouts,
+  });
   const debounceMs = isBrowser ? (options.debounce ?? 0) : 0;
+
+  warnIfNonGetQuery(method, lazy, caller);
   const staleTime = options.staleTime ?? globalConfig.staleTime ?? 0;
   const gcTime = options.gcTime ?? globalConfig.gcTime ?? DEFAULT_GC_TIME;
   // Only the per-request value, and only if it is there: the global cap is the cache's own property

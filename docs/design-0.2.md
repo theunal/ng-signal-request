@@ -365,6 +365,83 @@ real declaration, and the outcome is recorded verbatim either way: if it cannot
 be done, the current behaviour stays and an `expectTypeOf` test pins it so nobody
 "fixes" it into something worse.
 
+### 5.6 As built — where the code disagrees with the above
+
+The document is a plan, so the differences are listed rather than edited away.
+None of them changes a public name; each is either a narrowing or a measurement.
+
+**5.1, the predicate routes through `errors.ts` rather than re-deriving it.**
+As designed, with one rename: `isAbortLike` is exported from `errors.ts` and
+`isTransient` gained a `retryTimeouts` argument. The flag governs the abort-like
+branch only, so a `TypeError` or a bare `status: 0` that is *not* an abort stays
+transient. `public-api.ts` lists its exports by name, so exporting the helper did
+not widen the API — `pnpm check:api` still reports 0 added for it.
+
+**5.1, the warning is deduplicated.** As designed, plus `warnDevOnce`: one line
+per combination per page load. The design put the warning at the call site
+("a request declares both"), which is once per handle — and a handle is once per
+component instance, so a revisited route would warn on every navigation. A
+repeating warning is a filtered warning. The cost is module state, which is why
+`dev-warnings.spec.ts` uses a distinct message per assertion.
+
+**5.1, the migration is a warning, not a scheduled default flip.** The design
+promised "0.2.0 default `true` + warning; 0.3.0 default `false`". That second half
+is a policy for a release this document cannot commit, and a default that flips
+is a breaking change that deserves its own deprecation decision — in 0.3.0, with
+the escape hatch already in place. 0.2.0 ships the option, the warning and the
+migration note; the flip is left open.
+
+**5.2, the warning reads the caller's name.** `caller.name` is the same dotted
+label Angular's `NG0203` message uses (`createRequest.post.text`), so the warning
+names the exact call instead of the method, and dedupes per call shape rather than
+per verb.
+
+**5.3, `offline` is `?: true`, not `?: boolean`, and is only ever set when the
+browser is certain.** The design's field would have been present with `false` in
+any browser, which (a) breaks the 0.1.0 assertion
+`toEqual({ kind: 'network', cause })` — an additive field with a concrete value is
+not additive to `toEqual` — and (b) claims something the library cannot know:
+"the browser believes it is online" is not "the request reached a server", and a
+CORS rejection lands in the same member. Absent-means-nobody-said is the honest
+encoding, and `offline?: true` is what makes that visible in the type rather than
+only in the docs. If Phase 2's `OnlineManager` ever produces an authoritative
+`false`, widening `true` to `boolean` is additive for every reader.
+
+**5.4, the answer is "the alternative is the feature", with tests instead of an
+`enabled` option.** The investigation confirmed the design's reading and went one
+step further: `resolveRequest` returning `undefined` short-circuits
+`rawPlan` *before* `cache.resolve`, so a gated dependent request creates no entry
+for its not-yet-meaningful key. That makes "source returns `undefined`" a complete
+`enabled` on the cached path, with no new option — so no option was added, and
+`dependent-queries.spec.ts` pins both halves (no request *and* no entry; the
+upstream value inside the downstream key). The runtime and compile-time pointers
+(`ctx.chain()`'s message, `.resource` as a type error) already existed and were
+only asserted.
+
+**5.5, infeasible, and the near-miss is worse than the limitation.** The probe
+(kept out of the tree; reproduced here) tested four forms against a declaration
+shaped like the real one:
+
+```ts
+// works — `TContext` is inferred from `onMutate`
+const a = factory((title: string) => ({ url: '/x' }), { onMutate: (t) => ({ title: t }) });
+
+// error TS2322: Type '(title: string) => { title: string; at: number; }' is not
+// assignable to type '(args: string) => Promise<undefined> | undefined'.
+const b = factory<number, string>((title) => ({ url: '/x' }), { onMutate: (t) => ({ title: t }) });
+```
+
+The overload that captures the options object — `O extends Options<T, A, unknown> =
+Options<T, A, unknown>`, with the context recovered by a conditional on `O` —
+**compiles** and reports `context()` as `unknown` (probe: `error TS2322: Type
+'unknown' is not assignable to type '{ title: string; at: number; } |
+undefined'`). So the choice is between a loud compile error and a silently
+degraded type, and the loud one wins: it is fixable in one word
+(`createMutation<T, TArgs, TContext>`) and the silent one removes the only reason
+`context` is generic at all. The limitation is documented on `onMutate`, in the
+README's "Known limitations", and pinned by a `@ts-expect-error` test in
+`mutation-key.spec.ts`.
+
 ---
 
 ## Phase 2 — offline / `networkMode` (deferred, sketch)

@@ -108,6 +108,45 @@ interface SearchParams {
     </section>
 
     <section class="card">
+      <h2>Timeout + retry — <code>retryTimeouts</code></h2>
+      <p class="hint">
+        <code>/api/slow</code> 3 saniye sürüyor, <code>timeout: 900</code> ise 900 ms'de kesiyor.
+        Zaman aşımı <code>status: 0</code> olarak geldiği için <strong>varsayılan</strong> hâlâ
+        yeniden dener: soldaki düğme üç kez bekler. <code>retryTimeouts: false</code> olan sağdaki
+        ise hatayı ilk zaman aşımında bildirir.
+      </p>
+
+      <div class="row">
+        <button (click)="retried.reload()">Varsayılan (yeniden dener)</button>
+        <button (click)="notRetried.reload()">retryTimeouts: false</button>
+      </div>
+
+      <div class="status">
+        <span class="badge" [class]="'badge ' + retried.status()">
+          varsayılan: {{ retried.status() }}
+        </span>
+        @if (retried.retryAttempt() > 0) {
+          <span class="badge warn">retry #{{ retried.retryAttempt() }}</span>
+        }
+        @if (retried.requestError(); as error) {
+          <span class="badge err">{{ error.message }}</span>
+        }
+      </div>
+
+      <div class="status">
+        <span class="badge" [class]="'badge ' + notRetried.status()">
+          hemen: {{ notRetried.status() }}
+        </span>
+        @if (notRetried.retryAttempt() > 0) {
+          <span class="badge warn">retry #{{ notRetried.retryAttempt() }}</span>
+        }
+        @if (notRetried.requestError(); as error) {
+          <span class="badge err">{{ error.message }}</span>
+        }
+      </div>
+    </section>
+
+    <section class="card">
       <h2>Ham metin — <code>createRequest.text()</code></h2>
       <p class="hint">Gövde metin olarak okunuyor, JSON ayrıştırılmıyor.</p>
       <div class="row">
@@ -167,6 +206,30 @@ export class RetrySection {
   protected readonly slow = createRequest<{ title: string }[]>(
     { url: '/api/slow' },
     { initialValue: [], retry: 0 },
+  );
+
+  /**
+   * The timeout trap, side by side.
+   *
+   * A timeout is an abort carrying `status: 0`, which the default retry predicate cannot tell apart
+   * from a dropped connection — so it retries, and this call spends 900ms × (1 + 2 retries) before
+   * reporting the timeout. `retryTimeouts: false` reports the first one. Both are `lazy`, so the two
+   * are only compared when you press the buttons.
+   */
+  protected readonly retried = createRequest<{ title: string }[]>(
+    { url: '/api/slow?mode=retried' },
+    { lazy: true, initialValue: [], timeout: 900, retry: { count: 2, delay: 300 } },
+  );
+
+  protected readonly notRetried = createRequest<{ title: string }[]>(
+    { url: '/api/slow?mode=immediate' },
+    {
+      lazy: true,
+      initialValue: [],
+      timeout: 900,
+      retry: { count: 2, delay: 300 },
+      retryTimeouts: false,
+    },
   );
 
   protected readonly raw = createRequest<string>(

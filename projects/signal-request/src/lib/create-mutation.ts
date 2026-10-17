@@ -128,7 +128,10 @@ function buildMutation<T, TArgs, TContext>(
    * application injector either way, and there is nothing to lazily.
    */
   const client = inject(QueryClient);
-  const retryPolicy = normalizeRetry(options.retry);
+  const retryPolicy = normalizeRetry(options.retry, {
+    timeout: options.timeout,
+    timeouts: options.retryTimeouts ?? config.retryTimeouts,
+  });
   const concurrency = options.concurrency ?? 'parallel';
 
   const response = signal<T | undefined>(undefined);

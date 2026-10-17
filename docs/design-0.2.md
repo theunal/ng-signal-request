@@ -216,15 +216,56 @@ request that costs thousands of times more. A heap was rejected as unearned
 complexity for a small phase — it is the obvious optimisation if a benchmark ever
 shows this matters, and there is a benchmark in `docs/perf.md` to find out.
 
-### What the cap deliberately does **not** cover
+### What the cap covers — staged seeds count too (Step 0.1, added after this document)
 
-`QueryCache.seeds` — values persisted and waiting for their key to be asked for
-— is not bounded by `maxEntries`. Seeding is consumed the first time a handle
-resolves the key, so in the normal case it is proportional to the keys rendered,
-which is what the feature was designed around. The residual case is a snapshot
-with many more keys than any render asks for, and it is recorded as a known
-limitation rather than papered over: a `dehydrateFilter` (Phase 3) or an explicit
-`maxSeeds` is the right lever, and neither belongs in this phase.
+The section that used to sit here said `QueryCache.seeds` was deliberately
+**outside** `maxEntries`. That was wrong, and this is a correction rather than a
+rewrite: a staged value is memory being held for a key somebody will ask for, so
+leaving it outside the bound let one large persisted snapshot bypass the cap
+entirely — the accumulation the feature exists to prevent, one reload away.
+
+**Policy.** The cap bounds `entries + seeds`. When the total is over:
+
+1. seeds are dropped first, oldest `dataUpdatedAt` first, a tie keeping whichever
+   was staged first (`Map` insertion order);
+2. then idle entries are evicted by the Phase 1 LRU rule.
+
+Seeds first, because a seed is a value **no handle has asked for yet this
+session**: losing one costs a refetch the next time its key is used, whereas
+evicting an entry also throws away an object handles have already resolved and
+could be about to re-attach to. Oldest-`dataUpdatedAt` first because that is the
+clock `staleTime` already uses, so the seed dropped is the one least likely to
+have been worth restoring.
+
+Rejected: a separate `maxSeeds` (a second knob for the same resource, and the
+snapshot has no natural size of its own); "drop whoever was staged last" (that is
+the *freshest* data, and it would make `hydrate` order-dependent in the worst
+way).
+
+**Enforcement points:** `seed()`, `resolve()` — with one place reserved for the
+entry about to be inserted — and `tightenMaxEntries()`. Those are the only places
+either collection grows, so the invariant holds between them without any
+periodic pass.
+
+**A seed a resolve is consuming can never be the one evicted**, and that is
+structural rather than optimistic: `resolve` deletes the seed and hands it to the
+`CacheEntry` constructor *before* it enforces the cap, and the new entry joins the
+map *after*. At no point in between is the value being consumed still staged.
+
+**What deliberately did not change.** The eviction guards, the overshoot warning,
+and `QueryCache.size` (still entries; the capped total is
+`size + pendingSeeds`). Overshoot is still only possible when live entries alone
+exceed the cap, because seeds are always droppable. Two things were adjusted for
+honesty: the devtools label shows the staged part (`cache 3 + 12 staged / 100`) so
+the readout cannot quietly under-report, and `clear()` now drops staged values
+too, because "empty" has to mean empty.
+
+**Cost.** Every `seed()` that lands over budget scans the staged map — at most
+the cap — for its oldest member, so `hydrate`ing `n` values costs `O(n · cap)`
+once, at startup. There is a benchmark for it in `docs/perf.md`. `hydrate()`'s
+return value keeps counting what the snapshot *contributed*, not what survived:
+the cap is the cache's policy, and a snapshot is a hint rather than a
+reservation.
 
 ---
 
@@ -471,15 +512,220 @@ means the pause check belongs *around* the retry scheduling in
 deferred together. Mutation replay is an ordered queue owned by the cache, with
 `persist`-style opt-in for surviving a reload.
 
-## Phase 3 — async persistence (deferred, sketch)
+## Phase 3 — async persistence (`/persist`)
 
-`CacheStorage` becomes `MaybePromise`-returning; `indexedDbStorage()` is a
-hand-written ~100 line wrapper in `/persist`; `isRestoring()` plus a hold on the
-first fetch of a restorable key; `buster` and `migrate(snapshot, fromVersion)`
-around `SNAPSHOT_VERSION`. The hard part is not IndexedDB, it is the restore
-race: `resolve` runs inside a `computed`, so "wait for the restore" cannot block
-there, and the design is a seed that arrives late and is applied to the existing
-entry via `restore()` — which already exists for exactly this reason.
+Written before the code. The paragraph that used to sit here is replaced by the
+decisions, because two of them fight the code that exists and one of them cannot
+be what the sketch implied.
+
+### What the phase is for
+
+`localStorage` is synchronous, so 0.1.0 could hydrate during injector creation and
+*know* the first render saw restored data. IndexedDB cannot answer synchronously,
+so a snapshot read through it lands some time after the first mount — after the
+first fetch, if nothing holds the fetch back. Everything below is either an
+adapter or a consequence of that one sentence.
+
+### 1. `CacheStorage` becomes maybe-async
+
+```ts
+export interface CacheStorage {
+  getItem(key: string): string | null | Promise<string | null>;
+  setItem(key: string, value: string): void | Promise<void>;
+  removeItem(key: string): void | Promise<void>;
+}
+```
+
+A union rather than a second `AsyncCacheStorage` type: a storage written against
+the old interface still satisfies this one, so `localStorage`, `sessionStorage`,
+the in-memory doubles in the spec suite and every `CacheStorage` an application
+already has keep working with no edit and no cast. `await` on a non-promise is
+free, so one code path serves both.
+
+**`Persister.hydrate()` therefore returns `number | Promise<number>`.** This is a
+widening of an existing signature, and it is the one place this phase touches one.
+It is deliberate rather than accidental: the number keeps its meaning (how many
+values the snapshot contributed), `await persister.hydrate()` keeps compiling and
+behaving, and a caller that compared the result synchronously now gets a *compile
+error* rather than a wrong answer — the loud failure. The alternative,
+`restore(): Promise<number>` alongside a sync `hydrate(): number`, would make
+`hydrate` return `0` for async storage, which is a lie about the data rather than
+about the timing. Rejected, and recorded in the CHANGELOG under Changed.
+
+### 2. `indexedDbStorage(options)`
+
+```ts
+export interface IndexedDbStorageOptions {
+  readonly database?: string;   // 'ng-signal-request'
+  readonly store?: string;      // 'cache'
+  readonly version?: number;    // 1
+  /** The `IDBFactory` to open from. Defaults to the global `indexedDB`. */
+  readonly factory?: IDBFactory;
+}
+export function indexedDbStorage(options?: IndexedDbStorageOptions): CacheStorage;
+```
+
+Hand-written, one lazily-opened connection cached per storage instance, the object
+store created on `upgradeneeded`.
+
+`factory` is an option rather than a module-level `globalThis.indexedDB` read for
+two reasons. jsdom has no IndexedDB, so the suite needs a seam that is *not*
+`vi.stubGlobal` — a global stub leaks into every other test in the file and into
+any test that runs concurrently — and a worker application may legitimately want a
+different factory. It is also the only way to reach `upgradeneeded` and `blocked`
+without adding a fake IndexedDB library, which the zero-dependency rule forbids.
+
+Every failure becomes the existing disabled signal instead of an exception:
+
+- **no factory, or `open()` throws** (private mode, storage blocked): every method
+  rejects; `hydrate` catches, disables, and `persist` becomes a no-op;
+- **`onblocked`** (a stale tab holds the old version): rejects the open;
+- **`setItem` rejection** (quota, closed connection): caught on the write path →
+  disable, the same as a throwing `localStorage`;
+- **junk in the store**: already handled — `JSON.parse` throws → remove → `0`.
+
+### 3. The restore race, and the gate
+
+The hard part, and the reason this is not just an adapter. `QueryCache.resolve`
+runs inside a handle's key `computed`, so nothing there can await. Two mechanisms,
+and the second is what makes the acceptance criterion true.
+
+**(a) A late seed reconciles; it never clobbers.** `QueryCache.seed` on a key whose
+entry already exists calls `CacheEntry.restore(value, dataUpdatedAt)`, which today
+writes unconditionally. With an async read, "restore" can arrive *after* the
+network answered, and the stored value is by definition older — writing it would
+mean the cache regressing in time. Rule: a late seed is applied only when the
+entry has no data yet, or when the seed's `dataUpdatedAt` is **newer** than the
+entry's. Equal timestamps keep the entry's value, because by then it is the one
+handles are reading.
+
+**(b) `RESTORE_GATE`, a core seam that hold the first fetch.**
+
+```ts
+export interface RestoreGate {
+  /** `true` while a restore is in flight. Read reactively: it releases held fetches. */
+  readonly isRestoring: Signal<boolean>;
+  /** Whether the incoming snapshot carries, or may carry, this key. */
+  restorable(key: readonly unknown[]): boolean;
+  /** Settles when the restore does, or when its bound elapses. Never rejects. */
+  restored(): Promise<void>;
+}
+export const RESTORE_GATE = new InjectionToken<RestoreGate>('ng-signal-request: restore gate', {
+  providedIn: 'root',
+  factory: () => IDLE_RESTORE_GATE,
+});
+```
+
+This lives in the **core** entry point, not in `/persist`, because the party that
+has to wait is the cached request. The alternative — teaching core about
+`CACHE_PERSISTER` — would make every application that never persists pay for the
+persistence code, which is exactly what the separate entry point exists to avoid.
+The core cost is the token, the interface and one `inject`, and the default gate
+is an idle constant so a non-persisting application allocates nothing and the
+effect's read of `isRestoring()` is a `false`.
+
+The option is `waitForRestore`, on `SignalRequestConfig` and on
+`CachedRequestOptions`, defaulting to **`true`**. Defaulting to `true` is safe for
+existing users because the gate is only busy when a restore is *actually* async: a
+sync storage finishes during injector creation, so `isRestoring()` is `false`
+before any handle exists and nothing changes. It is the right default because
+"restored before the first fetch" is the entire promise of persisting.
+
+The bound is `PersistOptions.restoreTimeout`, default `2000` ms — a hung storage
+must not hold the first render forever. Reaching the bound sets `isRestoring` to
+`false` and applies nothing; the snapshot's late seeds still reconcile under rule
+(a) if the read ever completes.
+
+**What is held:** the mount-time fetch (the subscription effect) and `run()`, which
+resolves after the restore instead of racing it. **What is not:** `reload()`,
+`invalidate()`, polling and refocus refetches. They are explicit instructions that
+happen after mount, the restore is bounded anyway, and `reload()` returns
+synchronously — it cannot wait even if it wanted to.
+
+**On the server:** `indexedDbStorage` has no factory, so it rejects and the
+persister disables itself; `defaultStorage()` was already `null` there. The gate
+never becomes busy, nothing awaits, and no stability is held. `provideCacheTransfer`
+remains the SSR path and is untouched: `TransferState` is synchronous.
+
+### 4. Versioning: `buster` and `migrate`
+
+`CacheSnapshot` gains an optional `buster?: string`. A snapshot whose `buster` is
+not the configured one is dropped, exactly like a version mismatch. Optional and
+compared by value, so an application that never sets one sees no change.
+
+`SNAPSHOT_VERSION` **stays `1`**, deliberately. The new field is optional, so a
+snapshot written by 0.1.0 is still a valid `CacheSnapshot` and reading it is
+correct — bumping the number would throw away every existing snapshot on upgrade
+for no gain, which is an anti-feature. `migrate(snapshot, fromVersion)` is the
+mechanism for the bump that *does* change the shape, and it is exercised in the
+suite against synthetic `version: 0` and `version: 2` payloads:
+
+```ts
+readonly migrate?: (snapshot: CacheSnapshot, fromVersion: number) => CacheSnapshot | null;
+```
+
+A `migrate` that throws, or returns `null`, discards the snapshot and leaves the
+cache empty. A throw is caught, so it can never take down bootstrap — a bad
+migration is a cold first paint, not a broken application. `migrate` is *not*
+called for a version that matches `SNAPSHOT_VERSION`.
+
+### 5. `dehydrateFilter`, and one changed default
+
+```ts
+export type DehydratePredicate = (entry: CacheEntry<unknown>) => boolean;
+interface DehydrateOptions {
+  readonly dehydrateFilter?: DehydratePredicate;
+}
+```
+
+The default becomes: **has data, is not fetching, and is not in an error state.**
+Today an entry that failed a refetch but still holds yesterday's value *is*
+persisted, and an entry that is mid-refetch is persisted in whatever half-state
+its signals are in. Neither is worth restoring, and both are cheap to exclude. Sub
+`(entry) => boolean` rather than a filter-descriptor object, because the entry API
+is already the honest unit here — `include`/`exclude` select by key, this selects
+by state.
+
+This is a behaviour change on the persist path and goes in the CHANGELOG under
+Changed. It cannot lose data: the previous value of the same key was written by the
+previous write, and excluding a failing entry means the older *good* value stays.
+
+### 6. Writes, coalescing, and the `hydrate` return value
+
+Writes go through one in-flight chain so that a `setItem` that returns a promise
+cannot overlap with the next one; the debounce stays a trailing debounce, and a
+rejected write disables the persister through the same path as a throwing one. The
+flush points (`pagehide`, visibility, injector teardown) are unchanged, and a
+promise-returning `setItem` is fired but not awaited there — a page teardown gives
+no second chance either way, and blocking it on an async write is worse.
+
+`hydrate`'s return keeps counting what the snapshot **contributed**, not what
+survived: the `maxEntries` policy from Step 0 may drop staged values immediately,
+and that is the cache's policy rather than the snapshot's. Documented on the
+method.
+
+### 7. Tests, and the risks
+
+The suite covers: async round trip through a promise-returning storage; restore
+racing the first render (a key whose snapshot is in the gate is not fetched
+before the seed lands, and *is* fetched when its key is not in the snapshot);
+a late seed that loses to newer network data; corrupted payload; quota exceeded;
+blocked upgrade; `version` mismatch with and without `migrate`; a throwing
+`migrate`; a `buster` change; SSR no-op; and a hand-written in-memory `IDBFactory`
+double for `indexedDbStorage` itself.
+
+Known risks, stated rather than mitigated away:
+
+- **The gate can delay a first paint** by up to `restoreTimeout` for a slow
+  storage. That is the trade the feature is: a bound, an option to turn it off, and
+  a default that only engages when a read is genuinely outstanding.
+- **Two writes can interleave at the storage layer** if an application hands over a
+  storage whose `setItem` resolves out of order. This library serializes its own
+  calls; it cannot serialize the storage's.
+- **A `migrate` that silently returns a wrong-shaped snapshot** is not detectable
+  here — the snapshot is untrusted input, which is why the version check exists and
+  is why `migrate` is optional.
+
 
 ## Phase 4 — `queryFn` (deferred, sketch)
 

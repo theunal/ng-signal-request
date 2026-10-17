@@ -356,6 +356,21 @@ describe('DevtoolsPanel — the table', () => {
     expect(button.textContent).not.toContain('/');
   });
 
+  it('counts staged persisted values, which have no entry to show', () => {
+    setup([provideSignalRequest({ maxEntries: 2 })]);
+    // Staged by a persister: no entry exists, but they hold two of the cap's two places. The table
+    // cannot list them, so the label has to account for them or the cap readout is a lie.
+    cache().seed(['rows', 1], [{ id: 1 }], 1);
+    cache().seed(['rows', 2], [{ id: 2 }], 2);
+
+    const fixture = TestBed.createComponent(DevtoolsPanel);
+    fixture.detectChanges();
+    const button = fixture.nativeElement.querySelector('button') as HTMLButtonElement;
+
+    expect(button.textContent).toContain('cache 0 + 2 staged / 2');
+    expect(button.textContent).not.toContain('over cap');
+  });
+
   it('formats an age in ms, seconds and minutes', () => {
     const fixture = mount();
     const panel = fixture.componentInstance as unknown as { formatAge(ms: number): string };

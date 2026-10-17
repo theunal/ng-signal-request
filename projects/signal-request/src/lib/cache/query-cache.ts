@@ -45,6 +45,12 @@ export class QueryCache {
   private readonly activityListeners = new Set<CacheChangeListener>();
   /** Detaches the settle listener of each entry, so a forgotten entry leaves nothing behind. */
   private readonly settleDetachers = new Map<string, () => void>();
+  /**
+   * Values staged by `seed` / `hydrate`, waiting for their key to be asked for.
+   *
+   * Kept in insertion order, which makes a tie in `dataUpdatedAt` resolve to "whoever was staged
+   * first". They count toward the cap like entries do.
+   */
   private readonly seeds = new Map<string, Seed>();
   private readonly http = inject(HttpClient);
   private readonly isBrowser = isPlatformBrowser(inject(PLATFORM_ID));
@@ -60,6 +66,8 @@ export class QueryCache {
    * The global value is read straight from {@link SIGNAL_REQUEST_CONFIG} — it is a property of the
    * store, so the store owns it. Per-request values arrive through {@link tightenMaxEntries}, which
    * is the only way a handle can have a say.
+   *
+   * The cap bounds **entries plus staged seeds** — see {@link enforceCap}.
    */
   private cap = normalizeCap(this.config.maxEntries);
 
@@ -99,7 +107,7 @@ export class QueryCache {
     // `!(next < cap)` also rejects `NaN`, which would otherwise poison every comparison.
     if (!(next < this.cap)) return;
     this.cap = next;
-    this.evictUntilAtMost(next);
+    this.enforceCap(0);
     this.warnIfOverCap();
   }
 
@@ -140,6 +148,63 @@ export class QueryCache {
       // out and it always deletes, so this is insurance rather than an expected branch.
       if (this.entries.size >= before) return;
     }
+  }
+
+  /**
+   * Brings **entries and staged seeds together** back under the cap, leaving room for `reserve`
+   * entries that are about to be inserted.
+   *
+   * Staged seeds are counted because they are the same promise the cap bounds: a value being held
+   * for a key somebody will ask for. A persisted snapshot that arrives through `hydrate` is exactly
+   * as much memory as the entries it will become, and leaving it outside the cap would let a large
+   * snapshot bypass the bound entirely — the gap this closes. Seeds are dropped before entries; see
+   * {@link dropSeedsToFit} for why, and `docs/design-0.2.md` for the policy.
+   */
+  private enforceCap(reserve: number): void {
+    const target = this.cap - reserve;
+    this.dropSeedsToFit(target);
+    this.evictUntilAtMost(target);
+  }
+
+  /**
+   * Drops the oldest staged seeds until `target - entries.size` of them remain.
+   *
+   * A seed goes before an entry. A seed is a value **no handle has asked for yet this session**, so
+   * losing one costs a refetch the next time its key is used; evicting an entry additionally throws
+   * away an object handles have already resolved. And the seed is the *cheaper* side to be wrong
+   * about, because nothing can be mid-flight on a value that has not been consumed.
+   *
+   * Oldest `dataUpdatedAt` first, ties going to whoever was staged first. That is the same clock
+   * `staleTime` uses, so the seed dropped is the one least likely to have been worth restoring.
+   */
+  private dropSeedsToFit(target: number): void {
+    // Clamped, because the budget can go negative: a cache whose live entries already exceed the cap
+    // has no room for seeds at all, and `while (size > -3)` would never terminate.
+    const budget = Math.max(0, target - this.entries.size);
+    while (this.seeds.size > budget) {
+      this.seeds.delete(this.oldestSeed());
+    }
+  }
+
+  /**
+   * The hash of the staged seed with the earliest `dataUpdatedAt`; a tie keeps the first staged.
+   *
+   * Total rather than `string | undefined` on purpose: the only caller reaches it with a non-empty
+   * map, which its loop condition guarantees. An `undefined` return would have to mean "drop
+   * nothing", which is precisely the state that would leave the cap unmet — and the sentinel is a
+   * key no hash can take (`''`), so a future caller that gets this wrong drops nothing rather than
+   * something arbitrary.
+   */
+  private oldestSeed(): string {
+    let oldest = '';
+    let earliest = Number.POSITIVE_INFINITY;
+    for (const [hash, seed] of this.seeds) {
+      if (seed.dataUpdatedAt < earliest) {
+        earliest = seed.dataUpdatedAt;
+        oldest = hash;
+      }
+    }
+    return oldest;
   }
 
   private leastRecentlyUsedIdle(): CacheEntry<unknown> | undefined {
@@ -197,7 +262,12 @@ export class QueryCache {
     // Before the new entry joins the map, so the entry somebody just asked for is never the one
     // that gets taken. Enforced here — on insert — because this is the only moment the cache grows,
     // and it has to be synchronous for the cap to be a memory bound rather than a report.
-    this.evictUntilAtMost(this.cap - 1);
+    //
+    // The consumed seed was already removed from `seeds` above, and the new entry is not in `entries`
+    // yet, so the reservation is exactly one place: `enforceCap(1)` leaves room for it and nothing
+    // else. That ordering is also what makes it impossible for a resolve to lose its own seed to
+    // eviction.
+    this.enforceCap(1);
 
     const entry = new CacheEntry<T>(
       normalized,
@@ -248,6 +318,11 @@ export class QueryCache {
    * immediately `hasData`, and `staleTime` is measured from `dataUpdatedAt` — the moment the value
    * was originally fetched, not the moment it was restored. That is what makes a persisted entry
    * refetch on mount exactly when it is actually old.
+   *
+   * A staged value counts toward `maxEntries`, so staging one can drop the oldest staged value:
+   * `hydrate`ing a snapshot larger than the cap keeps the most recently fetched entries and forgets
+   * the rest, rather than parking the whole file in memory. A value that is dropped is not refused —
+   * it is simply not there, and its key fetches normally.
    */
   seed(key: QueryKey, value: unknown, dataUpdatedAt: number): void {
     const normalized = normalizeKey(key);
@@ -257,9 +332,17 @@ export class QueryCache {
       return;
     }
     this.seeds.set(normalized.hash, { value, dataUpdatedAt });
+    // Staging a value is a cache write like any other, so the cap is enforced here too: otherwise a
+    // snapshot would sit outside the bound Phase 1 established until the first key resolved.
+    this.enforceCap(0);
   }
 
-  /** How many values are waiting for a key to be asked for. */
+  /**
+   * How many values are waiting for a key to be asked for.
+   *
+   * These count toward {@link maxEntries}, which is why this is worth reading next to
+   * {@link size}: `size + pendingSeeds` is what the cap actually bounds.
+   */
   get pendingSeeds(): number {
     return this.seeds.size;
   }
@@ -333,7 +416,13 @@ export class QueryCache {
     return matched.length;
   }
 
-  /** Number of live entries. Asserted by the leak tests. */
+  /**
+   * Number of live entries. Asserted by the leak tests.
+   *
+   * Not the number `maxEntries` compares against — that one includes {@link pendingSeeds}. This
+   * stays "entries" so a call site that means entries keeps meaning entries; `size + pendingSeeds`
+   * is the capped total.
+   */
   get size(): number {
     return this.entries.size;
   }
@@ -345,6 +434,10 @@ export class QueryCache {
     for (const entry of this.entries.values()) entry.destroy();
     this.entries.clear();
     this.recency.clear();
+    // Staged values go too. "Empty" has to mean empty: leaving a seed behind would let a cleared
+    // cache hand restored data to the next handle that resolved that key, which is a resurrection
+    // nobody asked for.
+    this.seeds.clear();
     this.capWarned = false;
     this.notify();
     this.notifyActivity();

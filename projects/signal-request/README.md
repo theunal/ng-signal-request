@@ -586,6 +586,15 @@ unmounting does not immediately trim the cache — the next new entry does. Betw
 those two moments `gcTime` is still the only thing collecting, which is exactly
 what it was before.
 
+Staged values count toward the cap as well. `seed` / `hydrate` park a persisted
+value until a handle asks for its key, and that parking area is bounded by the
+same `maxEntries` — otherwise a single large snapshot would sit outside the bound
+for a whole session. When the total is over, **staged values go before entries**,
+oldest fetch first: a staged value is one nothing has asked for yet, so losing it
+costs a refetch the next time its key is used, whereas taking an entry throws away
+data a handle has already resolved. `pendingSeeds` reports how many are waiting,
+and `size() + pendingSeeds` is the number `maxEntries` actually bounds.
+
 A per-request `maxEntries` can only **tighten** the global one, never raise it.
 There is one cache per application and nothing owns a subset of it, so a
 per-request cap is a budget for the whole cache: the smallest value anyone
@@ -1439,12 +1448,6 @@ enough that the translation is mechanical.
 Stated plainly, because a limitation you find out about in production is a bug
 report and one you read here is a design decision.
 
-- **`maxEntries` does not bound the persisted seeds.** `QueryCache.seed` stages a
-  value until a handle asks for its key, and that staging area has no cap. In
-  normal use it is proportional to what is rendered — a seed is consumed the first
-  time its key is resolved — but a snapshot with far more keys than any render
-  touches holds them all. Introduce an include/exclude filter in
-  `providePersistedCache` if that is your shape.
 - **Offline is not supported.** There is no `networkMode`, no `onlineManager` and
   no mutation replay. A query that fails while the network is down fails;
   `refetchOnReconnect` refetches what is on screen once the browser reports it is

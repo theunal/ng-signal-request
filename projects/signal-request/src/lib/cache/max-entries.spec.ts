@@ -29,6 +29,24 @@ function recencySize(instance: QueryCache): number {
   return (instance as unknown as { recency: Map<string, number> }).recency.size;
 }
 
+/**
+ * The staged values, in staging order.
+ *
+ * Reaches into the private map for the same reason `recencySize` does: which values survived is not
+ * observable through the public API, because a staged value has no entry to `peek` until a handle
+ * asks for its key — and asking is what consumes it.
+ */
+function stagedValues(instance: QueryCache): readonly unknown[] {
+  const seeds = (instance as unknown as { seeds: Map<string, { value: unknown }> }).seeds;
+  return [...seeds.values()].map((seed) => seed.value);
+}
+
+/** The staged values' `dataUpdatedAt`s, ascending. */
+function stagedAges(instance: QueryCache): readonly number[] {
+  const seeds = (instance as unknown as { seeds: Map<string, { dataUpdatedAt: number }> }).seeds;
+  return [...seeds.values()].map((seed) => seed.dataUpdatedAt).sort((a, b) => a - b);
+}
+
 /** An entry with no observer and a `gcTime` long enough that nothing is collected during a test. */
 const GC = 60_000;
 
@@ -301,6 +319,102 @@ describe('maxEntries — the QueryClient surface', () => {
     expect(client.evict(['users'])).toBe(0);
     expect(c.size).toBe(1);
     release();
+  });
+});
+
+describe('maxEntries — staged seeds', () => {
+  it('counts staged values toward the cap, and drops the oldest fetch first', () => {
+    setup([provideSignalRequest({ maxEntries: 3 })]);
+    const c = cache();
+
+    // Ten values staged for keys nothing has asked for yet — the shape a persisted snapshot has
+    // when it arrives. Before this was enforced, all ten sat outside the cap.
+    for (let i = 0; i < 10; i++) c.seed(['k', i], { id: i }, i);
+
+    // Still no entries: seeding deliberately creates none. The cap holds anyway.
+    expect(c.size).toBe(0);
+    expect(c.pendingSeeds).toBe(3);
+    expect(stagedAges(c)).toEqual([7, 8, 9]);
+  });
+
+  it('keeps the first staged value when the timestamps tie', () => {
+    // A snapshot written by `dehydrate` carries real fetch times, but two entries fetched in the
+    // same millisecond tie — and so does anything a test writes by hand.
+    setup([provideSignalRequest({ maxEntries: 2 })]);
+    const c = cache();
+
+    c.seed(['a'], 'a', 0);
+    c.seed(['b'], 'b', 0);
+    c.seed(['c'], 'c', 0);
+
+    expect(c.pendingSeeds).toBe(2);
+    expect(stagedValues(c)).toEqual(['b', 'c']);
+  });
+
+  it('never drops the seed a resolve is consuming, even when the cap is tight', () => {
+    setup([provideSignalRequest({ maxEntries: 2 })]);
+    const c = cache();
+    c.seed(['a'], { id: 'a' }, 1); // the oldest, and the first to go
+    c.seed(['b'], { id: 'b' }, 2);
+    c.seed(['c'], { id: 'c' }, 3);
+
+    // `b` is moved out of the staging map and into the entry *before* the cap is enforced, so the
+    // value that has to be given up to make room for `b`'s entry cannot be `b`'s own value.
+    const entry = c.resolve(['b']);
+
+    expect(entry.data()).toEqual({ id: 'b' });
+    expect(entry.dataUpdatedAt()).toBe(2);
+    // Restored, not written by hand: a persisted value is not a local edit.
+    expect(entry.local()).toBe(false);
+    expect(c.size + c.pendingSeeds).toBeLessThanOrEqual(2);
+  });
+
+  it('gives up a staged value before an idle entry', () => {
+    setup([provideSignalRequest({ maxEntries: 2, gcTime: GC })]);
+    const c = cache();
+
+    c.resolve(['kept']).subscribe(GC)();
+
+    // Three staged values against a cap of two, with one entry already holding a place.
+    for (const [i, key] of ['x', 'y', 'z'].entries()) c.seed([key], key, i + 1);
+
+    // The entry is somebody's resolved data; the staged values are nobody's yet.
+    expect(c.peek(['kept'])).toBeDefined();
+    expect(c.pendingSeeds).toBe(1);
+    expect(c.size + c.pendingSeeds).toBe(2);
+  });
+
+  it('drops staged values when the cap is lowered after they were staged', () => {
+    setup([provideSignalRequest({ maxEntries: 5 })]);
+    const c = cache();
+    for (let i = 0; i < 5; i++) c.seed(['k', i], i, i);
+
+    c.tightenMaxEntries(2);
+    expect(c.pendingSeeds).toBe(2);
+    expect(stagedAges(c)).toEqual([3, 4]);
+  });
+
+  it('clear() drops staged values, so nothing is resurrected afterwards', () => {
+    setup([provideSignalRequest({ maxEntries: 5 })]);
+    const c = cache();
+    c.seed(['a'], 1, 1);
+
+    c.clear();
+    expect(c.size).toBe(0);
+    expect(c.pendingSeeds).toBe(0);
+
+    // The key is now a miss and a stale fetch, which is what "empty" has to mean.
+    const entry = c.resolve(['a']);
+    expect(entry.data()).toBeUndefined();
+    expect(entry.isStale(0)).toBe(true);
+  });
+
+  it('is unlimited by default, and a dropped value never becomes an entry on its own', () => {
+    setup();
+    const c = cache();
+    for (let i = 0; i < 500; i++) c.seed(['k', i], i, i);
+    expect(c.pendingSeeds).toBe(500);
+    expect(c.size).toBe(0);
   });
 });
 

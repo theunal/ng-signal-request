@@ -233,9 +233,20 @@ export class QueryDevtools {
     return this.cache.maxEntries;
   }
 
-  /** How far over its cap the cache is, or `0`. */
+  /**
+   * Values staged by persistence, waiting for their key to be asked for.
+   *
+   * They count toward the cap but have no entry to show, so the table cannot list them — this is
+   * what keeps the "cache N / cap" label from quietly under-reporting when a snapshot has just been
+   * restored. A plain getter for the same reason `cap` is one.
+   */
+  get staged(): number {
+    return this.cache.pendingSeeds;
+  }
+
+  /** How far over its cap the cache is, or `0`. Staged values count, because the cap counts them. */
   get overCap(): number {
-    return Math.max(0, this.count() - this.cap);
+    return Math.max(0, this.count() + this.staged - this.cap);
   }
 
   /** Entries currently on the network. */
@@ -320,7 +331,7 @@ export class QueryDevtools {
   template: `
     <div class="ngsr-devtools">
       <button type="button" (click)="devtools.toggle()">
-        cache {{ devtools.count() }}{{ capLabel() }}
+        cache {{ devtools.count() }}{{ stagedLabel() }}{{ capLabel() }}
         @if (devtools.fetching(); as running) {
           <span class="busy">({{ running }} loading)</span>
         }
@@ -406,6 +417,12 @@ export class DevtoolsPanel {
   protected capLabel(): string {
     const cap = this.devtools.cap;
     return Number.isFinite(cap) ? ` / ${cap}` : '';
+  }
+
+  /** `" + 12 staged"`, or nothing when no persisted value is waiting for its key. */
+  protected stagedLabel(): string {
+    const staged = this.devtools.staged;
+    return staged > 0 ? ` + ${staged} staged` : '';
   }
 
   /** ms as something a human can scan. */

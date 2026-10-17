@@ -35,6 +35,13 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
     `CacheEntry.evict()` for a teardown that writes no signals.
   - The devtools panel shows the entry count against the cap and flags an
     overshoot.
+  - **Staged persisted values count toward the cap too.** `seed` / `hydrate` park a
+    value until a handle asks for its key, and that area used to sit outside the
+    bound, so one large snapshot could bypass it entirely. A staged value is now
+    dropped before any entry is, oldest fetch first — a value nothing has asked for
+    is the cheaper thing to lose — and the devtools label shows the staged part
+    (`cache 3 + 12 staged / 100`). `QueryCache.clear()` drops staged values as well,
+    so a cleared cache cannot be repopulated from one.
   - `docs/design-0.2.md` records the per-key-prefix reading that was rejected, and
     why eviction cannot go through `destroy()`.
 - **`retryTimeouts` — the timeout + retry caveat, now controllable.** A timeout

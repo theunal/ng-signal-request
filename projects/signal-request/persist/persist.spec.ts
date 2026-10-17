@@ -7,7 +7,7 @@ import {
 } from '@angular/core';
 import { TestBed } from '@angular/core/testing';
 import { describe, expect, it } from 'vitest';
-import { createRequest, QueryClient, type CachedRequest } from 'ng-signal-request';
+import { createRequest, provideSignalRequest, QueryClient, type CachedRequest } from 'ng-signal-request';
 import {
   CACHE_PERSISTER,
   CACHE_TRANSFER_KEY,
@@ -263,6 +263,73 @@ describe('hydrate()', () => {
 
     expect(handle.response()![0].createdAt).toBeInstanceOf(Date);
     handle.destroy();
+  });
+});
+
+describe('hydrate() and maxEntries', () => {
+  it('never lets an oversized snapshot past the cap', () => {
+    const { create } = setup([provideSignalRequest({ maxEntries: 4 })]);
+    create(() => inject(QueryClient));
+
+    const entries = Array.from({ length: 40 }, (_, i) => ({
+      key: ['rows', i],
+      data: rows([i]),
+      dataUpdatedAt: i + 1,
+    }));
+
+    // The return value counts what the snapshot *contributed*; the cap is the cache's policy. A
+    // snapshot is a hint, not a reservation, so 40 staged values against a cap of 4 keep 4.
+    expect(hydrate(cache(), snapshotOf(entries))).toBe(40);
+    expect(cache().pendingSeeds).toBe(4);
+    expect(cache().size + cache().pendingSeeds).toBeLessThanOrEqual(4);
+  });
+
+  it('keeps the freshest values, and turns the rest back into ordinary misses', async () => {
+    const { http, create } = setup([provideSignalRequest({ maxEntries: 2 })]);
+    hydrate(
+      cache(),
+      snapshotOf([
+        { key: ['rows', 0], data: rows([0]), dataUpdatedAt: 1 },
+        { key: ['rows', 1], data: rows([1]), dataUpdatedAt: 2 },
+        { key: ['rows', 2], data: rows([2]), dataUpdatedAt: 3 },
+      ]),
+    );
+
+    // `['rows', 0]` was the oldest fetch, so it was the one dropped. Its handle therefore has no
+    // value and no error — it fetches, which is the honest consequence of the cap.
+    const handle = keyed<Row[]>(create, ['rows', 0], Number.POSITIVE_INFINITY, '/rows/0');
+    await settle();
+    expect(handle.response()).toBeUndefined();
+
+    http.expectOne('/rows/0').flush(rows([9]));
+    await settle();
+    expect(handle.response()).toEqual(rows([9]));
+    handle.destroy();
+  });
+
+  it('caps a transferred snapshot on the client too', () => {
+    // The SSR path goes through the same `hydrate`, so the same bound applies. A server render of a
+    // large page cannot hand the browser an unbounded payload.
+    const transfer = new TransferState();
+    transfer.set(
+      CACHE_TRANSFER_KEY,
+      snapshotOf(
+        Array.from({ length: 20 }, (_, i) => ({
+          key: ['t', i],
+          data: rows([i]),
+          dataUpdatedAt: i,
+        })),
+      ),
+    );
+
+    setup([
+      { provide: TransferState, useValue: transfer },
+      provideCacheTransfer(),
+      provideSignalRequest({ maxEntries: 3 }),
+    ]);
+
+    expect(cache().pendingSeeds).toBe(3);
+    expect(cache().size + cache().pendingSeeds).toBeLessThanOrEqual(3);
   });
 });
 

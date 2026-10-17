@@ -353,7 +353,10 @@ export class QueryDevtools {
           </thead>
           <tbody>
             @for (entry of devtools.entries(); track entry.hash) {
-              <tr [class.error]="entry.status === 'error'" [class.loading]="entry.status === 'loading'">
+              <tr
+                [class.error]="entry.status === 'error'"
+                [class.loading]="entry.status === 'loading'"
+              >
                 <td [title]="entry.name ?? ''">{{ entry.label }}</td>
                 <td>{{ entry.status }}</td>
                 <td>{{ entry.observers }}</td>
@@ -376,7 +379,9 @@ export class QueryDevtools {
       right: 0.5rem;
       bottom: 0.5rem;
       z-index: 9999;
-      font: 12px/1.4 ui-monospace, monospace;
+      font:
+        12px/1.4 ui-monospace,
+        monospace;
       background: #fff;
       color: #111;
       border: 1px solid #bbb;

@@ -35,7 +35,12 @@ interface ListParams {
         </label>
         <label class="grow">
           Yerel filtre
-          <input type="search" placeholder="başlıkta ara…" [value]="term()" (input)="term.set($any($event.target).value)" />
+          <input
+            type="search"
+            placeholder="başlıkta ara…"
+            [value]="term()"
+            (input)="term.set($any($event.target).value)"
+          />
         </label>
       </div>
 
@@ -98,7 +103,9 @@ interface ListParams {
         <p class="hint">Bir başlığa tıkla; yorum isteği, önce o postu bekler.</p>
       } @else {
         <div class="status">
-          <span class="badge" [class]="'badge ' + detail.status()">post: {{ detail.status() }}</span>
+          <span class="badge" [class]="'badge ' + detail.status()"
+            >post: {{ detail.status() }}</span
+          >
           <span class="badge" [class]="'badge ' + comments.status()">
             yorumlar: {{ comments.status() }}
           </span>
@@ -106,7 +113,9 @@ interface ListParams {
         </div>
 
         @if (detail.response(); as post) {
-          <p class="hint"><strong>{{ post.title }}</strong></p>
+          <p class="hint">
+            <strong>{{ post.title }}</strong>
+          </p>
         }
 
         <ul class="list">
@@ -140,13 +149,14 @@ export class ListSection {
     },
     {
       params: {
-        page: 1, perPage: 10,
+        page: 1,
+        perPage: 10,
         path: {
-          userId: 1
+          userId: 1,
         },
         headers: {
-          'x-demo': 'list'
-        }
+          'x-demo': 'list',
+        },
       },
       keepPreviousValue: true,
       initialValue: [],

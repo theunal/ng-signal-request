@@ -6,6 +6,10 @@ import { BrowserTestingModule, platformBrowserTesting } from '@angular/platform-
 @NgModule({ providers: [provideZonelessChangeDetection()] })
 class ZonelessTestModule {}
 
-getTestBed().initTestEnvironment([BrowserTestingModule, ZonelessTestModule], platformBrowserTesting(), {
-  teardown: { destroyAfterEach: true },
-});
+getTestBed().initTestEnvironment(
+  [BrowserTestingModule, ZonelessTestModule],
+  platformBrowserTesting(),
+  {
+    teardown: { destroyAfterEach: true },
+  },
+);

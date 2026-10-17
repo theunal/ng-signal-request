@@ -8,7 +8,8 @@ import type { NormalizedKey } from './key';
 import type { StructuralSharingFn } from './structural-sharing';
 
 /** How a fetch ended, as reported to {@link CacheEntry.addSettleListener}. */
-export type SettleOutcome<T> = { readonly ok: true; readonly value: T } | { readonly ok: false; readonly error: Error };
+export type SettleOutcome<T> =
+  { readonly ok: true; readonly value: T } | { readonly ok: false; readonly error: Error };
 
 /**
  * A value that did not come from the network — a persisted snapshot, or a server render's transfer
@@ -181,15 +182,15 @@ export class CacheEntry<T = unknown> {
   /* --------------------------------------------------------------------- */
 
   /**
- * Registers an observer and returns the unsubscribe.
- *
- * `gcTime` is passed in rather than fixed at construction because it is only
- * read on the way *down* to zero observers — the moment when there is no handle
- * left to ask for it.
- *
- * Calling the returned function twice is a no-op, so a handle can hand it to a
- * `DestroyRef` without tracking whether it already ran.
- */
+   * Registers an observer and returns the unsubscribe.
+   *
+   * `gcTime` is passed in rather than fixed at construction because it is only
+   * read on the way *down* to zero observers — the moment when there is no handle
+   * left to ask for it.
+   *
+   * Calling the returned function twice is a no-op, so a handle can hand it to a
+   * `DestroyRef` without tracking whether it already ran.
+   */
   subscribe(gcTime: number): () => void {
     if (this.destroyed) return noop;
     this.observers += 1;
@@ -571,7 +572,10 @@ export class CacheEntry<T = unknown> {
 
 function isHttpEvent(raw: unknown): raw is HttpEvent<unknown> {
   return (
-    typeof raw === 'object' && raw !== null && 'type' in raw && (raw as { type: unknown }).type !== undefined
+    typeof raw === 'object' &&
+    raw !== null &&
+    'type' in raw &&
+    (raw as { type: unknown }).type !== undefined
   );
 }
 

@@ -54,8 +54,9 @@ export const appConfig: ApplicationConfig = {
       const toast = inject(ToastService);
       return {
         baseUrl: 'https://api.example.com', // prepended to every relative url
-        retry: 2,                           // default for queries (NOT mutations)
-        headers: () => ({                   // reactive — see "Auth" below
+        retry: 2, // default for queries (NOT mutations)
+        headers: () => ({
+          // reactive — see "Auth" below
           Authorization: `Bearer ${auth.token()}`,
         }),
         onError: (error, { url, method }) => toast.error(`${method} ${url}: ${error.message}`),
@@ -70,14 +71,14 @@ returning one. Use the factory whenever the config needs a service: calling
 `inject()` inside `headers` / `onError` / `onSuccess` would throw `NG0203`,
 because those callbacks run outside an injection context.
 
-| `provideSignalRequest` option | Description |
-| --- | --- |
-| `baseUrl` | Prepended to every relative url. Absolute urls are left alone |
-| `retry` | Default retry policy **for queries only**. Mutations never retry by default |
-| `retryTimeouts` | Whether an elapsed `timeout` counts as worth retrying. Default `true` (0.1.x behaviour). See "The timeout + retry caveat" |
-| `headers` | `Record<string, string>`, or a function for reactive headers. Merged *under* per-request headers |
-| `onError` | Called once per request **or mutation** that ends in a final error, after retries. Good for toasts / logging |
-| `onSuccess` | The mirror image: called once per successful request or mutation. For logging / analytics — a toast belongs in the per-call `onSuccess`, where you know what happened |
+| `provideSignalRequest` option | Description                                                                                                                                                           |
+| ----------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `baseUrl`                     | Prepended to every relative url. Absolute urls are left alone                                                                                                         |
+| `retry`                       | Default retry policy **for queries only**. Mutations never retry by default                                                                                           |
+| `retryTimeouts`               | Whether an elapsed `timeout` counts as worth retrying. Default `true` (0.1.x behaviour). See "The timeout + retry caveat"                                             |
+| `headers`                     | `Record<string, string>`, or a function for reactive headers. Merged _under_ per-request headers                                                                      |
+| `onError`                     | Called once per request **or mutation** that ends in a final error, after retries. Good for toasts / logging                                                          |
+| `onSuccess`                   | The mirror image: called once per successful request or mutation. For logging / analytics — a toast belongs in the per-call `onSuccess`, where you know what happened |
 
 ## Quick start
 
@@ -91,7 +92,7 @@ component — destroy the component and the in-flight request is aborted.
 export class AuthService {
   getList = (params: () => { page: number; q?: string }) =>
     createRequest<Item[]>(() => ({ url: '/items', params: params() }), {
-      initialValue: [],        // response() is never undefined
+      initialValue: [], // response() is never undefined
       keepPreviousValue: true, // keep the old list visible while the new one loads
       retry: 2,
     });
@@ -100,14 +101,21 @@ export class AuthService {
 @Component({
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
-    @if (list.loading()) { loading... }
-    @else if (list.requestError(); as error) {
-      @if (error.http(); as http) { error: {{ http.status }} }
-      @else if (error.network()) { no connection }
-      @else if (error.timeout()) { timed out }
-      @else { {{ error.message }} }
+    @if (list.loading()) {
+      loading...
+    } @else if (list.requestError(); as error) {
+      @if (error.http(); as http) {
+        error: {{ http.status }}
+      } @else if (error.network()) {
+        no connection
+      } @else if (error.timeout()) {
+        timed out
+      } @else {
+        {{ error.message }}
+      }
+    } @else {
+      {{ list.response().length }} records
     }
-    @else { {{ list.response().length }} records }
     <button (click)="refresh()">Refresh</button>
   `,
 })
@@ -130,11 +138,11 @@ the previous one.
 
 ### The source
 
-| Value | Meaning |
-| --- | --- |
-| `'/url'` or `{ url, ... }` | static request |
-| `() => ...` | **reactive**; re-fires whenever a signal read inside changes |
-| a function returning `undefined` / `null` / `false` | request **disabled** (`status() === 'idle'`) |
+| Value                                               | Meaning                                                      |
+| --------------------------------------------------- | ------------------------------------------------------------ |
+| `'/url'` or `{ url, ... }`                          | static request                                               |
+| `() => ...`                                         | **reactive**; re-fires whenever a signal read inside changes |
+| a function returning `undefined` / `null` / `false` | request **disabled** (`status() === 'idle'`)                 |
 
 The request object is the same as Angular's `HttpResourceRequest` (`body`,
 `headers`, `context`, `timeout`, `transferCache`, `reportProgress`, …) — minus
@@ -143,19 +151,19 @@ The request object is the same as Angular's `HttpResourceRequest` (`body`,
 - **`params`** — tolerates `null` / `undefined` (dropped), `Date` (→ ISO-8601)
   and arrays of those.
 - **`path`** — `url: '/users/:id/posts', path: { id: id() }`. If a referenced
-  placeholder resolves to `null` / `undefined`, the request is *disabled* — and
+  placeholder resolves to `null` / `undefined`, the request is _disabled_ — and
   so is a url whose placeholders are still unfilled.
 
 The HTTP verb is **not** part of the request object. It comes from the function
 you call:
 
-| Call | Sends |
-| --- | --- |
-| `createRequest(src, …)` | `GET` |
-| `createRequest.get(src, …)` | `GET` |
-| `createRequest.post(src, …)` | `POST` |
-| `createRequest.put(src, …)` | `PUT` |
-| `createRequest.patch(src, …)` | `PATCH` |
+| Call                           | Sends    |
+| ------------------------------ | -------- |
+| `createRequest(src, …)`        | `GET`    |
+| `createRequest.get(src, …)`    | `GET`    |
+| `createRequest.post(src, …)`   | `POST`   |
+| `createRequest.put(src, …)`    | `PUT`    |
+| `createRequest.patch(src, …)`  | `PATCH`  |
 | `createRequest.delete(src, …)` | `DELETE` |
 
 Each of those also takes a response type — `.text`, `.blob`, `.arrayBuffer` —
@@ -170,24 +178,24 @@ bag it is just an ordinary query value (`?method=PUT`).
 
 ### Options
 
-| Option | Description |
-| --- | --- |
-| `lazy` | `true` → nothing is sent until you call `run()`; later signal changes do **not** re-fire |
-| `params` | Initial value of the library-created `params` signal. **Required** when you declare a `TParams` type argument. Its `body` / `path` / `headers` keys fill the request; the rest becomes the query string |
-| `initialValue` | Value of `response()` while idle / loading / failed. Makes the type non-nullable |
-| `parse` | Validate or map the raw body (`schema.parse` and friends) |
-| `headers` | Headers for this request only. Merged over the global defaults, and wins over headers the source itself set |
-| `keepPreviousValue` | On a source change, keep showing the previous response until the new one arrives (default `false`) |
-| `debounce` | ms; delays source changes. **The very first request is never delayed.** Browser only |
-| `retry` | `3` \| `{ count, delay, when }`. Default: network errors, 408/425/429 and every 5xx; exponential back-off 1s, 2s, 4s… capped at 30s |
-| `timeout` | Abort after N ms. Surfaces as `{ kind: 'timeout', ms }`. Overrides a `timeout` the source sets; a source-level `timeout` alone is classified the same way. See the caveat below |
-| `retryTimeouts` | Whether this request's `timeout` is retried. Default `true` (0.1.x behaviour); the global value is the fallback. See the caveat below |
-| `pollInterval` | ms, or `() => number \| false` (reactive on/off). Browser only |
-| `pollWhenHidden` | Keep polling while the tab is hidden (default `false`) |
-| `refetchOnWindowFocus` | Re-fetch when the tab becomes visible again (default `false`). Browser only |
-| `refetchOnReconnect` | Re-fetch when the browser reports it is back online (default `false`). Browser only |
-| `onSuccess` / `onError` / `onSettled` | Lifecycle hooks (`onError` fires once, after retries are exhausted) |
-| `equal`, `injector`, `debugName` | Same as `httpResource` |
+| Option                                | Description                                                                                                                                                                                             |
+| ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `lazy`                                | `true` → nothing is sent until you call `run()`; later signal changes do **not** re-fire                                                                                                                |
+| `params`                              | Initial value of the library-created `params` signal. **Required** when you declare a `TParams` type argument. Its `body` / `path` / `headers` keys fill the request; the rest becomes the query string |
+| `initialValue`                        | Value of `response()` while idle / loading / failed. Makes the type non-nullable                                                                                                                        |
+| `parse`                               | Validate or map the raw body (`schema.parse` and friends)                                                                                                                                               |
+| `headers`                             | Headers for this request only. Merged over the global defaults, and wins over headers the source itself set                                                                                             |
+| `keepPreviousValue`                   | On a source change, keep showing the previous response until the new one arrives (default `false`)                                                                                                      |
+| `debounce`                            | ms; delays source changes. **The very first request is never delayed.** Browser only                                                                                                                    |
+| `retry`                               | `3` \| `{ count, delay, when }`. Default: network errors, 408/425/429 and every 5xx; exponential back-off 1s, 2s, 4s… capped at 30s                                                                     |
+| `timeout`                             | Abort after N ms. Surfaces as `{ kind: 'timeout', ms }`. Overrides a `timeout` the source sets; a source-level `timeout` alone is classified the same way. See the caveat below                         |
+| `retryTimeouts`                       | Whether this request's `timeout` is retried. Default `true` (0.1.x behaviour); the global value is the fallback. See the caveat below                                                                   |
+| `pollInterval`                        | ms, or `() => number \| false` (reactive on/off). Browser only                                                                                                                                          |
+| `pollWhenHidden`                      | Keep polling while the tab is hidden (default `false`)                                                                                                                                                  |
+| `refetchOnWindowFocus`                | Re-fetch when the tab becomes visible again (default `false`). Browser only                                                                                                                             |
+| `refetchOnReconnect`                  | Re-fetch when the browser reports it is back online (default `false`). Browser only                                                                                                                     |
+| `onSuccess` / `onError` / `onSettled` | Lifecycle hooks (`onError` fires once, after retries are exhausted)                                                                                                                                     |
+| `equal`, `injector`, `debugName`      | Same as `httpResource`                                                                                                                                                                                  |
 
 #### Refetching when the user comes back
 
@@ -219,12 +227,12 @@ Pass a **second type argument** and the library creates a writable `params`
 signal for you — you never build one yourself. You also stop writing the
 plumbing: three keys are recognised automatically.
 
-| `params` key | goes to |
-| --- | --- |
-| everything else (`param1`, `q`, `size`, …) | the query string |
-| `body` | the request body |
-| `path` | fills `:placeholders` in the url |
-| `headers` | the request headers |
+| `params` key                               | goes to                          |
+| ------------------------------------------ | -------------------------------- |
+| everything else (`param1`, `q`, `size`, …) | the query string                 |
+| `body`                                     | the request body                 |
+| `path`                                     | fills `:placeholders` in the url |
+| `headers`                                  | the request headers              |
 
 ```ts
 interface ListQuery {
@@ -250,7 +258,7 @@ readonly rename = createRequest.patch<Item[], ListQuery>(
 
 The reserved keys are stripped, so `body` and `path` can never leak into the
 query string. Where both the source and `params` fill the same slot, **`params`
-wins** — except that `body: null` explicitly *clears* a body the source set,
+wins** — except that `body: null` explicitly _clears_ a body the source set,
 while `body: undefined` leaves it alone. `HttpHeaders` instances and
 `[name, value]` pairs are accepted for `headers` and flattened, never dropped.
 A header with repeated values (`new HttpHeaders({ 'X-Tag': ['a', 'b'] })`) is
@@ -308,26 +316,26 @@ await this.save.run({ path: { id: 1 }, body: { name: 'Ada' } });
 
 ### The returned object
 
-| Member | |
-| --- | --- |
-| `params()` / `params.set()` | the writable params signal (see above) |
-| `response()` | latest response (never `undefined` when `initialValue` is given) |
-| `select(fn, options?)` | memoized projection of `response()` — the `select` TanStack has as an option (see "Transforming the response") |
-| `success()` | `true` once the last settled attempt succeeded; `false` while idle, loading or retrying |
-| `loading()` | loading / reloading / waiting for the next retry |
-| `initialLoading()` | only the first load, or one caused by changed params — not reload/refresh/retry |
-| `error()` | raw `Error`, set **after retries are exhausted**; stays `undefined` while retrying |
-| `requestError()` | the same failure, narrowed to a discriminated union, with per-kind predicates and a `message` (see "Errors") |
-| `status()` | `idle` \| `loading` \| `reloading` \| `resolved` \| `error` \| `local` |
-| `retryAttempt()` | `0`, or the current retry number. **Keeps its last value after giving up** |
-| `headers()`, `statusCode()`, `progress()` | straight from `httpResource` |
-| `run()` | Fire now and resolve with the response. Lazy: new request. Auto: reload, or join the request already in flight |
-| `tryRun()` | Like `run()` but never rejects: `{ ok: true, response }` \| `{ ok: false, error }` |
-| `reload()` | Re-fetch keeping the current value visible (`reloading`) |
-| `cancel()` | Really abort the in-flight request (`idle`). Normal behaviour resumes on a source change or `run()` |
-| `set()` / `update()` | Local (optimistic) update, `status() === 'local'` |
-| `destroy()` | Stop everything (timers, in-flight request) |
-| `resource` | the underlying `httpResource`, for interop (snapshots, `ctx.chain`, devtools) |
+| Member                                    |                                                                                                                |
+| ----------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| `params()` / `params.set()`               | the writable params signal (see above)                                                                         |
+| `response()`                              | latest response (never `undefined` when `initialValue` is given)                                               |
+| `select(fn, options?)`                    | memoized projection of `response()` — the `select` TanStack has as an option (see "Transforming the response") |
+| `success()`                               | `true` once the last settled attempt succeeded; `false` while idle, loading or retrying                        |
+| `loading()`                               | loading / reloading / waiting for the next retry                                                               |
+| `initialLoading()`                        | only the first load, or one caused by changed params — not reload/refresh/retry                                |
+| `error()`                                 | raw `Error`, set **after retries are exhausted**; stays `undefined` while retrying                             |
+| `requestError()`                          | the same failure, narrowed to a discriminated union, with per-kind predicates and a `message` (see "Errors")   |
+| `status()`                                | `idle` \| `loading` \| `reloading` \| `resolved` \| `error` \| `local`                                         |
+| `retryAttempt()`                          | `0`, or the current retry number. **Keeps its last value after giving up**                                     |
+| `headers()`, `statusCode()`, `progress()` | straight from `httpResource`                                                                                   |
+| `run()`                                   | Fire now and resolve with the response. Lazy: new request. Auto: reload, or join the request already in flight |
+| `tryRun()`                                | Like `run()` but never rejects: `{ ok: true, response }` \| `{ ok: false, error }`                             |
+| `reload()`                                | Re-fetch keeping the current value visible (`reloading`)                                                       |
+| `cancel()`                                | Really abort the in-flight request (`idle`). Normal behaviour resumes on a source change or `run()`            |
+| `set()` / `update()`                      | Local (optimistic) update, `status() === 'local'`                                                              |
+| `destroy()`                               | Stop everything (timers, in-flight request)                                                                    |
+| `resource`                                | the underlying `httpResource`, for interop (snapshots, `ctx.chain`, devtools)                                  |
 
 Notes on `run()`:
 
@@ -371,19 +379,17 @@ Every kind also gets a predicate that returns the error **itself** when that
 is its kind, and `undefined` otherwise — plus a one-line `message`:
 
 ```ts
-error.http();    // RequestErrorOf<'http'> | undefined
+error.http(); // RequestErrorOf<'http'> | undefined
 error.timeout(); // RequestErrorOf<'timeout'> | undefined
-error.message;   // string — 'HTTP 404 Not Found', 'Timed out after 5000ms', …
+error.message; // string — 'HTTP 404 Not Found', 'Timed out after 5000ms', …
 ```
 
 `@if (error.http(); as http)` binds the alias to the exact union member, so
 `http.status` is a `number` and not `number | undefined`:
 
 ```html
-@if (error.http(); as http) { error: {{ http.status }} }
-@else if (error.network()) { no connection }
-@else if (error.timeout()) { timed out }
-@else { {{ error.message }} }
+@if (error.http(); as http) { error: {{ http.status }} } @else if (error.network()) { no connection
+} @else if (error.timeout()) { timed out } @else { {{ error.message }} }
 ```
 
 `@switch` only works as a statement, so it cannot be used inside an
@@ -417,14 +423,14 @@ same signal.
 `HttpClient` reports "no response" as `status: 0`, which covers both a network
 failure and a cancellation. An abort is only recognized as `aborted` when the
 reason names itself `AbortError` / `TimeoutError`; an opaque `status: 0` becomes
-`network`. That is also why a timeout has to be *configured* to be reported as
+`network`. That is also why a timeout has to be _configured_ to be reported as
 `timeout` rather than `aborted` — Angular's fetch backend aborts with a
 `TimeoutError` DOMException, and the configured duration is what fills in `ms`.
 Both places count: the `timeout` option, and a `timeout` set on the request
 object itself (the `createRequest` source or the `createMutation` builder). When
 both are present, the option wins.
 
-One thing *is* known rather than guessed: when the browser itself says it has no
+One thing _is_ known rather than guessed: when the browser itself says it has no
 connection, the `network` member carries `offline: true`, so a UI can say "you
 are offline" instead of "check your connection":
 
@@ -512,18 +518,18 @@ Two components with that key now cost **one** request, and both see the same
 value. Object segments compare by value, so `{ page: 1 }` from two places is one
 entry.
 
-| Option | Default | Meaning |
-| --- | --- | --- |
-| `key` | — | **The opt-in.** Must be sufficient to determine the request |
-| `staleTime` | `0` | How long a value counts as fresh. `0` = always stale |
-| `gcTime` | `5 min` | How long an entry with no subscribers is kept |
-| `maxEntries` | unlimited | A cap for the whole cache. See below |
-| `refetchOnMount` | `'stale'` | `'stale'` · `'always'` · `false` |
-| `structuralSharing` | walk-and-reuse | What to store when nothing changed |
+| Option              | Default        | Meaning                                                     |
+| ------------------- | -------------- | ----------------------------------------------------------- |
+| `key`               | —              | **The opt-in.** Must be sufficient to determine the request |
+| `staleTime`         | `0`            | How long a value counts as fresh. `0` = always stale        |
+| `gcTime`            | `5 min`        | How long an entry with no subscribers is kept               |
+| `maxEntries`        | unlimited      | A cap for the whole cache. See below                        |
+| `refetchOnMount`    | `'stale'`      | `'stale'` · `'always'` · `false`                            |
+| `structuralSharing` | walk-and-reuse | What to store when nothing changed                          |
 
 A key is always a **function**, so it is read inside the handle's reactive
 chain: a filter signal in the key re-points the handle at another entry. A
-function *inside* a key throws — it would make a new function every evaluation,
+function _inside_ a key throws — it would make a new function every evaluation,
 so the entry would never be reused and the cache would grow without ever
 hitting.
 
@@ -612,9 +618,9 @@ global setting has to raise the global value.
 ```ts
 const client = inject(QueryClient);
 
-client.size();            // Signal<number> — the whole cache
-client.evict(['users']);  // number — idle ['users', …] entries only
-client.evict();           // number — every idle entry
+client.size(); // Signal<number> — the whole cache
+client.evict(['users']); // number — idle ['users', …] entries only
+client.evict(); // number — every idle entry
 ```
 
 `size()` is a signal, coalesced to a microtask because the notifications it
@@ -644,7 +650,7 @@ segment array rather than an opaque id.
 
 Several invalidations in the same tick collapse into one refetch per entry, so
 three mutations landing together do not produce three network calls. Entries
-nobody is watching are only *marked* — the next subscriber fetches.
+nobody is watching are only _marked_ — the next subscriber fetches.
 
 ### `createMutation` invalidating keys
 
@@ -680,19 +686,19 @@ const save = createMutation<number, Todo, { attemptedAt: number }>(
 The order is fixed and worth knowing, because the rollback and the refetch both
 touch the same display:
 
-| | |
-| --- | --- |
-| 1 | `onMutate(args)` — may be async; awaited before anything else |
-| 2 | the optimistic value is written into `target` |
-| 3 | the request is sent |
-| 4 | on success: `invalidates` → `onSuccess` → `onSettled` |
-| 4 | on failure: the optimistic value is rolled back → `onError` → `onSettled` |
+|     |                                                                           |
+| --- | ------------------------------------------------------------------------- |
+| 1   | `onMutate(args)` — may be async; awaited before anything else             |
+| 2   | the optimistic value is written into `target`                             |
+| 3   | the request is sent                                                       |
+| 4   | on success: `invalidates` → `onSuccess` → `onSettled`                     |
+| 4   | on failure: the optimistic value is rolled back → `onError` → `onSettled` |
 
 A throwing or rejecting `onMutate` fails the whole call: **nothing is sent**,
 nothing was shown, `onError` runs and `run()` rejects.
 
 > **`TContext` is only inferred when you write no type arguments at all.**
-> TypeScript fills any type argument you leave out with its *default*, so
+> TypeScript fills any type argument you leave out with its _default_, so
 > `createMutation<number, string>(…)` locks `TContext` to `undefined` before
 > `onMutate` is looked at. Either name it —
 > `createMutation<number, string, MyContext>(…)` — or let it all be inferred.
@@ -775,16 +781,16 @@ Because the entries are `['items', 0]`, `['items', 1]`, …, `client.invalidate(
 pagination. Page 1 of a paginated list and a `createRequest` on `['items', 0]`
 are the same entry and dedup against each other.
 
-| Member | |
-| --- | --- |
-| `pages()` | Every loaded page, in order |
-| `response()` | The pages, **flattened** when a page is an array |
-| `pageParams()` | The params of the loaded pages |
-| `fetchNextPage()` / `fetchPreviousPage()` | Load one more. Resolve when that page has settled |
-| `hasNextPage()` / `hasPreviousPage()` | What the getters say |
-| `isFetchingNextPage()` / `isFetchingPreviousPage()` | Which page is loading |
-| `reload()` | Re-fetch every loaded page, **in order** |
-| `remove()` | Drop the accumulation. The page entries stay cached |
+| Member                                              |                                                     |
+| --------------------------------------------------- | --------------------------------------------------- |
+| `pages()`                                           | Every loaded page, in order                         |
+| `response()`                                        | The pages, **flattened** when a page is an array    |
+| `pageParams()`                                      | The params of the loaded pages                      |
+| `fetchNextPage()` / `fetchPreviousPage()`           | Load one more. Resolve when that page has settled   |
+| `hasNextPage()` / `hasPreviousPage()`               | What the getters say                                |
+| `isFetchingNextPage()` / `isFetchingPreviousPage()` | Which page is loading                               |
+| `reload()`                                          | Re-fetch every loaded page, **in order**            |
+| `remove()`                                          | Drop the accumulation. The page entries stay cached |
 
 Three things worth knowing:
 
@@ -822,7 +828,7 @@ Three things worth knowing:
 This replaces the hand-written recipe that used to live here. That recipe
 needed an `appendedPage` guard because `onSuccess` fires on **every** settle
 and a reload would append a page twice. With one entry per page, a reload
-*replaces* page N, and there is no guard to write.
+_replaces_ page N, and there is no guard to write.
 
 ## `createMutation(builder, options?)` — and `.post` / `.put` / `.patch` / `.delete`
 
@@ -845,33 +851,33 @@ await this.save.run({ id: 1, name: 'Ada' }); // save.loading(), save.error(), sa
 
 As with `createRequest`, the verb comes from the function you call:
 
-| Call | Sends |
-| --- | --- |
-| `createMutation(builder, …)` | `POST` |
-| `createMutation.post(builder, …)` | `POST` |
-| `createMutation.put(builder, …)` | `PUT` |
-| `createMutation.patch(builder, …)` | `PATCH` |
+| Call                                | Sends    |
+| ----------------------------------- | -------- |
+| `createMutation(builder, …)`        | `POST`   |
+| `createMutation.post(builder, …)`   | `POST`   |
+| `createMutation.put(builder, …)`    | `PUT`    |
+| `createMutation.patch(builder, …)`  | `PATCH`  |
 | `createMutation.delete(builder, …)` | `DELETE` |
 
 There is no `get` variant — a write is not a read. The `run` args double as the
 params bag, so `body` / `path` / `headers` are routed for you and everything else
 becomes the query string, exactly as in `createRequest`.
 
-| Option | Description |
-| --- | --- |
-| `concurrency` | `parallel` (default) · `exhaust` (returns the in-flight promise) · `switch` (cancels the previous call, rejecting it with `RequestCancelledError`) |
-| `mutationKey` | Groups this mutation so `QueryClient.isMutating([...])` can find it without a reference |
-| `onMutate` | Runs before the request and the optimistic write; its return value becomes the `context` |
-| `optimistic` / `target` | Show the result before the server answers, and **restore it automatically** if the call fails or is cancelled. See below |
-| `responseType` | `json` \| `text` \| `blob` \| `arraybuffer` |
-| `parse` | Validate or map the response body |
-| `headers` | Headers for this call, merged over the global defaults |
-| `retry` | **Off by default**, because writes are rarely idempotent. The global `retry` is *not* inherited |
-| `timeout` | Abort the call after N ms. Wins over a `timeout` returned by the builder; without it, the builder's value is used as is |
-| `retryTimeouts` | Whether this call's `timeout` is retried. Default `true`; the global value is the fallback. See "The timeout + retry caveat" |
-| `invalidates` | `Reloadable[]`, or a function returning one. Use the function form to avoid field-ordering problems |
-| `onSuccess` / `onError` / `onSettled` | Lifecycle hooks |
-| `injector` | Required if called outside an injection context |
+| Option                                | Description                                                                                                                                        |
+| ------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `concurrency`                         | `parallel` (default) · `exhaust` (returns the in-flight promise) · `switch` (cancels the previous call, rejecting it with `RequestCancelledError`) |
+| `mutationKey`                         | Groups this mutation so `QueryClient.isMutating([...])` can find it without a reference                                                            |
+| `onMutate`                            | Runs before the request and the optimistic write; its return value becomes the `context`                                                           |
+| `optimistic` / `target`               | Show the result before the server answers, and **restore it automatically** if the call fails or is cancelled. See below                           |
+| `responseType`                        | `json` \| `text` \| `blob` \| `arraybuffer`                                                                                                        |
+| `parse`                               | Validate or map the response body                                                                                                                  |
+| `headers`                             | Headers for this call, merged over the global defaults                                                                                             |
+| `retry`                               | **Off by default**, because writes are rarely idempotent. The global `retry` is _not_ inherited                                                    |
+| `timeout`                             | Abort the call after N ms. Wins over a `timeout` returned by the builder; without it, the builder's value is used as is                            |
+| `retryTimeouts`                       | Whether this call's `timeout` is retried. Default `true`; the global value is the fallback. See "The timeout + retry caveat"                       |
+| `invalidates`                         | `Reloadable[]`, or a function returning one. Use the function form to avoid field-ordering problems                                                |
+| `onSuccess` / `onError` / `onSettled` | Lifecycle hooks                                                                                                                                    |
+| `injector`                            | Required if called outside an injection context                                                                                                    |
 
 The returned handle exposes `response`, `error`, `requestError`, `loading`,
 `status`, `args`, `progress`, `run`, `tryRun`, `cancel`, `reset` and `destroy`.
@@ -918,7 +924,7 @@ Three details worth knowing:
   to correct. A plain `cancel()` and a `switch` superseding the call both do.
 
 `optimistic` is separate from `createRequest`'s `set()` / `update()`: those are
-how *you* write a local value by hand, `optimistic` is how you attach a write to
+how _you_ write a local value by hand, `optimistic` is how you attach a write to
 one and get the undo for free.
 
 ### Upload progress
@@ -927,9 +933,11 @@ Set `reportProgress: true` on the **builder** (it is per call, not per mutation 
 one mutation may be the upload and another the delete):
 
 ```ts
-const upload = createMutation.post<string, { body: Blob }>(
-  (args) => ({ url: '/files', body: args.body, reportProgress: true }),
-);
+const upload = createMutation.post<string, { body: Blob }>((args) => ({
+  url: '/files',
+  body: args.body,
+  reportProgress: true,
+}));
 
 // <progress [value]="upload.progress()?.loaded" [max]="upload.progress()?.total" />
 await upload.run({ body: file });
@@ -949,7 +957,7 @@ where the handle is the only thing you are holding.
 
 ## Auth: reactive headers + a refresh interceptor
 
-`baseUrl` is merged into the url *before* `HttpClient`, so interceptors see the
+`baseUrl` is merged into the url _before_ `HttpClient`, so interceptors see the
 full url. But an interceptor runs only when a request is already on its way out,
 so it cannot make a **satisfied** resource refetch when a token changes. That is
 what the global `headers` function is for:
@@ -972,7 +980,7 @@ on its own. No `reload()` call anywhere.
 > freezes the value at bootstrap and never updates. Use the function form for
 > anything dynamic.
 
-Token *refresh* stays in an interceptor, where it belongs — the concurrency,
+Token _refresh_ stays in an interceptor, where it belongs — the concurrency,
 storage and loop-guard decisions are yours, not the library's:
 
 ```ts
@@ -985,9 +993,11 @@ export const authInterceptor: HttpInterceptorFn = (req, next) => {
   return authorized.pipe(
     catchError((err) =>
       err.status === 401
-        ? from(auth.refreshOnce()).pipe(switchMap((token) =>
-            next(req.clone({ setHeaders: { Authorization: `Bearer ${token}` } })),
-          ))
+        ? from(auth.refreshOnce()).pipe(
+            switchMap((token) =>
+              next(req.clone({ setHeaders: { Authorization: `Bearer ${token}` } })),
+            ),
+          )
         : throwError(() => err),
     ),
   );
@@ -1012,8 +1022,10 @@ results = createRequest<Hit[]>(
 );
 
 // Dependent request (Angular 22 ctx.chain): posts waits until user resolves
-user  = createRequest<User>('/me');
-posts = createRequest<Post[], void>((_params, ctx) => `/users/${ctx.chain(this.user.resource)!.id}/posts`);
+user = createRequest<User>('/me');
+posts = createRequest<Post[], void>(
+  (_params, ctx) => `/users/${ctx.chain(this.user.resource)!.id}/posts`,
+);
 
 // Polling (visible tab only), switched on and off reactively
 status = createRequest<Job>(() => `/jobs/${this.id()}`, {
@@ -1021,10 +1033,11 @@ status = createRequest<Job>(() => `/jobs/${this.id()}`, {
 });
 
 // Optimistic update, with the undo handled for you
-this.add = createMutation<Todo[], Todo>(
-  (draft) => ({ url: '/todos', body: draft }),
-  { optimistic: (todos, d) => [...(todos ?? []), d], target: this.todos, invalidates: () => [this.todos] },
-);
+this.add = createMutation<Todo[], Todo>((draft) => ({ url: '/todos', body: draft }), {
+  optimistic: (todos, d) => [...(todos ?? []), d],
+  target: this.todos,
+  invalidates: () => [this.todos],
+});
 ```
 
 ### Aggregating several requests
@@ -1056,9 +1069,9 @@ Three things the aggregate gets right that a hand-written one usually does not:
 
 - **`reload()` asks every source.** `some()`-style short-circuiting reports
   success while leaving half the screen stale.
-- **`error()` is the *first* failure in source order**, and it goes away when
+- **`error()` is the _first_ failure in source order**, and it goes away when
   that failure does. Five queries on one screen should not mean five toasts.
-- **`status()` is `'reloading'` only when nothing is *missing*.** One source
+- **`status()` is `'reloading'` only when nothing is _missing_.** One source
   still empty means the screen is not ready, however much of it is filled in.
 
 `combine` does not own the handles you give it — their injectors destroy them —
@@ -1097,12 +1110,12 @@ scrolling out of a selection is not a reason to evict data.
 ### Transforming the response
 
 Use `.select()`. It is a **method** rather than an option, and the reason is a
-hard TypeScript limitation rather than taste: there is no *partial type-argument
-inference*. Naming one type argument makes every other type parameter fall back
+hard TypeScript limitation rather than taste: there is no _partial type-argument
+inference_. Naming one type argument makes every other type parameter fall back
 to its default instead of being inferred:
 
 ```ts
-createRequest<User[]>(url, { select: (users) => users.length })  // never infers `number`
+createRequest<User[]>(url, { select: (users) => users.length }); // never infers `number`
 ```
 
 Naming `User[]` there has already switched inference off, and a selector type
@@ -1121,7 +1134,7 @@ The selector is only called when there is data — `undefined` in, `undefined` o
 
 A bare `computed(() => this.users.response()?.map((u) => u.name))` already
 memoizes and already stops propagation when the result is `Object.is`-equal. What
-it cannot do is use a *different* equality, which is exactly what a selector
+it cannot do is use a _different_ equality, which is exactly what a selector
 returning a rebuilt object needs:
 
 ```ts
@@ -1150,20 +1163,20 @@ const { http, create } = setup();
 const list = create(() => createRequest<Item[]>('/items'));
 
 await settle();
-await respond(http, '/items', [{ id: 1 }]);   // flush + settle
+await respond(http, '/items', [{ id: 1 }]); // flush + settle
 expect(list.response()).toEqual([{ id: 1 }]);
 
 await fail(http, '/items', 500);
 expect(list.requestError()?.kind).toBe('http');
 ```
 
-| Export | |
-| --- | --- |
-| `setup(extraProviders?)` | Configures TestBed with `HttpClient` + `HttpTestingController`; returns `{ http, create }` where `create` runs in an injection context |
-| `settle(rounds = 10)` | Lets effects and async loaders finish. Uses only `TestBed.tick()` and microtasks, so it works under fake timers |
-| `respond(http, url, body)` | Answers the next matching request and waits |
-| `fail(http, url, status = 500, body?)` | Fails the next matching request (`statusText: 'Error'`, default body `{ message: 'boom' }`) and waits |
-| `isHttpError(e)` | `e is HttpErrorResponse` guard |
+| Export                                 |                                                                                                                                        |
+| -------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `setup(extraProviders?)`               | Configures TestBed with `HttpClient` + `HttpTestingController`; returns `{ http, create }` where `create` runs in an injection context |
+| `settle(rounds = 10)`                  | Lets effects and async loaders finish. Uses only `TestBed.tick()` and microtasks, so it works under fake timers                        |
+| `respond(http, url, body)`             | Answers the next matching request and waits                                                                                            |
+| `fail(http, url, status = 500, body?)` | Fails the next matching request (`statusText: 'Error'`, default body `{ message: 'boom' }`) and waits                                  |
+| `isHttpError(e)`                       | `e is HttpErrorResponse` guard                                                                                                         |
 
 > `ApplicationRef.whenStable()` is deliberately **not** used by `settle()`: it
 > never resolves while a request is in flight (`httpResource` holds a pending
@@ -1197,7 +1210,7 @@ The gate is verified rather than trusted: raising a threshold above the current
 number fails the run with
 `ERROR: Coverage for lines (…) does not meet global threshold`.
 
-The exact figures, the commands behind them, and what they do *not* prove are in
+The exact figures, the commands behind them, and what they do _not_ prove are in
 [`docs/verification.md`](docs/verification.md). The `resolve()` benchmark, with a
 measured before/after for the `maxEntries` work, is in
 [`docs/perf.md`](docs/perf.md).
@@ -1212,8 +1225,8 @@ bootstrapApplication(App, {
   providers: [
     provideHttpClient(),
     providePersistedCache({
-      maxAge: 24 * 60 * 60_000,     // don't restore what is a day old
-      codec: dateRevivingCodec,      // ISO strings -> Date, on the way back
+      maxAge: 24 * 60 * 60_000, // don't restore what is a day old
+      codec: dateRevivingCodec, // ISO strings -> Date, on the way back
     }),
   ],
 });
@@ -1224,14 +1237,14 @@ creation — before any component exists, and therefore before any request can
 resolve — so the first render reads restored data. There is no ordering rule to
 get right and nothing to remember in `main.ts`.
 
-| Option | |
-| --- | --- |
-| `storage` | Defaults to `localStorage` where it is reachable, `null` (disabled) everywhere else. Pass `sessionStorage`, an in-memory object, or `null`. |
-| `key` | Storage key. Default `'ng-signal-request'`. |
-| `include` / `exclude` | Which keys are written — the same filter vocabulary `QueryClient.invalidate` takes. `exclude` wins. |
-| `codec` | `{ serialize, deserialize }`, for values JSON cannot carry. |
-| `maxAge` | Entries older than this are not restored. |
-| `debounce` | Write coalescing, default `1000` ms. |
+| Option                |                                                                                                                                             |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| `storage`             | Defaults to `localStorage` where it is reachable, `null` (disabled) everywhere else. Pass `sessionStorage`, an in-memory object, or `null`. |
+| `key`                 | Storage key. Default `'ng-signal-request'`.                                                                                                 |
+| `include` / `exclude` | Which keys are written — the same filter vocabulary `QueryClient.invalidate` takes. `exclude` wins.                                         |
+| `codec`               | `{ serialize, deserialize }`, for values JSON cannot carry.                                                                                 |
+| `maxAge`              | Entries older than this are not restored.                                                                                                   |
+| `debounce`            | Write coalescing, default `1000` ms.                                                                                                        |
 
 Three details are worth knowing, because each is a bug that is easy to ship:
 
@@ -1245,7 +1258,7 @@ Three details are worth knowing, because each is a bug that is easy to ship:
   trusting it. Calling `setData` here would stamp `Date.now()` and the data
   would look fresh forever.
 - **Writes follow responses**, via `QueryCache.subscribeActivity`. A persister
-  listening to `subscribeChanges` hears an entry *appear* — before it has
+  listening to `subscribeChanges` hears an entry _appear_ — before it has
   fetched — and would write that empty snapshot and never correct it.
 
 ```ts
@@ -1267,11 +1280,7 @@ repeating every request the server already made:
 ```ts
 // app.config.ts — shared by app.config.server.ts and main.ts
 export const appConfig: ApplicationConfig = {
-  providers: [
-    provideClientHydration(),
-    provideHttpClient(),
-    provideCacheTransfer(),
-  ],
+  providers: [provideClientHydration(), provideHttpClient(), provideCacheTransfer()],
 };
 ```
 
@@ -1305,21 +1314,21 @@ and Angular. Adopting it is never a mistake, and if you need what is in the list
 below, it is the one to use. The question this table answers is narrower — what
 you give up when you stay inside Angular.
 
-| Concern | Here | TanStack Query (Angular) |
-| --- | --- | --- |
-| Runtime dependencies | `tslib` and the Angular peers only | `@tanstack/query-core` plus the adapter |
-| Describing a request | The request *is* the options — `url`, `params`, `path`, `headers`, `reportProgress` are routed for you | A `queryFn` you write, plus a `queryKey` |
-| Uncached requests | First class: no `key` means Angular's `httpResource`, its own lifetime, no cache entry | Not a concept — every query has a key and a cache entry |
-| Infinite queries | `createInfiniteRequest`, **one entry per page**, so prefix invalidation and cross-component sharing work on a feed | `injectInfiniteQuery`, one entry per list |
-| `select` | A **method**: `.select(fn, { equal })`, so the handle's own `response()` is untouched | An option on the query observer |
-| Persistence | `/persist`: synchronous storage, a codec, a version, key filters, and a `TransferState` path for SSR | `persistQueryClient`: async storages, `maxAge`, busters, migrations |
-| Devtools | `/devtools`, 2.5 KB gzip, entry list and a few actions, imported in dev only | A mature panel with a query explorer and timings |
-| Bounding the cache | `maxEntries`, LRU over idle entries only, with a per-request value that can tighten it | `gcTime` per query, plus explicit removal |
-| Invalidating by key | `invalidates: [['users']]` refreshes every open `['users', …]` query | `invalidateQueries({ queryKey })` |
-| SSR | `providedIn: 'root'` already means one cache per render, with `TransferState` hydration | A `QueryClient` you create per request in the server handler |
-| Errors | A normalized `RequestError` view with per-kind predicates (`http()`, `timeout()`, `network()`, …) and a `message` getter, so templates do not need `@switch` | `Error`, narrowed by hand |
-| Timeouts | `timeout` per request, classified as its own kind, and `retryTimeouts: false` to stop a timeout from being retried as a `status: 0` failure | No built-in timeout; abandoned by composing an `AbortSignal` |
-| Framework scope | Angular 22 | React, Vue, Svelte, Solid, Angular |
+| Concern              | Here                                                                                                                                                         | TanStack Query (Angular)                                            |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------- |
+| Runtime dependencies | `tslib` and the Angular peers only                                                                                                                           | `@tanstack/query-core` plus the adapter                             |
+| Describing a request | The request _is_ the options — `url`, `params`, `path`, `headers`, `reportProgress` are routed for you                                                       | A `queryFn` you write, plus a `queryKey`                            |
+| Uncached requests    | First class: no `key` means Angular's `httpResource`, its own lifetime, no cache entry                                                                       | Not a concept — every query has a key and a cache entry             |
+| Infinite queries     | `createInfiniteRequest`, **one entry per page**, so prefix invalidation and cross-component sharing work on a feed                                           | `injectInfiniteQuery`, one entry per list                           |
+| `select`             | A **method**: `.select(fn, { equal })`, so the handle's own `response()` is untouched                                                                        | An option on the query observer                                     |
+| Persistence          | `/persist`: synchronous storage, a codec, a version, key filters, and a `TransferState` path for SSR                                                         | `persistQueryClient`: async storages, `maxAge`, busters, migrations |
+| Devtools             | `/devtools`, 2.5 KB gzip, entry list and a few actions, imported in dev only                                                                                 | A mature panel with a query explorer and timings                    |
+| Bounding the cache   | `maxEntries`, LRU over idle entries only, with a per-request value that can tighten it                                                                       | `gcTime` per query, plus explicit removal                           |
+| Invalidating by key  | `invalidates: [['users']]` refreshes every open `['users', …]` query                                                                                         | `invalidateQueries({ queryKey })`                                   |
+| SSR                  | `providedIn: 'root'` already means one cache per render, with `TransferState` hydration                                                                      | A `QueryClient` you create per request in the server handler        |
+| Errors               | A normalized `RequestError` view with per-kind predicates (`http()`, `timeout()`, `network()`, …) and a `message` getter, so templates do not need `@switch` | `Error`, narrowed by hand                                           |
+| Timeouts             | `timeout` per request, classified as its own kind, and `retryTimeouts: false` to stop a timeout from being retried as a `status: 0` failure                  | No built-in timeout; abandoned by composing an `AbortSignal`        |
+| Framework scope      | Angular 22                                                                                                                                                   | React, Vue, Svelte, Solid, Angular                                  |
 
 Where TanStack Query is simply ahead, with no clever reframing:
 
@@ -1350,19 +1359,19 @@ Where this library is ahead, in an Angular-only codebase:
 
 Vocabularies, so the two do not fight in your head:
 
-| TanStack Query | Here |
-| --- | --- |
-| `queryKey` | `key` |
-| `queryFn` | the source: a `url`, or `(params, ctx) => url` |
-| `staleTime`, `gcTime`, `refetchOnMount`, `refetchOnWindowFocus`, `refetchOnReconnect` | the same names, the same meanings |
-| `enabled: false` | `params` set to `undefined` — `status() === 'idle'` |
-| `placeholderData` / `keepPreviousData` | `keepPreviousValue` |
-| `initialData`, `initialDataUpdatedAt` | `initialValue`, and `cache().seed(key, value, dataUpdatedAt)` |
-| `queryClient.setQueryData` / `getQueryData` | `client.setData` / `client.getData`, `cache().peek` |
-| `useIsMutating` / `mutationKey` | `client.isMutating(filter)` / `mutationKey` |
-| `onMutate` + manual rollback | `optimistic` + automatic rollback |
-| `hydrate` / `dehydrate` | `hydrate` / `dehydrate` in `/persist` |
-| `queryClient.invalidateQueries` | `client.invalidate`, `invalidates` on a mutation |
+| TanStack Query                                                                        | Here                                                          |
+| ------------------------------------------------------------------------------------- | ------------------------------------------------------------- |
+| `queryKey`                                                                            | `key`                                                         |
+| `queryFn`                                                                             | the source: a `url`, or `(params, ctx) => url`                |
+| `staleTime`, `gcTime`, `refetchOnMount`, `refetchOnWindowFocus`, `refetchOnReconnect` | the same names, the same meanings                             |
+| `enabled: false`                                                                      | `params` set to `undefined` — `status() === 'idle'`           |
+| `placeholderData` / `keepPreviousData`                                                | `keepPreviousValue`                                           |
+| `initialData`, `initialDataUpdatedAt`                                                 | `initialValue`, and `cache().seed(key, value, dataUpdatedAt)` |
+| `queryClient.setQueryData` / `getQueryData`                                           | `client.setData` / `client.getData`, `cache().peek`           |
+| `useIsMutating` / `mutationKey`                                                       | `client.isMutating(filter)` / `mutationKey`                   |
+| `onMutate` + manual rollback                                                          | `optimistic` + automatic rollback                             |
+| `hydrate` / `dehydrate`                                                               | `hydrate` / `dehydrate` in `/persist`                         |
+| `queryClient.invalidateQueries`                                                       | `client.invalidate`, `invalidates` on a mutation              |
 
 ## Upgrading from 0.0.x
 
@@ -1379,10 +1388,10 @@ by key, `createInfiniteRequest`, `select()`, `combine()`, `createRequests()`,
 Two documented behaviours changed, and both were corrections rather than new
 rules — if you read the old README, this is the diff:
 
-| The old README said | Now |
-| --- | --- |
+| The old README said                                                                                      | Now                                                                                                                  |
+| -------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
 | "Requests are **not** deduplicated — two components asking for the same url each fire their own request" | Still true **without a `key`**. Give the request a `key` and one entry is shared, so two components cost one request |
-| "There is no `select` option and no infinite-query primitive. Both are deliberate" | `select()` is a method on every handle; `createInfiniteRequest` exists — see "Infinite scroll" |
+| "There is no `select` option and no infinite-query primitive. Both are deliberate"                       | `select()` is a method on every handle; `createInfiniteRequest` exists — see "Infinite scroll"                       |
 
 One widening: `invalidates` used to accept `Reloadable` handles only. It now
 accepts **keys as well**, told apart by shape (an array is a key, an object with
@@ -1487,62 +1496,62 @@ report and one you read here is a design decision.
 
 ### `ng-signal-request`
 
-| Export | Description |
-| --- | --- |
-| `createRequest(source, options?)` | Reactive `GET` query on top of `httpResource` |
-| `createRequest.get` / `.post` / `.put` / `.patch` / `.delete` | Verb variants (`.get` is the bare call) |
-| `createRequest.<verb>.text` / `.blob` / `.arrayBuffer` | Non-JSON body variants |
-| `createMutation(builder, options?)` | Imperative `POST` write with its own lifecycle |
-| `createMutation.post` / `.put` / `.patch` / `.delete` | Verb variants (`.post` is the bare call) |
-| `createInfiniteRequest(source, options?)` | Paginated query; one cache entry per page, with `createInfiniteRequest.<verb>` and `.<verb>.text` / `.blob` / `.arrayBuffer` variants |
-| `combine(sources)` | Aggregates handles: `response` · `loading` · `status` · `error` · `reload` · `cancel` |
-| `createRequests(items, build, options?)` | One handle per list item, reconciled by identity |
-| `provideSignalRequest(config \| () => config)` | Global `baseUrl`, `retry`, `retryTimeouts`, `headers`, `onError`, `onSuccess`, and the cache defaults. The factory form runs in an injection context |
-| `SIGNAL_REQUEST_CONFIG` | The `InjectionToken` behind it |
-| `RequestCancelledError` | Thrown by `run()` on cancel / disable / destroy |
-| `toError(value)` | Normalizes an `unknown` into an `Error` without wrapping an `HttpErrorResponse` |
-| `toRequestError(cause, context?)` | Normalizes an `unknown` into a `RequestError` |
-| `requestErrorOf(error, context)` | Builds a `requestError`-style accessor for your own `error` signal |
+| Export                                                        | Description                                                                                                                                          |
+| ------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `createRequest(source, options?)`                             | Reactive `GET` query on top of `httpResource`                                                                                                        |
+| `createRequest.get` / `.post` / `.put` / `.patch` / `.delete` | Verb variants (`.get` is the bare call)                                                                                                              |
+| `createRequest.<verb>.text` / `.blob` / `.arrayBuffer`        | Non-JSON body variants                                                                                                                               |
+| `createMutation(builder, options?)`                           | Imperative `POST` write with its own lifecycle                                                                                                       |
+| `createMutation.post` / `.put` / `.patch` / `.delete`         | Verb variants (`.post` is the bare call)                                                                                                             |
+| `createInfiniteRequest(source, options?)`                     | Paginated query; one cache entry per page, with `createInfiniteRequest.<verb>` and `.<verb>.text` / `.blob` / `.arrayBuffer` variants                |
+| `combine(sources)`                                            | Aggregates handles: `response` · `loading` · `status` · `error` · `reload` · `cancel`                                                                |
+| `createRequests(items, build, options?)`                      | One handle per list item, reconciled by identity                                                                                                     |
+| `provideSignalRequest(config \| () => config)`                | Global `baseUrl`, `retry`, `retryTimeouts`, `headers`, `onError`, `onSuccess`, and the cache defaults. The factory form runs in an injection context |
+| `SIGNAL_REQUEST_CONFIG`                                       | The `InjectionToken` behind it                                                                                                                       |
+| `RequestCancelledError`                                       | Thrown by `run()` on cancel / disable / destroy                                                                                                      |
+| `toError(value)`                                              | Normalizes an `unknown` into an `Error` without wrapping an `HttpErrorResponse`                                                                      |
+| `toRequestError(cause, context?)`                             | Normalizes an `unknown` into a `RequestError`                                                                                                        |
+| `requestErrorOf(error, context)`                              | Builds a `requestError`-style accessor for your own `error` signal                                                                                   |
 
 ### Types
 
-| Export | Description |
-| --- | --- |
-| `RequestError` | The discriminated failure union |
-| `RequestErrorView` | `RequestError` plus the per-kind predicates and `message` |
-| `RequestErrorKind` / `RequestErrorOf<K>` | The five kinds, and one union member by name |
-| `RequestErrorContext` | `{ timeout? }` used for timeout classification |
-| `SignalRequest<T, R, TParams>` | Query handle |
-| `CachedRequest<T, R, TParams>` | Query handle backed by a shared cache entry |
-| `InfiniteRequest<TPage, TParam>` | Paginated handle |
-| `FlattenedPages<TPage>` | What `response()` yields: items for an array page, pages otherwise |
-| `Combinable<T>` / `Combined<T>` / `RequestSet<T>` | The shapes `combine` and `createRequests` accept and return |
-| `ResponsesOf<TSources>` | Record→responses mapping used by `combine` |
-| `SelectOptions<S>` | `{ equal }` for `select()` |
-| `SignalMutation<T, TArgs>` | Mutation handle |
-| `RequestOptions<T, TParams, TRaw>` / `MutationOptions<T, TArgs>` | Option shapes |
-| `CreateRequest` / `CreateRequestFn` | The callable variants and their shapes |
-| `CreateMutation` | The mutation variant shape |
-| `RequestSource` / `RequestValue` / `RequestConfig` / `ParamsOption` | Source and params description |
-| `QueryParams` / `QueryValue` / `PathParams` | Parameter helpers |
-| `RetryConfig` / `RetryOptions` | Retry policy |
-| `RequestStatus` / `MutationStatus` / `RunResult<T>` | Status and result types |
-| `Reloadable` / `OptimisticTarget<T>` / `InvalidationTarget` | Invalidation, optimistic-update and key shapes |
-| `SignalRequestConfig` | Global config shape |
+| Export                                                              | Description                                                        |
+| ------------------------------------------------------------------- | ------------------------------------------------------------------ |
+| `RequestError`                                                      | The discriminated failure union                                    |
+| `RequestErrorView`                                                  | `RequestError` plus the per-kind predicates and `message`          |
+| `RequestErrorKind` / `RequestErrorOf<K>`                            | The five kinds, and one union member by name                       |
+| `RequestErrorContext`                                               | `{ timeout? }` used for timeout classification                     |
+| `SignalRequest<T, R, TParams>`                                      | Query handle                                                       |
+| `CachedRequest<T, R, TParams>`                                      | Query handle backed by a shared cache entry                        |
+| `InfiniteRequest<TPage, TParam>`                                    | Paginated handle                                                   |
+| `FlattenedPages<TPage>`                                             | What `response()` yields: items for an array page, pages otherwise |
+| `Combinable<T>` / `Combined<T>` / `RequestSet<T>`                   | The shapes `combine` and `createRequests` accept and return        |
+| `ResponsesOf<TSources>`                                             | Record→responses mapping used by `combine`                         |
+| `SelectOptions<S>`                                                  | `{ equal }` for `select()`                                         |
+| `SignalMutation<T, TArgs>`                                          | Mutation handle                                                    |
+| `RequestOptions<T, TParams, TRaw>` / `MutationOptions<T, TArgs>`    | Option shapes                                                      |
+| `CreateRequest` / `CreateRequestFn`                                 | The callable variants and their shapes                             |
+| `CreateMutation`                                                    | The mutation variant shape                                         |
+| `RequestSource` / `RequestValue` / `RequestConfig` / `ParamsOption` | Source and params description                                      |
+| `QueryParams` / `QueryValue` / `PathParams`                         | Parameter helpers                                                  |
+| `RetryConfig` / `RetryOptions`                                      | Retry policy                                                       |
+| `RequestStatus` / `MutationStatus` / `RunResult<T>`                 | Status and result types                                            |
+| `Reloadable` / `OptimisticTarget<T>` / `InvalidationTarget`         | Invalidation, optimistic-update and key shapes                     |
+| `SignalRequestConfig`                                               | Global config shape                                                |
 
 ### Cache
 
-| Export | Description |
-| --- | --- |
-| `QueryClient` | Injectable: `invalidate` · `refetch` · `cancel` · `getData` · `setData` · `remove` · `evict` · `size` · `isFetching` · `count` · `clear` · `isMutating` · `mutatingCount` |
-| `MutationRegistry` | In-flight mutation counts, globally and per `mutationKey` |
-| `QueryCache` | The store: `resolve` · `peek` · `matching` · `markInvalidated` · `remove` · `evictIdle` · `size` · `maxEntries` · `tightenMaxEntries` · `all` · `subscribeChanges` · `clear` |
-| `CacheEntry` | One cached resource: `data` · `status` signals, `refetch()` · `subscribe()` · `setData()` · `evict()` · `isStale()` |
-| `QueryKey` / `QueryKeyFactory` / `QueryKeyFilter` / `QueryKeyPredicate` | Key shapes and the matching filter |
-| `normalizeKey` · `matchesFilter` · `startsWith` · `formatKey` | Key helpers, exported for devtools and custom stores |
-| `defaultStructuralSharing` · `StructuralSharingFn` | The default sharing walk, and its type |
-| `CachedRequest` / `CachedRequestOptions` / `CacheOptions` | The cached handle and its options |
-| `RefetchOnMount` | `'stale'` · `'always'` · `false` |
+| Export                                                                  | Description                                                                                                                                                                  |
+| ----------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `QueryClient`                                                           | Injectable: `invalidate` · `refetch` · `cancel` · `getData` · `setData` · `remove` · `evict` · `size` · `isFetching` · `count` · `clear` · `isMutating` · `mutatingCount`    |
+| `MutationRegistry`                                                      | In-flight mutation counts, globally and per `mutationKey`                                                                                                                    |
+| `QueryCache`                                                            | The store: `resolve` · `peek` · `matching` · `markInvalidated` · `remove` · `evictIdle` · `size` · `maxEntries` · `tightenMaxEntries` · `all` · `subscribeChanges` · `clear` |
+| `CacheEntry`                                                            | One cached resource: `data` · `status` signals, `refetch()` · `subscribe()` · `setData()` · `evict()` · `isStale()`                                                          |
+| `QueryKey` / `QueryKeyFactory` / `QueryKeyFilter` / `QueryKeyPredicate` | Key shapes and the matching filter                                                                                                                                           |
+| `normalizeKey` · `matchesFilter` · `startsWith` · `formatKey`           | Key helpers, exported for devtools and custom stores                                                                                                                         |
+| `defaultStructuralSharing` · `StructuralSharingFn`                      | The default sharing walk, and its type                                                                                                                                       |
+| `CachedRequest` / `CachedRequestOptions` / `CacheOptions`               | The cached handle and its options                                                                                                                                            |
+| `RefetchOnMount`                                                        | `'stale'` · `'always'` · `false`                                                                                                                                             |
 
 ### `ng-signal-request/testing`
 
@@ -1572,13 +1581,13 @@ export class DevShell {}
 right and collapsed to a `cache 3` button until clicked. `QueryDevtools` is the
 headless part:
 
-| Member | |
-| --- | --- |
-| `entries()` | live snapshot of every entry: key, status, observers, fetch count, age, retry, error |
-| `count()` / `fetching()` | totals, without building the full snapshot |
-| `isOpen()` · `open()` · `close()` · `toggle()` | panel state |
-| `log()` | `console.table` of the current snapshot |
-| `logChanges()` | logs one line per change — `+ key`, `- key`, a fetch, a status move — until the returned function is called |
+| Member                                         |                                                                                                             |
+| ---------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `entries()`                                    | live snapshot of every entry: key, status, observers, fetch count, age, retry, error                        |
+| `count()` / `fetching()`                       | totals, without building the full snapshot                                                                  |
+| `isOpen()` · `open()` · `close()` · `toggle()` | panel state                                                                                                 |
+| `log()`                                        | `console.table` of the current snapshot                                                                     |
+| `logChanges()`                                 | logs one line per change — `+ key`, `- key`, a fetch, a status move — until the returned function is called |
 
 `snapshotEntries(cache, { filter?, now? })` builds a snapshot without the
 service, for a test or a custom panel.
@@ -1646,8 +1655,8 @@ command behind every "no breaking change" claim in this repository. Its output i
 recorded in [`docs/verification.md`](docs/verification.md).
 
 > On Windows, `packageManager` pins a pnpm version newer than the one on
-> `PATH`. If `pnpm install` fails with *"is not recognized as an internal or
-> external command"*, that pnpm self-management shim is broken - run the
+> `PATH`. If `pnpm install` fails with _"is not recognized as an internal or
+> external command"_, that pnpm self-management shim is broken - run the
 > command through Corepack instead: `corepack pnpm install`.
 
 ## Bundle
@@ -1655,12 +1664,12 @@ recorded in [`docs/verification.md`](docs/verification.md).
 The library ships as four entry points, and the split is load-bearing rather
 than cosmetic. Sizes are the gzipped ESM bundles from a production build:
 
-| Entry point | Size | When it is in an application |
-| --- | --- | --- |
-| `ng-signal-request` | **16.7 KB** | always |
-| `ng-signal-request/devtools` | 2.5 KB | only if imported |
-| `ng-signal-request/persist` | 2.3 KB | only if imported |
-| `ng-signal-request/testing` | 0.8 KB | only in tests |
+| Entry point                  | Size        | When it is in an application |
+| ---------------------------- | ----------- | ---------------------------- |
+| `ng-signal-request`          | **16.7 KB** | always                       |
+| `ng-signal-request/devtools` | 2.5 KB      | only if imported             |
+| `ng-signal-request/persist`  | 2.3 KB      | only if imported             |
+| `ng-signal-request/testing`  | 0.8 KB      | only in tests                |
 
 The primary entry point has no imports from the other three and `sideEffects` is
 `false`, so an application that never writes those imports never links the code.

@@ -92,79 +92,95 @@ afterEach(() => {
 });
 
 describe('perf — resolve', () => {
-  it('a warm key is a map lookup, and nothing more', () => {
-    setup([provideSignalRequest({ maxEntries: 100, gcTime: GC })]);
-    const c = cache();
-    const first = c.resolve(['warm']);
+  it(
+    'a warm key is a map lookup, and nothing more',
+    () => {
+      setup([provideSignalRequest({ maxEntries: 100, gcTime: GC })]);
+      const c = cache();
+      const first = c.resolve(['warm']);
 
-    const started = performance.now();
-    for (let i = 0; i < N; i++) c.resolve(['warm']);
-    const ms = performance.now() - started;
-    report('resolve, warm key', ms);
+      const started = performance.now();
+      for (let i = 0; i < N; i++) c.resolve(['warm']);
+      const ms = performance.now() - started;
+      report('resolve, warm key', ms);
 
-    // The short-circuit really is taken — otherwise this would be measuring entry construction.
-    expect(c.resolve(['warm'])).toBe(first);
-    expect(usPerOp(ms)).toBeLessThan(CEILING_PER_OP_US);
-  }, TIMEOUT_MS);
+      // The short-circuit really is taken — otherwise this would be measuring entry construction.
+      expect(c.resolve(['warm'])).toBe(first);
+      expect(usPerOp(ms)).toBeLessThan(CEILING_PER_OP_US);
+    },
+    TIMEOUT_MS,
+  );
 
-  it('a create-and-release loop without a cap grows the cache and stays linear', () => {
-    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
-    setup([provideSignalRequest({ gcTime: GC })]);
-    const c = cache();
+  it(
+    'a create-and-release loop without a cap grows the cache and stays linear',
+    () => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      setup([provideSignalRequest({ gcTime: GC })]);
+      const c = cache();
 
-    const started = performance.now();
-    for (let i = 0; i < N; i++) c.resolve(['k', i]).subscribe(GC)();
-    const ms = performance.now() - started;
-    report('resolve + subscribe + release, no cap', ms);
+      const started = performance.now();
+      for (let i = 0; i < N; i++) c.resolve(['k', i]).subscribe(GC)();
+      const ms = performance.now() - started;
+      report('resolve + subscribe + release, no cap', ms);
 
-    expect(c.size).toBe(N);
-    expect(usPerOp(ms)).toBeLessThan(CEILING_PER_OP_US);
-    c.clear();
-  }, TIMEOUT_MS);
+      expect(c.size).toBe(N);
+      expect(usPerOp(ms)).toBeLessThan(CEILING_PER_OP_US);
+      c.clear();
+    },
+    TIMEOUT_MS,
+  );
 
-  it('the same loop at the cap pays the eviction scan, and stays linear', () => {
-    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
-    setup([provideSignalRequest({ maxEntries: 100, gcTime: GC })]);
-    const c = cache();
+  it(
+    'the same loop at the cap pays the eviction scan, and stays linear',
+    () => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      setup([provideSignalRequest({ maxEntries: 100, gcTime: GC })]);
+      const c = cache();
 
-    // Timed in halves so the shape can be asserted as well as the total: the second half is the one
-    // that would pay for a scan over the *key space* rather than over the cap.
-    const started = performance.now();
-    for (let i = 0; i < N / 2; i++) c.resolve(['k', i]).subscribe(GC)();
-    const mid = performance.now();
-    for (let i = N / 2; i < N; i++) c.resolve(['k', i]).subscribe(GC)();
-    const ms = performance.now() - started;
-    report('resolve + subscribe + release, cap 100', ms);
+      // Timed in halves so the shape can be asserted as well as the total: the second half is the one
+      // that would pay for a scan over the *key space* rather than over the cap.
+      const started = performance.now();
+      for (let i = 0; i < N / 2; i++) c.resolve(['k', i]).subscribe(GC)();
+      const mid = performance.now();
+      for (let i = N / 2; i < N; i++) c.resolve(['k', i]).subscribe(GC)();
+      const ms = performance.now() - started;
+      report('resolve + subscribe + release, cap 100', ms);
 
-    // Bounded, and the per-op cost did not explode: the scan is over `cap` entries, not over `i`.
-    // If eviction ever scanned the whole key space this ratio would grow with `N` instead.
-    expect(c.size).toBe(100);
-    expect(ms - mid).toBeLessThan((mid - started) * SHAPE_LIMIT);
-    expect(usPerOp(ms)).toBeLessThan(CEILING_PER_OP_US);
-    c.clear();
-  }, TIMEOUT_MS);
+      // Bounded, and the per-op cost did not explode: the scan is over `cap` entries, not over `i`.
+      // If eviction ever scanned the whole key space this ratio would grow with `N` instead.
+      expect(c.size).toBe(100);
+      expect(ms - mid).toBeLessThan((mid - started) * SHAPE_LIMIT);
+      expect(usPerOp(ms)).toBeLessThan(CEILING_PER_OP_US);
+      c.clear();
+    },
+    TIMEOUT_MS,
+  );
 
-  it('holds a fixed-size cache at a fixed per-op cost, independent of the key count', () => {
-    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
-    setup([provideSignalRequest({ maxEntries: 100, gcTime: GC })]);
-    const c = cache();
+  it(
+    'holds a fixed-size cache at a fixed per-op cost, independent of the key count',
+    () => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      setup([provideSignalRequest({ maxEntries: 100, gcTime: GC })]);
+      const c = cache();
 
-    // Warm the cache to the cap first, so the first batch is not paying entry construction.
-    for (let i = 0; i < 100; i++) c.resolve(['warm', i]).subscribe(GC)();
+      // Warm the cache to the cap first, so the first batch is not paying entry construction.
+      for (let i = 0; i < 100; i++) c.resolve(['warm', i]).subscribe(GC)();
 
-    const started = performance.now();
-    for (let i = 0; i < N / 2; i++) c.resolve(['k', i]).subscribe(GC)();
-    const mid = performance.now();
-    for (let i = N / 2; i < N; i++) c.resolve(['k', i]).subscribe(GC)();
-    const ms = performance.now() - started;
-    report('at-cap inserts, cap 100 pre-warmed', ms);
+      const started = performance.now();
+      for (let i = 0; i < N / 2; i++) c.resolve(['k', i]).subscribe(GC)();
+      const mid = performance.now();
+      for (let i = N / 2; i < N; i++) c.resolve(['k', i]).subscribe(GC)();
+      const ms = performance.now() - started;
+      report('at-cap inserts, cap 100 pre-warmed', ms);
 
-    expect(c.size).toBe(100);
-    // Every insert here evicts one, at a cost that does not depend on how many keys came before.
-    expect(ms - mid).toBeLessThan((mid - started) * SHAPE_LIMIT);
-    expect(usPerOp(ms)).toBeLessThan(CEILING_PER_OP_US);
-    c.clear();
-  }, TIMEOUT_MS);
+      expect(c.size).toBe(100);
+      // Every insert here evicts one, at a cost that does not depend on how many keys came before.
+      expect(ms - mid).toBeLessThan((mid - started) * SHAPE_LIMIT);
+      expect(usPerOp(ms)).toBeLessThan(CEILING_PER_OP_US);
+      c.clear();
+    },
+    TIMEOUT_MS,
+  );
 });
 
 /**
@@ -175,37 +191,45 @@ describe('perf — resolve', () => {
  * claim instead of asserting it.
  */
 describe('perf — staged seeds', () => {
-  it('staging without a cap is one map insert per value', () => {
-    setup();
-    const c = cache();
+  it(
+    'staging without a cap is one map insert per value',
+    () => {
+      setup();
+      const c = cache();
 
-    const started = performance.now();
-    for (let i = 0; i < N; i++) c.seed(['s', i], i, i);
-    const ms = performance.now() - started;
-    report('seed, no cap', ms);
+      const started = performance.now();
+      for (let i = 0; i < N; i++) c.seed(['s', i], i, i);
+      const ms = performance.now() - started;
+      report('seed, no cap', ms);
 
-    expect(c.pendingSeeds).toBe(N);
-    expect(c.size).toBe(0);
-    expect(usPerOp(ms)).toBeLessThan(CEILING_PER_OP_US);
-    c.clear();
-  }, TIMEOUT_MS);
+      expect(c.pendingSeeds).toBe(N);
+      expect(c.size).toBe(0);
+      expect(usPerOp(ms)).toBeLessThan(CEILING_PER_OP_US);
+      c.clear();
+    },
+    TIMEOUT_MS,
+  );
 
-  it('staging under a cap never exceeds it, and stays linear', () => {
-    setup([provideSignalRequest({ maxEntries: 100 })]);
-    const c = cache();
+  it(
+    'staging under a cap never exceeds it, and stays linear',
+    () => {
+      setup([provideSignalRequest({ maxEntries: 100 })]);
+      const c = cache();
 
-    const started = performance.now();
-    for (let i = 0; i < N / 2; i++) c.seed(['s', i], i, i);
-    const mid = performance.now();
-    for (let i = N / 2; i < N; i++) c.seed(['s', i], i, i);
-    const ms = performance.now() - started;
-    report('seed, cap 100', ms);
+      const started = performance.now();
+      for (let i = 0; i < N / 2; i++) c.seed(['s', i], i, i);
+      const mid = performance.now();
+      for (let i = N / 2; i < N; i++) c.seed(['s', i], i, i);
+      const ms = performance.now() - started;
+      report('seed, cap 100', ms);
 
-    expect(c.pendingSeeds).toBe(100);
-    // If the drop-and-scan ever became a scan of everything staged rather than of the cap, the
-    // second half would grow with `N` and this would fail on any machine.
-    expect(ms - mid).toBeLessThan((mid - started) * SHAPE_LIMIT);
-    expect(usPerOp(ms)).toBeLessThan(CEILING_PER_OP_US);
-    c.clear();
-  }, TIMEOUT_MS);
+      expect(c.pendingSeeds).toBe(100);
+      // If the drop-and-scan ever became a scan of everything staged rather than of the cap, the
+      // second half would grow with `N` and this would fail on any machine.
+      expect(ms - mid).toBeLessThan((mid - started) * SHAPE_LIMIT);
+      expect(usPerOp(ms)).toBeLessThan(CEILING_PER_OP_US);
+      c.clear();
+    },
+    TIMEOUT_MS,
+  );
 });

@@ -14,7 +14,11 @@ interface User {
  * Calling `setup()` twice would configure TestBed twice, so tests that need both go through here
  * and tests that only need a client use `setup()` alone.
  */
-function pair(): { client: QueryClient; create: <T>(fn: () => T) => T; http: ReturnType<typeof setup>['http'] } {
+function pair(): {
+  client: QueryClient;
+  create: <T>(fn: () => T) => T;
+  http: ReturnType<typeof setup>['http'];
+} {
   const s = setup();
   return { client: s.create(() => inject(QueryClient)), create: s.create, http: s.http };
 }
@@ -42,13 +46,21 @@ describe('QueryClient — key matching', () => {
     // `['users', { admin: true }]` — the predicate sees `{ admin: true }`, not a normalized string.
     const { client, create } = pair();
     create(() => {
-      createRequest<User[]>('/users', { key: () => ['users', { admin: true }], refetchOnMount: false });
-      createRequest<User[]>('/users', { key: () => ['users', { admin: false }], refetchOnMount: false });
+      createRequest<User[]>('/users', {
+        key: () => ['users', { admin: true }],
+        refetchOnMount: false,
+      });
+      createRequest<User[]>('/users', {
+        key: () => ['users', { admin: false }],
+        refetchOnMount: false,
+      });
     });
     await settle();
 
     expect(
-      client.count((segment) => typeof segment === 'object' && segment !== null && 'admin' in segment),
+      client.count(
+        (segment) => typeof segment === 'object' && segment !== null && 'admin' in segment,
+      ),
     ).toBe(2);
     expect(client.count((segment) => segment === 'users')).toBe(2);
   });
@@ -134,7 +146,14 @@ describe('QueryClient — invalidate', () => {
     const onSuccess = vi.fn();
     const onSettled = vi.fn();
 
-    create(() => createRequest<User[]>('/users', { key: () => ['users'], initialValue: [], onSuccess, onSettled }));
+    create(() =>
+      createRequest<User[]>('/users', {
+        key: () => ['users'],
+        initialValue: [],
+        onSuccess,
+        onSettled,
+      }),
+    );
     await settle();
     http.expectOne('/users').flush([{ id: 1, name: 'Ada' }]);
     await settle();
@@ -159,8 +178,16 @@ describe('QueryClient — invalidate', () => {
     const first = vi.fn();
     const second = vi.fn();
 
-    a.create(() => createRequest<User[]>('/users', { key: () => ['users'], initialValue: [], onSuccess: first }));
-    b.create(() => createRequest<User[]>('/users', { key: () => ['users'], initialValue: [], onSuccess: second }));
+    a.create(() =>
+      createRequest<User[]>('/users', { key: () => ['users'], initialValue: [], onSuccess: first }),
+    );
+    b.create(() =>
+      createRequest<User[]>('/users', {
+        key: () => ['users'],
+        initialValue: [],
+        onSuccess: second,
+      }),
+    );
     await settle();
     // One network call…
     http.expectOne('/users').flush([{ id: 1, name: 'Ada' }]);
@@ -185,7 +212,10 @@ describe('QueryClient — data access', () => {
     expect(client.getData<User[]>(['users', 1])).toEqual([{ id: 1, name: 'Ada' }]);
     expect(client.getData(['users', 99])).toBeUndefined();
 
-    client.setData<User[]>(['users', 1], (previous) => [...(previous ?? []), { id: 2, name: 'Grace' }]);
+    client.setData<User[]>(['users', 1], (previous) => [
+      ...(previous ?? []),
+      { id: 2, name: 'Grace' },
+    ]);
     expect(client.getData<User[]>(['users', 1])).toEqual([
       { id: 1, name: 'Ada' },
       { id: 2, name: 'Grace' },
@@ -202,7 +232,11 @@ describe('QueryClient — data access', () => {
     const client = create(() => inject(QueryClient));
 
     create(() =>
-      createRequest<User[]>('/users', { key: () => ['users'], staleTime: 60_000, initialValue: [] }),
+      createRequest<User[]>('/users', {
+        key: () => ['users'],
+        staleTime: 60_000,
+        initialValue: [],
+      }),
     );
     await settle();
     http.expectOne('/users').flush([{ id: 1, name: 'Ada' }]);
@@ -271,7 +305,13 @@ describe('QueryClient — data access', () => {
     const { http, create } = setup();
     const client = create(() => inject(QueryClient));
 
-    create(() => createRequest<User[]>('/users', { key: () => ['users'], staleTime: 60_000, initialValue: [] }));
+    create(() =>
+      createRequest<User[]>('/users', {
+        key: () => ['users'],
+        staleTime: 60_000,
+        initialValue: [],
+      }),
+    );
     await settle();
     http.expectOne('/users').flush([{ id: 1, name: 'Ada' }]);
     await settle();
@@ -321,12 +361,24 @@ describe('createMutation — invalidates by key', () => {
     // Both pages refetched from one invalidation.
     const refetched = http.match('/users');
     expect(refetched.length).toBe(2);
-    refetched[0].flush([{ id: 1, name: 'Ada' }, { id: 3, name: 'Hopper' }]);
-    refetched[1].flush([{ id: 2, name: 'Grace' }, { id: 3, name: 'Hopper' }]);
+    refetched[0].flush([
+      { id: 1, name: 'Ada' },
+      { id: 3, name: 'Hopper' },
+    ]);
+    refetched[1].flush([
+      { id: 2, name: 'Grace' },
+      { id: 3, name: 'Hopper' },
+    ]);
     await settle();
 
-    expect(first.response()).toEqual([{ id: 1, name: 'Ada' }, { id: 3, name: 'Hopper' }]);
-    expect(second.response()).toEqual([{ id: 2, name: 'Grace' }, { id: 3, name: 'Hopper' }]);
+    expect(first.response()).toEqual([
+      { id: 1, name: 'Ada' },
+      { id: 3, name: 'Hopper' },
+    ]);
+    expect(second.response()).toEqual([
+      { id: 2, name: 'Grace' },
+      { id: 3, name: 'Hopper' },
+    ]);
 
     pageOne.destroy();
     pageTwo.destroy();
@@ -347,7 +399,9 @@ describe('createMutation — invalidates by key', () => {
     http.expectOne('/items').flush(['a']);
     await settle();
 
-    create(() => createRequest<number>('/items/count', { key: () => ['items', 'count'], initialValue: 0 }));
+    create(() =>
+      createRequest<number>('/items/count', { key: () => ['items', 'count'], initialValue: 0 }),
+    );
     await settle();
     http.expectOne('/items/count').flush(1);
     await settle();

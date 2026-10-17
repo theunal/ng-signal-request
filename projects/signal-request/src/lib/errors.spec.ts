@@ -1,7 +1,13 @@
 import { HttpErrorResponse } from '@angular/common/http';
 import { afterEach, describe, expect, expectTypeOf, it } from 'vitest';
 
-import { createRequest, toRequestError, type RequestError, type RequestErrorOf, type RequestErrorView } from '../public-api';
+import {
+  createRequest,
+  toRequestError,
+  type RequestError,
+  type RequestErrorOf,
+  type RequestErrorView,
+} from '../public-api';
 import { fail, respond, settle, setup } from '../../testing/testing';
 
 /**
@@ -135,9 +141,12 @@ describe('toRequestError', () => {
     // A throwing source must not make run() throw synchronously, and the rejection value
     // must be a real Error — `tryRun().error` is typed `Error`.
     const r = create(() =>
-      createRequest<number>(() => {
-        throw 'just a string';
-      }, { lazy: true }),
+      createRequest<number>(
+        () => {
+          throw 'just a string';
+        },
+        { lazy: true },
+      ),
     );
 
     const result = await r.tryRun();
@@ -368,7 +377,9 @@ describe('requestError()', () => {
     const r = create(() => createRequest<number>('/n', { retry: 0 }));
 
     await settle();
-    http.expectOne('/n').error(abortEvent('AbortError'), { status: 0, statusText: 'Unknown Error' });
+    http
+      .expectOne('/n')
+      .error(abortEvent('AbortError'), { status: 0, statusText: 'Unknown Error' });
     await settle();
 
     expect(r.requestError()).toEqual({ kind: 'aborted' });

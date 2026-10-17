@@ -52,8 +52,12 @@ describe('cached request — sharing', () => {
     const a = createChild();
     const b = createChild();
 
-    const one = a.create(() => createRequest<User[]>('/users', { key: () => ['users'], initialValue: [] }));
-    const two = b.create(() => createRequest<User[]>('/users', { key: () => ['users'], initialValue: [] }));
+    const one = a.create(() =>
+      createRequest<User[]>('/users', { key: () => ['users'], initialValue: [] }),
+    );
+    const two = b.create(() =>
+      createRequest<User[]>('/users', { key: () => ['users'], initialValue: [] }),
+    );
     await settle();
     http.expectOne('/users').flush([{ id: 1, name: 'Ada' }]);
     await settle();
@@ -77,10 +81,14 @@ describe('cached request — sharing', () => {
     const a = createChild();
     const b = createChild();
 
-    const one = a.create(() => createRequest<User[]>('/users', { key: () => ['users'], initialValue: [] }));
+    const one = a.create(() =>
+      createRequest<User[]>('/users', { key: () => ['users'], initialValue: [] }),
+    );
     await settle();
     // The second component arrives while the first is still waiting on the network.
-    const two = b.create(() => createRequest<User[]>('/users', { key: () => ['users'], initialValue: [] }));
+    const two = b.create(() =>
+      createRequest<User[]>('/users', { key: () => ['users'], initialValue: [] }),
+    );
     await settle();
 
     http.expectOne('/users').flush([{ id: 1, name: 'Ada' }]);
@@ -101,9 +109,13 @@ describe('cached request — sharing', () => {
     const a = createChild();
     const b = createChild();
 
-    a.create(() => createRequest<User[]>('/users', { key: () => ['users', { page: 1, size: 10 }] }));
+    a.create(() =>
+      createRequest<User[]>('/users', { key: () => ['users', { page: 1, size: 10 }] }),
+    );
     // Same data, opposite key order.
-    b.create(() => createRequest<User[]>('/users', { key: () => ['users', { size: 10, page: 1 }] }));
+    b.create(() =>
+      createRequest<User[]>('/users', { key: () => ['users', { size: 10, page: 1 }] }),
+    );
     await settle();
 
     http.expectOne('/users').flush([{ id: 1, name: 'Ada' }]);
@@ -180,7 +192,10 @@ describe('cached request — staleness', () => {
 
     b.create(() => createRequest<User[]>('/users', options));
     await settle();
-    http.expectOne('/users').flush([{ id: 1, name: 'Ada' }, { id: 2, name: 'Grace' }]);
+    http.expectOne('/users').flush([
+      { id: 1, name: 'Ada' },
+      { id: 2, name: 'Grace' },
+    ]);
     await settle();
 
     expect(cache().peek<User[]>(['users'])!.fetchCount()).toBe(2);
@@ -192,7 +207,11 @@ describe('cached request — staleness', () => {
   it('refetchOnMount: false never fetches on subscribe', async () => {
     const { http, createChild } = setup();
     const a = createChild();
-    const options = { key: () => ['users'], refetchOnMount: false as const, initialValue: [] as User[] };
+    const options = {
+      key: () => ['users'],
+      refetchOnMount: false as const,
+      initialValue: [] as User[],
+    };
 
     const users = a.create(() => createRequest<User[]>('/users', options));
     await settle();
@@ -213,7 +232,12 @@ describe('cached request — staleness', () => {
     const { http, createChild } = setup();
     const a = createChild();
     const b = createChild();
-    const options = { key: () => ['users'], staleTime: 60_000, refetchOnMount: 'always' as const, initialValue: [] as User[] };
+    const options = {
+      key: () => ['users'],
+      staleTime: 60_000,
+      refetchOnMount: 'always' as const,
+      initialValue: [] as User[],
+    };
 
     a.create(() => createRequest<User[]>('/users', options));
     await settle();
@@ -235,7 +259,11 @@ describe('cached request — staleness', () => {
     const { http, createChild } = setup();
     const a = createChild();
     const users = a.create(() =>
-      createRequest<User[]>('/users', { key: () => ['users'], staleTime: 60_000, initialValue: [] }),
+      createRequest<User[]>('/users', {
+        key: () => ['users'],
+        staleTime: 60_000,
+        initialValue: [],
+      }),
     );
 
     // No data yet: always stale.
@@ -312,7 +340,9 @@ describe('cached request — gc', () => {
     const { http, createChild } = setup();
     const a = createChild();
 
-    a.create(() => createRequest<User[]>('/users', { key: () => ['users'], gcTime: 0, initialValue: [] }));
+    a.create(() =>
+      createRequest<User[]>('/users', { key: () => ['users'], gcTime: 0, initialValue: [] }),
+    );
     await settle();
     http.expectOne('/users').flush([{ id: 1, name: 'Ada' }]);
     await settle();
@@ -445,14 +475,20 @@ describe('cached request — structural sharing', () => {
       createRequest<User[]>('/users', { key: () => ['users'], initialValue: [], staleTime: 0 }),
     );
     await settle();
-    http.expectOne('/users').flush([{ id: 1, name: 'Ada' }, { id: 2, name: 'Grace' }]);
+    http.expectOne('/users').flush([
+      { id: 1, name: 'Ada' },
+      { id: 2, name: 'Grace' },
+    ]);
     await settle();
 
     const before = users.response();
 
     users.reload();
     await settle();
-    http.expectOne('/users').flush([{ id: 1, name: 'Ada' }, { id: 2, name: 'Grace II' }]);
+    http.expectOne('/users').flush([
+      { id: 1, name: 'Ada' },
+      { id: 2, name: 'Grace II' },
+    ]);
     await settle();
 
     const after = users.response();
@@ -473,7 +509,10 @@ describe('cached request — structural sharing', () => {
         key: () => ['users'],
         initialValue: { rows: [], fetchedAt: 0 },
         staleTime: 0,
-        structuralSharing: (previous, next) => ({ rows: next.rows, fetchedAt: previous?.fetchedAt ?? next.fetchedAt }),
+        structuralSharing: (previous, next) => ({
+          rows: next.rows,
+          fetchedAt: previous?.fetchedAt ?? next.fetchedAt,
+        }),
       }),
     );
     await settle();
@@ -611,8 +650,9 @@ describe('cached handle — types', () => {
     interface Query {
       page: number;
     }
+    const source = { key: () => ['users'], initialValue: [] };
     // @ts-expect-error — a params option is required once TParams is declared.
-    const missing = () => createRequest<User[], Query>('/users', { key: () => ['users'], initialValue: [] });
+    const missing = () => createRequest<User[], Query>('/users', source);
     expectTypeOf(missing).toBeFunction();
   });
 });
@@ -682,7 +722,10 @@ describe('cached request — the rest of the surface', () => {
   it('seed() writes straight into an entry that already exists', async () => {
     const { http, create } = setup();
     const users = create(() =>
-      createRequest<User[]>('/users', { key: () => ['users'], staleTime: Number.POSITIVE_INFINITY }),
+      createRequest<User[]>('/users', {
+        key: () => ['users'],
+        staleTime: Number.POSITIVE_INFINITY,
+      }),
     );
     await settle();
     http.expectOne('/users').flush([{ id: 1, name: 'Ada' }]);

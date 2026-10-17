@@ -139,8 +139,10 @@ function buildCachedInContext<T, R, TParams>(
   // and it read that itself. `tightenMaxEntries` ignores anything that would raise the cap, which is
   // what keeps the global setting a ceiling and makes the outcome order-independent.
   if (options.maxEntries !== undefined) cache.tightenMaxEntries(options.maxEntries);
-  const refetchOnMount: RefetchOnMount = options.refetchOnMount ?? globalConfig.refetchOnMount ?? 'stale';
-  const refetchOnWindowFocus = options.refetchOnWindowFocus ?? globalConfig.refetchOnWindowFocus ?? false;
+  const refetchOnMount: RefetchOnMount =
+    options.refetchOnMount ?? globalConfig.refetchOnMount ?? 'stale';
+  const refetchOnWindowFocus =
+    options.refetchOnWindowFocus ?? globalConfig.refetchOnWindowFocus ?? false;
   const refetchOnReconnect = options.refetchOnReconnect ?? globalConfig.refetchOnReconnect ?? false;
   const share = resolveStructuralSharing<T>(options.structuralSharing, options.equal as never);
 
@@ -241,7 +243,11 @@ function buildCachedInContext<T, R, TParams>(
     // is what makes two components mounting together cost one round-trip.
     if (p.entry.pending !== undefined) return;
     const wanted =
-      refetchOnMount === 'always' ? true : refetchOnMount === false ? false : p.entry.isStale(staleTime);
+      refetchOnMount === 'always'
+        ? true
+        : refetchOnMount === false
+          ? false
+          : p.entry.isStale(staleTime);
     if (wanted) void startFetch(p);
   };
 
@@ -453,7 +459,11 @@ function buildCachedInContext<T, R, TParams>(
       return startFetch(current) as Promise<T>;
     },
     tryRun: (): Promise<RunResult<T>> => {
-      if (destroyed) return Promise.resolve({ ok: false, error: new RequestCancelledError('The request was destroyed.') });
+      if (destroyed)
+        return Promise.resolve({
+          ok: false,
+          error: new RequestCancelledError('The request was destroyed.'),
+        });
       const current = plan();
       const promise = current ? startFetch(current) : rejected<T | undefined>(disabledError());
       return promise.then(

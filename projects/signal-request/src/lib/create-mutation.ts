@@ -64,8 +64,7 @@ function named(name: string): () => void {
 }
 
 function mutationFactory(label: string, method: string): MutationFactory {
-  return (request, options = {}) =>
-    buildMutationFactory(method, request, options, named(label));
+  return (request, options = {}) => buildMutationFactory(method, request, options, named(label));
 }
 
 function buildMutationFactory<T, TArgs, TContext>(
@@ -79,7 +78,9 @@ function buildMutationFactory<T, TArgs, TContext>(
     assertInInjectionContext(caller);
     injector = inject(Injector);
   }
-  return runInInjectionContext(injector, () => buildMutation<T, TArgs, TContext>(method, request, options));
+  return runInInjectionContext(injector, () =>
+    buildMutation<T, TArgs, TContext>(method, request, options),
+  );
 }
 
 const POST = mutationFactory('createMutation', 'POST');
@@ -171,19 +172,19 @@ function buildMutation<T, TArgs, TContext>(
   };
 
   /**
- * A query key is an array; a handle is an object with `reload()`.
- *
- * A hand-written guard rather than a bare `Array.isArray`: the built-in narrows its *true* branch
- * to `any[]` and leaves `readonly unknown[]` in the false branch, so `target.reload()` would not
- * type-check on what is left.
- */
-const isQueryKey = (target: InvalidationTarget): target is QueryKey => Array.isArray(target);
+   * A query key is an array; a handle is an object with `reload()`.
+   *
+   * A hand-written guard rather than a bare `Array.isArray`: the built-in narrows its *true* branch
+   * to `any[]` and leaves `readonly unknown[]` in the false branch, so `target.reload()` would not
+   * type-check on what is left.
+   */
+  const isQueryKey = (target: InvalidationTarget): target is QueryKey => Array.isArray(target);
 
-/** The same discrimination for `target`, which takes a handle or a key. */
-const isKeyTarget = (target: OptimisticTarget<unknown> | QueryKey): target is QueryKey =>
-  Array.isArray(target);
+  /** The same discrimination for `target`, which takes a handle or a key. */
+  const isKeyTarget = (target: OptimisticTarget<unknown> | QueryKey): target is QueryKey =>
+    Array.isArray(target);
 
-/**
+  /**
    * Applies `invalidates` after a successful call.
    *
    * Handles are reloaded directly; keys go through `QueryClient`, which invalidates **every**
@@ -192,7 +193,8 @@ const isKeyTarget = (target: OptimisticTarget<unknown> | QueryKey): target is Qu
    * usually a different component from the one holding the mutation.
    */
   const reloadInvalidated = (): void => {
-    const list = typeof options.invalidates === 'function' ? options.invalidates() : options.invalidates;
+    const list =
+      typeof options.invalidates === 'function' ? options.invalidates() : options.invalidates;
     for (const target of list ?? []) {
       if (isQueryKey(target)) client.invalidate(target);
       else target.reload();
@@ -286,7 +288,12 @@ const isKeyTarget = (target: OptimisticTarget<unknown> | QueryKey): target is Qu
     } catch (e) {
       return rejected(toError(e)); // a throwing builder must not make run() throw synchronously
     }
-    if (!built) return rejected(new RequestCancelledError('The mutation is disabled: its request returned undefined/null/false.'));
+    if (!built)
+      return rejected(
+        new RequestCancelledError(
+          'The mutation is disabled: its request returned undefined/null/false.',
+        ),
+      );
 
     // `method` is already the first argument of `http.request`; the option wins over a builder value.
     const { url, method: _method, ...rest } = built;
@@ -294,7 +301,8 @@ const isKeyTarget = (target: OptimisticTarget<unknown> | QueryKey): target is Qu
 
     // A function-shaped global `headers` is read at call time, so it picks up the current
     // token even though a mutation has no reactive chain to invalidate.
-    const withHeaders = options.headers === undefined ? built : { ...built, headers: options.headers };
+    const withHeaders =
+      options.headers === undefined ? built : { ...built, headers: options.headers };
     const { headers } = withGlobalHeaders(withHeaders, config.headers);
 
     let stream: Observable<unknown> = http.request<unknown>(method, url, {
@@ -353,7 +361,10 @@ const isKeyTarget = (target: OptimisticTarget<unknown> | QueryKey): target is Qu
         progress.set(undefined);
       };
       const isEvent = (raw: unknown): raw is HttpEvent<unknown> =>
-        typeof raw === 'object' && raw !== null && 'type' in raw && (raw as { type: unknown }).type !== undefined;
+        typeof raw === 'object' &&
+        raw !== null &&
+        'type' in raw &&
+        (raw as { type: unknown }).type !== undefined;
 
       const succeed = (raw: unknown): void => {
         if (settled) return;

@@ -133,7 +133,9 @@ export class QueryClient {
     const entry = this.cache.peek<T>(key);
     if (!entry) return undefined;
     const next =
-      typeof updater === 'function' ? (updater as (previous: T | undefined) => T | undefined)(entry.data()) : updater;
+      typeof updater === 'function'
+        ? (updater as (previous: T | undefined) => T | undefined)(entry.data())
+        : updater;
     return next === undefined ? undefined : entry.setData(next);
   }
 

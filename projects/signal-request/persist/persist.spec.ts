@@ -7,7 +7,12 @@ import {
 } from '@angular/core';
 import { TestBed } from '@angular/core/testing';
 import { describe, expect, it } from 'vitest';
-import { createRequest, provideSignalRequest, QueryClient, type CachedRequest } from 'ng-signal-request';
+import {
+  createRequest,
+  provideSignalRequest,
+  QueryClient,
+  type CachedRequest,
+} from 'ng-signal-request';
 import {
   CACHE_PERSISTER,
   CACHE_TRANSFER_KEY,
@@ -236,11 +241,9 @@ describe('hydrate()', () => {
     expect(cache().pendingSeeds).toBe(1);
 
     // `replace: false` is how a caller merges two snapshots instead.
-    hydrate(
-      cache(),
-      snapshotOf([{ key: ['third'], data: rows([3]), dataUpdatedAt: 3 }]),
-      { replace: false },
-    );
+    hydrate(cache(), snapshotOf([{ key: ['third'], data: rows([3]), dataUpdatedAt: 3 }]), {
+      replace: false,
+    });
     expect(cache().pendingSeeds).toBe(2);
   });
 

@@ -14,12 +14,12 @@ matters for everything below.
 
 What exists and is shared between the two paths, in `utils.ts`:
 
-| Function | Role |
-| --- | --- |
-| `resolveRequest(value, method, baseUrl, params)` | source → `HttpResourceRequest`; fills `path`, splits `params`, applies the verb |
-| `withGlobalHeaders(request, global)` | merges global defaults; reads a reactive `headers()` **inside the reactive chain** |
-| `normalizeRetry` / `nextRetryDelay` | retry policy, shared by queries and mutations |
-| `splitParams` | `body` / `path` / `headers` vs query string |
+| Function                                         | Role                                                                               |
+| ------------------------------------------------ | ---------------------------------------------------------------------------------- |
+| `resolveRequest(value, method, baseUrl, params)` | source → `HttpResourceRequest`; fills `path`, splits `params`, applies the verb    |
+| `withGlobalHeaders(request, global)`             | merges global defaults; reads a reactive `headers()` **inside the reactive chain** |
+| `normalizeRetry` / `nextRetryDelay`              | retry policy, shared by queries and mutations                                      |
+| `splitParams`                                    | `body` / `path` / `headers` vs query string                                        |
 
 And in `errors.ts`: `toRequestError`, which classifies a failure into the
 discriminated union, and `RequestErrorView` (per-kind predicates + `message`).
@@ -49,23 +49,23 @@ A cache entry is the opposite of what `httpResource` is built for:
 - `httpResource` **cancels the previous request** when its params function
   produces a different request. For an entry, "the request changed" is not a
   thing — there is one request in flight per entry, and cancelling it is
-  precisely what we are trying to *avoid* unless the last subscriber left.
+  precisely what we are trying to _avoid_ unless the last subscriber left.
 
 And the decisive point: the features Phase 1 asks for — refcount, dedup,
 stale-while-revalidate, gcTime, abort-on-last-unsubscribe — are **properties of a
 fetch coordinator**, not of a reactive request primitive. Adopting `httpResource`
-per entry would mean reimplementing all of them *on top of* it, plus paying for a
+per entry would mean reimplementing all of them _on top of_ it, plus paying for a
 primitive whose reactive semantics fight the job. Bending `HttpClient` into that
 shape is about the same amount of code and is legible.
 
 ### Why not "return `undefined` from the params chain while a fresh entry exists"
 
 This was the original sketch and it is wrong in a specific way: it dedups the
-*response* but not the *network call*. Two components mounting at the same time
+_response_ but not the _network call_. Two components mounting at the same time
 would each get their own `httpResource`, each of which would decide independently
 to return `undefined`, and the moment the entry went stale both would fetch. To
 actually coalesce, you need a shared in-flight promise — at which point you have
-built the coordinator anyway, and now you have *also* kept the resource, with its
+built the coordinator anyway, and now you have _also_ kept the resource, with its
 status model collapsed (`idle`/`local` standing in for "this is a cache hit") and
 retry-timer ownership ambiguous (whose back-off timer is running?).
 
@@ -84,8 +84,8 @@ retry-timer ownership ambiguous (whose back-off timer is running?).
 ### Precedent
 
 `createMutation` already made this exact call (`create-mutation.ts:180`) with the
-stated reason: *"`httpResource` is meant for reads (it is eager and cancels the
-previous request, which is not what you want for writes)."* The same argument
+stated reason: _"`httpResource` is meant for reads (it is eager and cancels the
+previous request, which is not what you want for writes)."_ The same argument
 extends to reads that are coordinated across consumers.
 
 ## 3. Architecture
@@ -105,7 +105,7 @@ createRequest(source, { key })  ──opt-in──►  QueryCache (root singleto
 - **`CacheEntry`** — the coordinator. Owns the data, the status, the refcount, the
   in-flight request and its `AbortController`, the gc timer, and the retry timer.
 - **Handle** — `computed`s reading the entry's signals. No `effect()` in the
-  steady state: the entry's state *is* the signal graph, and the handle just
+  steady state: the entry's state _is_ the signal graph, and the handle just
   projects it.
 
 ### Key normalization
@@ -144,14 +144,14 @@ that is the whole ergonomic story, and it mirrors how the source already works.
 Mapped onto the public `RequestStatus`, so templates and existing code are
 unchanged:
 
-| Entry | `status()` |
-| --- | --- |
-| disabled (source returned `undefined`) | `idle` |
-| no data, fetching | `loading` |
-| has data, fetching | `reloading` |
-| has data, not fetching, no error | `resolved` |
-| terminal error | `error` |
-| a `set()` / `setData()` wrote locally | `local` |
+| Entry                                  | `status()`  |
+| -------------------------------------- | ----------- |
+| disabled (source returned `undefined`) | `idle`      |
+| no data, fetching                      | `loading`   |
+| has data, fetching                     | `reloading` |
+| has data, not fetching, no error       | `resolved`  |
+| terminal error                         | `error`     |
+| a `set()` / `setData()` wrote locally  | `local`     |
 
 `error` is **masked while a retry is in flight**, matching today's behaviour
 (`create-request.ts:214-216`).
@@ -188,7 +188,7 @@ On every successful fetch the incoming value is passed through, in order:
 2. the existing `equal(oldData, newData)` — which today goes to `httpResource` as
    value equality.
 
-If the result is the *old* reference, the entry's data signal is not written and
+If the result is the _old_ reference, the entry's data signal is not written and
 **no consumer re-runs**. This is what keeps a 200-response with one changed field
 from re-rendering an unchanged table, and it composes with `equal` rather than
 replacing it: `equal` is the degenerate "is this the same value?" case of the
@@ -198,11 +198,11 @@ same idea.
 
 ```ts
 createRequest(source, {
-  key: () => ['users', { page: page() }],   // opt-in; absent = today's behaviour
-  staleTime: 5_000,                          // 0 = always stale
-  gcTime: 300_000,                           // default 5 min
-  refetchOnMount: 'stale',                   // 'stale' | 'always' | false
-  structuralSharing: (old, next) => next,    // default: identity
+  key: () => ['users', { page: page() }], // opt-in; absent = today's behaviour
+  staleTime: 5_000, // 0 = always stale
+  gcTime: 300_000, // default 5 min
+  refetchOnMount: 'stale', // 'stale' | 'always' | false
+  structuralSharing: (old, next) => next, // default: identity
 });
 ```
 
@@ -226,14 +226,14 @@ Hard rule: **a handle with no `key` runs today's code path, unchanged.**
 
 ## 7. Risks
 
-| Risk | Mitigation |
-| --- | --- |
-| Two code paths drift | The shared primitives (`resolveRequest`, `withGlobalHeaders`, retry, `toRequestError`) are already factored out and are used by both. Only the fetch/status orchestration is duplicated, and it is deliberately small. |
-| `key` read outside a reactive context → stale entry | The key is read in a `computed`; a signal it reads becomes a dependency, exactly like the existing source. |
-| Entry leaks | Refcount + gcTime, plus a leak test that asserts subscriber count and timer count return to zero. |
-| Memory: `Map` grows forever with many distinct keys | `gcTime` bounds it. A `maxEntries` cap is a follow-up, not in v0.1.0. |
-| SSR: entry state leaking between requests | `QueryCache` is a root singleton. A server rendering two different users would share entries. **This is a real problem** — see below. |
-| Structural sharing makes the response mutable-looking | It only ever returns a *previous* reference, never mutates. Callers must still treat cached data as immutable; documented. |
+| Risk                                                  | Mitigation                                                                                                                                                                                                             |
+| ----------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Two code paths drift                                  | The shared primitives (`resolveRequest`, `withGlobalHeaders`, retry, `toRequestError`) are already factored out and are used by both. Only the fetch/status orchestration is duplicated, and it is deliberately small. |
+| `key` read outside a reactive context → stale entry   | The key is read in a `computed`; a signal it reads becomes a dependency, exactly like the existing source.                                                                                                             |
+| Entry leaks                                           | Refcount + gcTime, plus a leak test that asserts subscriber count and timer count return to zero.                                                                                                                      |
+| Memory: `Map` grows forever with many distinct keys   | `gcTime` bounds it. A `maxEntries` cap is a follow-up, not in v0.1.0.                                                                                                                                                  |
+| SSR: entry state leaking between requests             | `QueryCache` is a root singleton. A server rendering two different users would share entries. **This is a real problem** — see below.                                                                                  |
+| Structural sharing makes the response mutable-looking | It only ever returns a _previous_ reference, never mutates. Callers must still treat cached data as immutable; documented.                                                                                             |
 
 ### SSR is a genuine correctness problem
 
@@ -243,7 +243,7 @@ other's data.
 
 The Phase 1 answer, which Phase 7 then leaned on, is that **`providedIn: 'root'`
 already means "per application instance"**: `root` resolves to the root
-environment injector of *one* `bootstrapApplication` / `renderApplication` call,
+environment injector of _one_ `bootstrapApplication` / `renderApplication` call,
 and Angular's SSR calls `renderApplication` per request. So the cache is isolated
 per server request by construction, with no factory, no `REQUEST` token and
 nothing for the user to remember to provide. Phase 7 hydration is therefore
@@ -274,7 +274,7 @@ there is in the host, not in this library. Documented rather than hidden.
 - **Cache in front of `httpResource` via the params chain.** §2.
 - **Per-request `QueryCache` via `new QueryCache()` passed to every call.** Makes
   `invalidate` a global side channel to find them. Rejected.
-- **Signals instead of `computed` for entry state.** Entry state *is* reactive —
+- **Signals instead of `computed` for entry state.** Entry state _is_ reactive —
   data, status, refcount all change — so `signal`/`computed` are the right tools
   here. (Contrast with the `requestError` predicates, which are deliberately
   plain prototype methods because a failure is not a time-varying value.)
@@ -304,22 +304,22 @@ there is in the host, not in this library. Documented rather than hidden.
   `include` and moving `rootDir` to `"."`.
 - ~~**No coverage threshold**, so "≥90% on new code" was a claim rather than a
   gate~~ — closed in Phase 8; see below.
-- **`maxEntries` is still not implemented.** `gcTime` bounds the cache in *time*,
+- **`maxEntries` is still not implemented.** `gcTime` bounds the cache in _time_,
   and a workload with a very large number of distinct keys within one `gcTime`
-  window is unbounded in *space*. Documented as a limit; a follow-up.
+  window is unbounded in _space_. Documented as a limit; a follow-up.
 
 ## 10. Phase plan
 
-| Phase | Contents | Depends on |
-| --- | --- | --- |
-| 1 | `QueryCache`, `CacheEntry`, key normalization, `key` option, dedup, `staleTime`, `gcTime`, `refetchOnMount`, structural sharing, abort, per-instance cache | — |
-| 2 | Injectable `QueryClient`: `invalidate` / `refetch` / `cancel` / `getData` / `setData` / `remove` / `isFetching`, prefix matching, batched invalidation; `invalidates` key overload | 1 |
-| 3 | `mutationKey`, `onMutate` context, `isMutating()`, `target` accepts a key | 2 |
-| 4 | `createInfiniteRequest` | 1 |
-| 5 | `select` that does not break inference; `createRequests` + `combine` | 1 |
-| 6 | `/devtools` entry point | 1, 2 |
-| 7 | `/persist` entry point; `TransferState` dehydrate/hydrate, `prefetch` | 1, 2 |
-| 8 | Fix the documented sharp edges | 1–7 |
+| Phase | Contents                                                                                                                                                                           | Depends on |
+| ----- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------- |
+| 1     | `QueryCache`, `CacheEntry`, key normalization, `key` option, dedup, `staleTime`, `gcTime`, `refetchOnMount`, structural sharing, abort, per-instance cache                         | —          |
+| 2     | Injectable `QueryClient`: `invalidate` / `refetch` / `cancel` / `getData` / `setData` / `remove` / `isFetching`, prefix matching, batched invalidation; `invalidates` key overload | 1          |
+| 3     | `mutationKey`, `onMutate` context, `isMutating()`, `target` accepts a key                                                                                                          | 2          |
+| 4     | `createInfiniteRequest`                                                                                                                                                            | 1          |
+| 5     | `select` that does not break inference; `createRequests` + `combine`                                                                                                               | 1          |
+| 6     | `/devtools` entry point                                                                                                                                                            | 1, 2       |
+| 7     | `/persist` entry point; `TransferState` dehydrate/hydrate, `prefetch`                                                                                                              | 1, 2       |
+| 8     | Fix the documented sharp edges                                                                                                                                                     | 1–7        |
 
 ### Phase 4 notes — `createInfiniteRequest`
 
@@ -334,10 +334,10 @@ wanted it. Instead each page is an ordinary `QueryCache` entry keyed `base key +
 to a paginated list without the paginated code knowing: prefix invalidation, per-page `staleTime`
 and `gcTime`, and dedup against a plain `createRequest` on the same key.
 
-**`response()` flattens only when a page *is* an array.** `TPage` is opaque — a page may be
+**`response()` flattens only when a page _is_ an array.** `TPage` is opaque — a page may be
 `Item[]` or `{ items, cursor }`, and there is no way to know which field of an envelope is the
 list. Guessing produces a plausible-looking list that is wrong for some API. So the runtime flattens
-arrays and passes anything else through, and the *type* follows the same condition via
+arrays and passes anything else through, and the _type_ follows the same condition via
 `FlattenedPages<TPage>`: `InfiniteRequest<Item[], P>` has `Signal<readonly Item[]>`,
 `InfiniteRequest<Envelope, P>` has `Signal<readonly Envelope[]>`. The type and the runtime agree
 because they are guarded by the same predicate.
@@ -349,7 +349,7 @@ about when the pages are not racing each other. Sequential is slower on purpose.
 
 One bug worth naming, because it is the class of bug the `untracked` helper invites: `pages()` was
 first written with `untracked(page.entry.data)` inside the `computed`. That reads correctly and
-passes on one page — the accumulated list only breaks on the *second* page, because a page arriving
+passes on one page — the accumulated list only breaks on the _second_ page, because a page arriving
 does not change `loadedParams()`, so nothing re-invalidates the computed. The reads must be tracked.
 `isFetchingNextPage()` had the same shape. Both are tracked now, and the tests that caught them are
 in `infinite-request.spec.ts`.
@@ -357,7 +357,7 @@ in `infinite-request.spec.ts`.
 ### Phase 5 notes — `select`, `combine`, `createRequests`
 
 **`select` is a method, and the reason is measurable.** The brief listed this phase as "`select`
-that does not break inference", and the v0.0.x code already claimed a `select` *option* was
+that does not break inference", and the v0.0.x code already claimed a `select` _option_ was
 impossible without saying what actually broke. So the claim was tested rather than repeated. Two
 probes:
 
@@ -388,7 +388,7 @@ temporary; the two snippets above are the record.
 nothing is named ahead of it, and `expectTypeOf` pins the inference in `select.spec.ts`.
 
 It also earns its place beyond ergonomics. `computed(() => handle.response()?.map(…))` already
-memoizes and already stops propagation when the result is `Object.is`-equal, so the *only* thing a
+memoizes and already stops propagation when the result is `Object.is`-equal, so the _only_ thing a
 method can add is a different equality — which is exactly what a selector that rebuilds an object
 needs. `select.spec.ts` tests both halves: with `equal` a response that changed an unrelated field
 does not wake the consumer, and without it, it does.
@@ -414,11 +414,11 @@ observers and immediately rejoin. One handle is built per item identity and reus
 to a list of twenty touches one handle. Identity defaults to `Object.is` on the item — right for a
 list of ids — with a `key` escape hatch for objects, since two structurally equal objects are two
 identities. Reordering is the case that makes this visible: the handles come back in the new order
-*as the same objects*, and nothing is refetched to achieve it.
+_as the same objects_, and nothing is refetched to achieve it.
 
 ### Phase 6 notes — `/devtools`
 
-The plan said "`/devtools` entry point", and the acceptance criterion was that it be *absent* from
+The plan said "`/devtools` entry point", and the acceptance criterion was that it be _absent_ from
 a production bundle that does not use it. The packaging is therefore the feature: a secondary
 ng-packagr entry point, `sideEffects: false`, and — the part that actually matters — nothing in
 `src/` importing it. There is no `isDevMode()` branch inside the library, and therefore no branch
@@ -507,7 +507,7 @@ when the persister is built, and `providePersistedCache` registers one afterward
 runs `DestroyRef` callbacks in registration order, so `stop()` ran first, set `destroyed = true`,
 and then the flush was a no-op — the one write that matters, because the debounce window is open and
 the page is going away. The fix was to make the flush part of `destroy()` rather than something a
-caller has to remember to do first: `stop()` flushes and *then* stops. `Persister.destroy()` is now
+caller has to remember to do first: `stop()` flushes and _then_ stops. `Persister.destroy()` is now
 documented as flushing, which is what its only real call site needs.
 
 Notifications: persistence needs to hear about **data**, and `subscribeChanges` only reports the set
@@ -515,7 +515,7 @@ of entries. Reusing it would have produced a persister that writes an empty snap
 appears and never writes again — the entry is created before it fetches, so the one interesting
 event never fires that listener. Rather than build an `effect` that reads every entry (an O(n)
 dependency graph, and one that would run a tick late), `QueryCache` gained a second, narrower
-notification: `subscribeActivity`, which fires on the set changing *and* on every settle. It is a
+notification: `subscribeActivity`, which fires on the set changing _and_ on every settle. It is a
 listener rather than a `Signal<number>` for the reason the devtools found the hard way, and its
 listener must obey the same rule — which is why a failed write defers `enabled.set(false)` into a
 microtask instead of writing it inline.
@@ -543,12 +543,13 @@ Smaller calls, each with a reason:
   write is a slower first paint; the worst outcome of an unhandled `QuotaExceededError` inside a
   fetch's settle path is a broken application.
 - **`localStorage` is probed in a `try`.** It is not enough to check `typeof` — in a sandboxed
-  iframe or with cookies blocked, the global exists and *throws on access*.
+  iframe or with cookies blocked, the global exists and _throws on access_.
 
 Rejected: putting `dehydrate`/`hydrate` on `QueryCache` itself. They are serialisation policy —
 what a codec is, what a version means, how old is too old — and the cache is the one class in the
 library that deliberately has no options. Keeping them in `/persist` also keeps the snapshot code,
 the codec and the storage probing in the bundle that only persistence users download.
+
 ### Phase 8 notes - the documented sharp edges, and a coverage gate
 
 This phase had two halves: make the claims in the docs true again, and make the
@@ -557,7 +558,7 @@ quality bar enforceable instead of aspirational.
 **Two README claims had become false, and stale documentation is worse than
 missing documentation** because it is trusted. "Requests are not deduplicated -
 two components asking for the same url each fire their own request" was only ever
-true of a *keyless* request, and stopped being the headline truth the moment keys
+true of a _keyless_ request, and stopped being the headline truth the moment keys
 shipped. And "there is no `select` option and no infinite-query primitive" had been
 sitting there since v0.0.4 while Phases 4 and 5 added exactly those two things. The
 general lesson, recorded here because it will happen again: a feature phase is not
@@ -567,7 +568,7 @@ previous phase's absences were written down.
 **One sharp edge was in the design doc rather than the README.** The section
 headed "SSR is a genuine correctness problem" still described an
 `EnvironmentProviders` factory as the chosen remedy, because that was the plan
-before Phase 1 established that `providedIn: 'root'` already *is* per-application
+before Phase 1 established that `providedIn: 'root'` already _is_ per-application
 instance. The section now says what the code does, and names the residual risk that
 no design can remove - it holds because the server renders per request, so a host
 that reuses one injector across requests would share the cache. That is a fact
@@ -575,13 +576,13 @@ about the host, and it is written down rather than papered over.
 
 **The one behavioural sharp edge in this phase needed no new code**, because it had
 already been found and fixed while writing the Phase 7 tests: `Persister.destroy()`
-now flushes an open debounce window *before* it stops listening, so the destroy
+now flushes an open debounce window _before_ it stops listening, so the destroy
 order between `createPersister` and `providePersistedCache` no longer matters. See
 the Phase 7 notes. The rest of this phase is tests, honest thresholds and honest
 prose, which is the correct outcome for a phase whose job was to reconcile the
 documentation with the library rather than to add to it.
 
-Coverage went from 88.7% statements to 95.8% by testing what was *unexercised*
+Coverage went from 88.7% statements to 95.8% by testing what was _unexercised_
 rather than what was convenient, and every gap that turned up was real API surface:
 `ctx.chain()`'s explanatory failure on a cached handle, the params-cleared
 "disabled" state (`run()` rejects, `tryRun()` reports, `reload()` returns `false`),
@@ -606,7 +607,7 @@ Two testing facts were learned the hard way and are now in the README:
 
 Thresholds are now wired into `angular.json` (`90` statements, `85` branches, `90`
 functions, `90` lines) and `pnpm test` runs v8 coverage, so the gate is active
-locally and in CI without a second script. The numbers are deliberately *below*
+locally and in CI without a second script. The numbers are deliberately _below_
 the current ones (95.8 / 90.0 / 96.3 / 97.8): a threshold set at the current
 figure would fail on any harmless refactor that touched one branch, which trains
 people to move the number rather than to test. The gate was also verified by

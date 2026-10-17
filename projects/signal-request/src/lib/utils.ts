@@ -339,7 +339,11 @@ export function normalizeRetry(
 }
 
 /** Delay for the next retry or `undefined` if no (more) retries should happen. */
-export function nextRetryDelay(retry: NormalizedRetry | undefined, attempt: number, error: Error): number | undefined {
+export function nextRetryDelay(
+  retry: NormalizedRetry | undefined,
+  attempt: number,
+  error: Error,
+): number | undefined {
   if (!retry || attempt > retry.count || !retry.when(error, attempt)) return undefined;
   const delay = retry.delay(attempt, error);
   return Number.isFinite(delay) && delay >= 0 ? delay : defaultDelay(attempt);

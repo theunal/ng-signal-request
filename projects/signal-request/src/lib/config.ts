@@ -2,10 +2,13 @@ import { EnvironmentProviders, InjectionToken, makeEnvironmentProviders } from '
 import type { SignalRequestConfig } from './types';
 
 /** Global defaults. Works without any setup (empty config). */
-export const SIGNAL_REQUEST_CONFIG = new InjectionToken<SignalRequestConfig>('SIGNAL_REQUEST_CONFIG', {
-  providedIn: 'root',
-  factory: () => ({}),
-});
+export const SIGNAL_REQUEST_CONFIG = new InjectionToken<SignalRequestConfig>(
+  'SIGNAL_REQUEST_CONFIG',
+  {
+    providedIn: 'root',
+    factory: () => ({}),
+  },
+);
 
 /**
  * Registers global defaults.

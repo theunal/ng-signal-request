@@ -10,17 +10,17 @@ The 0.2.0 brief has six phases. They are not equally hard, and the brief says so
 two of them are small and mostly additive, and two change the request lifecycle
 itself.
 
-| Phase | Subject | Status |
-| --- | --- | --- |
-| 0 | Verify the 0.1.0 claims | **Done** — see `docs/verification.md` |
-| 1 | Bound the cache in space (`maxEntries`) | **Done** in this session |
-| 5 | Remove the known traps | **Done** in this session |
-| 2 | Offline / `networkMode` | Designed here, deferred to its own session |
-| 3 | Async persistence and migrations | Designed here, deferred to its own session |
-| 4 | Non-HTTP sources (`queryFn`) | Designed here, deferred to its own session |
-| 6 | Devtools depth | Designed here, deferred to its own session |
+| Phase | Subject                                 | Status                                     |
+| ----- | --------------------------------------- | ------------------------------------------ |
+| 0     | Verify the 0.1.0 claims                 | **Done** — see `docs/verification.md`      |
+| 1     | Bound the cache in space (`maxEntries`) | **Done** in this session                   |
+| 5     | Remove the known traps                  | **Done** in this session                   |
+| 2     | Offline / `networkMode`                 | Designed here, deferred to its own session |
+| 3     | Async persistence and migrations        | Designed here, deferred to its own session |
+| 4     | Non-HTTP sources (`queryFn`)            | Designed here, deferred to its own session |
+| 6     | Devtools depth                          | Designed here, deferred to its own session |
 
-Phases 2 and 4 change how a request is *driven*: an offline query does not fetch
+Phases 2 and 4 change how a request is _driven_: an offline query does not fetch
 until the network returns, and a `queryFn` query has no `HttpClient` behind it at
 all. Both reach into `CacheEntry.execute`, which is the one method every keyed
 request goes through. Doing them in the same session as two safe phases would put
@@ -35,7 +35,7 @@ signals, better messages, no change to how a fetch is executed.
   is written by hand or is not done.
 - **No breaking change.** `pnpm check:api v0.1.0` must keep reporting
   `removed 0`. That means every new option is optional, every new signal is
-  additive, and the `RequestErrorKind` union may gain optional *fields* but never
+  additive, and the `RequestErrorKind` union may gain optional _fields_ but never
   new or renamed members.
 - **A handle without a `key` behaves exactly as it does today.** Nothing in
   Phase 1 or 5 touches the `httpResource` path except a dev-mode warning.
@@ -54,7 +54,7 @@ signals, better messages, no change to how a fetch is executed.
 
 `gcTime` bounds the cache in time. Every entry that loses its last observer arms
 a timer and is dropped when it fires, so a cache with 10 keys touched once a
-minute stays small. What `gcTime` does not bound is the number of *distinct* keys
+minute stays small. What `gcTime` does not bound is the number of _distinct_ keys
 touched inside one window. A typeahead that keys on the query string, a
 virtualised list that keys on the row id, or a `createRequests` over a large
 array all produce a new key per interaction. With a 5 minute `gcTime`, a minute
@@ -71,9 +71,9 @@ provideSignalRequest({ maxEntries: 500 });
 createRequest('/users', { key: () => ['users'], maxEntries: 100 });
 
 // Reading it back.
-inject(QueryClient).size();     // Signal<number> — the whole cache
-inject(QueryClient).evict(['users']);  // number — matching *and idle* entries only
-inject(QueryCache).maxEntries;  // number — the effective cap, Infinity when none
+inject(QueryClient).size(); // Signal<number> — the whole cache
+inject(QueryClient).evict(['users']); // number — matching *and idle* entries only
+inject(QueryCache).maxEntries; // number — the effective cap, Infinity when none
 ```
 
 Signatures:
@@ -119,7 +119,7 @@ the two guards are the load-bearing part:
   it would leave that promise unresolved until its timeout, or reject it with a
   `RequestCancelledError` the caller never asked for.
 
-If there is no candidate — everything is live — the cap is *not* met, the cache
+If there is no candidate — everything is live — the cap is _not_ met, the cache
 overshoots, and a dev-mode warning explains why:
 
 ```
@@ -138,7 +138,7 @@ surface is exported.
 
 ### Why `min()` and not a per-request allowance
 
-The brief asks for the option globally *and* per request. There is one cache for
+The brief asks for the option globally _and_ per request. There is one cache for
 the application, so a per-request cap has to mean something about that shared
 store. Three readings are possible:
 
@@ -150,13 +150,13 @@ store. Three readings are possible:
    every domain.
 2. **Last writer wins.** A request declaring `maxEntries` replaces the cache's
    cap. Order-dependent (whichever request was constructed last decides, which is
-   a constructor-order accident), and a request could *raise* the cap above what
+   a constructor-order accident), and a request could _raise_ the cap above what
    the application owner configured. Rejected.
 3. **The tightest budget wins: `min(global, every declared per-request)`.**
 
 Chosen. It is order-independent, it means the global value is a hard ceiling that
-no leaf request can exceed, and it is trivially explainable: *a per-request
-`maxEntries` can only make the cache smaller.* The cost is real and is documented
+no leaf request can exceed, and it is trivially explainable: _a per-request
+`maxEntries` can only make the cache smaller._ The cost is real and is documented
 rather than hidden — a request cannot ask for a larger budget than the global
 one, so a screen that genuinely needs 1000 entries while the rest of the app
 needs 50 has to raise the global value.
@@ -191,7 +191,7 @@ private teardown(): void {        // plan, settle listeners, gc timer, onDestroy
 }
 ```
 
-Skipping `cancel()` is safe *by construction*, not by optimism: eviction only
+Skipping `cancel()` is safe _by construction_, not by optimism: eviction only
 ever selects entries with no observers, and an entry loses its observers only
 through `release()`, which cancels the request on its way out. So for a candidate,
 `cancel()` was a no-op apart from its signal writes. The guard in the selector
@@ -239,7 +239,7 @@ have been worth restoring.
 
 Rejected: a separate `maxSeeds` (a second knob for the same resource, and the
 snapshot has no natural size of its own); "drop whoever was staged last" (that is
-the *freshest* data, and it would make `hydrate` order-dependent in the worst
+the _freshest_ data, and it would make `hydrate` order-dependent in the worst
 way).
 
 **Enforcement points:** `seed()`, `resolve()` — with one place reserved for the
@@ -249,8 +249,8 @@ periodic pass.
 
 **A seed a resolve is consuming can never be the one evicted**, and that is
 structural rather than optimistic: `resolve` deletes the seed and hands it to the
-`CacheEntry` constructor *before* it enforces the cap, and the new entry joins the
-map *after*. At no point in between is the value being consumed still staged.
+`CacheEntry` constructor _before_ it enforces the cap, and the new entry joins the
+map _after_. At no point in between is the value being consumed still staged.
 
 **What deliberately did not change.** The eviction guards, the overshoot warning,
 and `QueryCache.size` (still entries; the capped total is
@@ -263,7 +263,7 @@ too, because "empty" has to mean empty.
 **Cost.** Every `seed()` that lands over budget scans the staged map — at most
 the cap — for its oldest member, so `hydrate`ing `n` values costs `O(n · cap)`
 once, at startup. There is a benchmark for it in `docs/perf.md`. `hydrate()`'s
-return value keeps counting what the snapshot *contributed*, not what survived:
+return value keeps counting what the snapshot _contributed_, not what survived:
 the cap is the cache's policy, and a snapshot is a hint rather than a
 reservation.
 
@@ -346,12 +346,12 @@ What `status: 0` can mean: the network is down, the request was blocked (CORS,
 an extension, mixed content), the request was aborted, or the fetch failed for a
 reason the browser will not name. What can be distinguished:
 
-| Situation | Signal available | Verdict |
-| --- | --- | --- |
-| Aborted on purpose | `AbortError` / `TimeoutError` name on the cause | Already classified as `aborted` / `timeout` |
-| Off by the browser's own account | `navigator.onLine === false` | New: `offline: true` on the `network` member |
-| Blocked, CORS, opaque | nothing — the browser hides it | Stays `network`, honestly unclassified |
-| Everything else | nothing | `unknown` |
+| Situation                        | Signal available                                | Verdict                                      |
+| -------------------------------- | ----------------------------------------------- | -------------------------------------------- |
+| Aborted on purpose               | `AbortError` / `TimeoutError` name on the cause | Already classified as `aborted` / `timeout`  |
+| Off by the browser's own account | `navigator.onLine === false`                    | New: `offline: true` on the `network` member |
+| Blocked, CORS, opaque            | nothing — the browser hides it                  | Stays `network`, honestly unclassified       |
+| Everything else                  | nothing                                         | `unknown`                                    |
 
 The change is one optional field:
 
@@ -378,7 +378,7 @@ handles.
 
 Investigation first, because the answer decides which of three things to do. A
 cached handle's key is a `computed` that reads the caller's key factory. If that
-factory reads another handle's signal, the dependency is already reactive *and*
+factory reads another handle's signal, the dependency is already reactive _and_
 already correct: the argument — the upstream value — is part of the cache
 identity, so two consumers of the same derived key share one entry. That is
 strictly better than `ctx.chain()`, which transports an argument without making
@@ -414,7 +414,7 @@ None of them changes a public name; each is either a narrowing or a measurement.
 **5.1, the predicate routes through `errors.ts` rather than re-deriving it.**
 As designed, with one rename: `isAbortLike` is exported from `errors.ts` and
 `isTransient` gained a `retryTimeouts` argument. The flag governs the abort-like
-branch only, so a `TypeError` or a bare `status: 0` that is *not* an abort stays
+branch only, so a `TypeError` or a bare `status: 0` that is _not_ an abort stays
 transient. `public-api.ts` lists its exports by name, so exporting the helper did
 not widen the API — `pnpm check:api` still reports 0 added for it.
 
@@ -451,10 +451,10 @@ only in the docs. If Phase 2's `OnlineManager` ever produces an authoritative
 **5.4, the answer is "the alternative is the feature", with tests instead of an
 `enabled` option.** The investigation confirmed the design's reading and went one
 step further: `resolveRequest` returning `undefined` short-circuits
-`rawPlan` *before* `cache.resolve`, so a gated dependent request creates no entry
+`rawPlan` _before_ `cache.resolve`, so a gated dependent request creates no entry
 for its not-yet-meaningful key. That makes "source returns `undefined`" a complete
 `enabled` on the cached path, with no new option — so no option was added, and
-`dependent-queries.spec.ts` pins both halves (no request *and* no entry; the
+`dependent-queries.spec.ts` pins both halves (no request _and_ no entry; the
 upstream value inside the downstream key). The runtime and compile-time pointers
 (`ctx.chain()`'s message, `.resource` as a type error) already existed and were
 only asserted.
@@ -491,11 +491,11 @@ README's "Known limitations", and pinned by a `@ts-expect-error` test in
 @Injectable({ providedIn: 'root' })
 class OnlineManager {
   readonly online: Signal<boolean>;
-  setOnline(value: boolean): void;   // the test seam
+  setOnline(value: boolean): void; // the test seam
 }
 
 interface SignalRequestConfig {
-  networkMode?: NetworkMode;         // 'online' (default) | 'always' | 'offlineFirst'
+  networkMode?: NetworkMode; // 'online' (default) | 'always' | 'offlineFirst'
 }
 
 class RequestBase {
@@ -507,7 +507,7 @@ class RequestBase {
 the only place in the library that touches connectivity. `'online'` pauses a
 query with no network and a status of `loading`; a new `paused()` signal says
 why, since `loading` alone cannot. A paused retry must not burn an attempt, which
-means the pause check belongs *around* the retry scheduling in
+means the pause check belongs _around_ the retry scheduling in
 `CacheEntry.execute` — the same method Phase 4 rewrites, which is why both are
 deferred together. Mutation replay is an ordered queue owned by the cache, with
 `persist`-style opt-in for surviving a reload.
@@ -521,7 +521,7 @@ be what the sketch implied.
 ### What the phase is for
 
 `localStorage` is synchronous, so 0.1.0 could hydrate during injector creation and
-*know* the first render saw restored data. IndexedDB cannot answer synchronously,
+_know_ the first render saw restored data. IndexedDB cannot answer synchronously,
 so a snapshot read through it lands some time after the first mount — after the
 first fetch, if nothing holds the fetch back. Everything below is either an
 adapter or a consequence of that one sentence.
@@ -546,8 +546,8 @@ free, so one code path serves both.
 widening of an existing signature, and it is the one place this phase touches one.
 It is deliberate rather than accidental: the number keeps its meaning (how many
 values the snapshot contributed), `await persister.hydrate()` keeps compiling and
-behaving, and a caller that compared the result synchronously now gets a *compile
-error* rather than a wrong answer — the loud failure. The alternative,
+behaving, and a caller that compared the result synchronously now gets a _compile
+error_ rather than a wrong answer — the loud failure. The alternative,
 `restore(): Promise<number>` alongside a sync `hydrate(): number`, would make
 `hydrate` return `0` for async storage, which is a lie about the data rather than
 about the timing. Rejected, and recorded in the CHANGELOG under Changed.
@@ -556,9 +556,9 @@ about the timing. Rejected, and recorded in the CHANGELOG under Changed.
 
 ```ts
 export interface IndexedDbStorageOptions {
-  readonly database?: string;   // 'ng-signal-request'
-  readonly store?: string;      // 'cache'
-  readonly version?: number;    // 1
+  readonly database?: string; // 'ng-signal-request'
+  readonly store?: string; // 'cache'
+  readonly version?: number; // 1
   /** The `IDBFactory` to open from. Defaults to the global `indexedDB`. */
   readonly factory?: IDBFactory;
 }
@@ -569,7 +569,7 @@ Hand-written, one lazily-opened connection cached per storage instance, the obje
 store created on `upgradeneeded`.
 
 `factory` is an option rather than a module-level `globalThis.indexedDB` read for
-two reasons. jsdom has no IndexedDB, so the suite needs a seam that is *not*
+two reasons. jsdom has no IndexedDB, so the suite needs a seam that is _not_
 `vi.stubGlobal` — a global stub leaks into every other test in the file and into
 any test that runs concurrently — and a worker application may legitimately want a
 different factory. It is also the only way to reach `upgradeneeded` and `blocked`
@@ -592,7 +592,7 @@ and the second is what makes the acceptance criterion true.
 
 **(a) A late seed reconciles; it never clobbers.** `QueryCache.seed` on a key whose
 entry already exists calls `CacheEntry.restore(value, dataUpdatedAt)`, which today
-writes unconditionally. With an async read, "restore" can arrive *after* the
+writes unconditionally. With an async read, "restore" can arrive _after_ the
 network answered, and the stored value is by definition older — writing it would
 mean the cache regressing in time. Rule: a late seed is applied only when the
 entry has no data yet, or when the seed's `dataUpdatedAt` is **newer** than the
@@ -626,7 +626,7 @@ effect's read of `isRestoring()` is a `false`.
 
 The option is `waitForRestore`, on `SignalRequestConfig` and on
 `CachedRequestOptions`, defaulting to **`true`**. Defaulting to `true` is safe for
-existing users because the gate is only busy when a restore is *actually* async: a
+existing users because the gate is only busy when a restore is _actually_ async: a
 sync storage finishes during injector creation, so `isRestoring()` is `false`
 before any handle exists and nothing changes. It is the right default because
 "restored before the first fetch" is the entire promise of persisting.
@@ -657,7 +657,7 @@ compared by value, so an application that never sets one sees no change.
 snapshot written by 0.1.0 is still a valid `CacheSnapshot` and reading it is
 correct — bumping the number would throw away every existing snapshot on upgrade
 for no gain, which is an anti-feature. `migrate(snapshot, fromVersion)` is the
-mechanism for the bump that *does* change the shape, and it is exercised in the
+mechanism for the bump that _does_ change the shape, and it is exercised in the
 suite against synthetic `version: 0` and `version: 2` payloads:
 
 ```ts
@@ -666,7 +666,7 @@ readonly migrate?: (snapshot: CacheSnapshot, fromVersion: number) => CacheSnapsh
 
 A `migrate` that throws, or returns `null`, discards the snapshot and leaves the
 cache empty. A throw is caught, so it can never take down bootstrap — a bad
-migration is a cold first paint, not a broken application. `migrate` is *not*
+migration is a cold first paint, not a broken application. `migrate` is _not_
 called for a version that matches `SNAPSHOT_VERSION`.
 
 ### 5. `dehydrateFilter`, and one changed default
@@ -679,7 +679,7 @@ interface DehydrateOptions {
 ```
 
 The default becomes: **has data, is not fetching, and is not in an error state.**
-Today an entry that failed a refetch but still holds yesterday's value *is*
+Today an entry that failed a refetch but still holds yesterday's value _is_
 persisted, and an entry that is mid-refetch is persisted in whatever half-state
 its signals are in. Neither is worth restoring, and both are cheap to exclude. Sub
 `(entry) => boolean` rather than a filter-descriptor object, because the entry API
@@ -688,7 +688,7 @@ by state.
 
 This is a behaviour change on the persist path and goes in the CHANGELOG under
 Changed. It cannot lose data: the previous value of the same key was written by the
-previous write, and excluding a failing entry means the older *good* value stays.
+previous write, and excluding a failing entry means the older _good_ value stays.
 
 ### 6. Writes, coalescing, and the `hydrate` return value
 
@@ -708,7 +708,7 @@ method.
 
 The suite covers: async round trip through a promise-returning storage; restore
 racing the first render (a key whose snapshot is in the gate is not fetched
-before the seed lands, and *is* fetched when its key is not in the snapshot);
+before the seed lands, and _is_ fetched when its key is not in the snapshot);
 a late seed that loses to newer network data; corrupted payload; quota exceeded;
 blocked upgrade; `version` mismatch with and without `migrate`; a throwing
 `migrate`; a `buster` change; SSR no-op; and a hand-written in-memory `IDBFactory`
@@ -726,7 +726,6 @@ Known risks, stated rather than mitigated away:
   here — the snapshot is untrusted input, which is why the version check exists and
   is why `migrate` is optional.
 
-
 ## Phase 4 — `queryFn` (deferred, sketch)
 
 ```ts
@@ -736,12 +735,12 @@ createQuery<T>({
 });
 ```
 
-A second *plan* for the same `CacheEntry`, not a second cache. `FetchPlan` is
+A second _plan_ for the same `CacheEntry`, not a second cache. `FetchPlan` is
 already the seam: today it carries an `HttpClient` request, and a query would
 carry a function plus an `AbortSignal` built from the subscription the entry
 already owns. The acceptance criterion — a keyed `createRequest` and a
 `createQuery` on one key share one entry and one in-flight call — is a decoder
-requirement: the plan must be re-buildable when *either* kind of handle built it,
+requirement: the plan must be re-buildable when _either_ kind of handle built it,
 which is why `FetchPlan` already stores the request rather than a closure.
 
 ## Phase 6 — devtools depth (deferred, sketch)

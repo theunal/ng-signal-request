@@ -38,7 +38,10 @@ describe('createInfiniteRequest — accumulation', () => {
   it('loads page one and flattens it', async () => {
     const { http, create } = setup();
     const feed = create(() =>
-      createInfiniteRequest<Item[], number>((page) => ({ url: '/items', params: { page } }), feedOptions()),
+      createInfiniteRequest<Item[], number>(
+        (page) => ({ url: '/items', params: { page } }),
+        feedOptions(),
+      ),
     );
 
     await settle();
@@ -56,7 +59,10 @@ describe('createInfiniteRequest — accumulation', () => {
   it('appends pages and accumulates them in order', async () => {
     const { http, create } = setup();
     const feed = create(() =>
-      createInfiniteRequest<Item[], number>((page) => ({ url: '/items', params: { page } }), feedOptions()),
+      createInfiniteRequest<Item[], number>(
+        (page) => ({ url: '/items', params: { page } }),
+        feedOptions(),
+      ),
     );
     await settle();
     http.expectOne('/items?page=0').flush(pages[0]);
@@ -89,7 +95,10 @@ describe('createInfiniteRequest — accumulation', () => {
     // Not a timeout, not a microtask drain: the entry's own promise, so `await` means "arrived".
     const { http, create } = setup();
     const feed = create(() =>
-      createInfiniteRequest<Item[], number>((page) => ({ url: '/items', params: { page } }), feedOptions()),
+      createInfiniteRequest<Item[], number>(
+        (page) => ({ url: '/items', params: { page } }),
+        feedOptions(),
+      ),
     );
     await settle();
     http.expectOne('/items?page=0').flush(pages[0]);
@@ -113,7 +122,10 @@ describe('createInfiniteRequest — accumulation', () => {
   it('fetchNextPage is a no-op when there is no next page', async () => {
     const { http, create } = setup();
     const feed = create(() =>
-      createInfiniteRequest<Item[], number>((page) => ({ url: '/items', params: { page } }), feedOptions()),
+      createInfiniteRequest<Item[], number>(
+        (page) => ({ url: '/items', params: { page } }),
+        feedOptions(),
+      ),
     );
     await settle();
     http.expectOne('/items?page=0').flush(pages[2]); // the short page, so there is no next
@@ -132,7 +144,10 @@ describe('createInfiniteRequest — accumulation', () => {
   it('prepends with getPreviousPageParam, and says so when there is none', async () => {
     const { http, create } = setup();
     const oneWay = create(() =>
-      createInfiniteRequest<Item[], number>((page) => ({ url: '/items', params: { page } }), feedOptions()),
+      createInfiniteRequest<Item[], number>(
+        (page) => ({ url: '/items', params: { page } }),
+        feedOptions(),
+      ),
     );
     // Without the option, "previous" does not exist — and says so rather than pretending.
     expect(oneWay.hasPreviousPage()).toBe(false);
@@ -167,7 +182,10 @@ describe('createInfiniteRequest — accumulation', () => {
   it('exposes isFetchingNextPage separately from isFetching', async () => {
     const { http, create } = setup();
     const feed = create(() =>
-      createInfiniteRequest<Item[], number>((page) => ({ url: '/items', params: { page } }), feedOptions()),
+      createInfiniteRequest<Item[], number>(
+        (page) => ({ url: '/items', params: { page } }),
+        feedOptions(),
+      ),
     );
     await settle();
     http.expectOne('/items?page=0').flush(pages[0]);
@@ -194,7 +212,10 @@ describe('createInfiniteRequest — each page is a real entry', () => {
     const client = create(() => inject(QueryClient));
 
     const feed = create(() =>
-      createInfiniteRequest<Item[], number>((page) => ({ url: '/items', params: { page } }), feedOptions()),
+      createInfiniteRequest<Item[], number>(
+        (page) => ({ url: '/items', params: { page } }),
+        feedOptions(),
+      ),
     );
     await settle();
     http.expectOne('/items?page=0').flush(pages[0]);
@@ -228,9 +249,16 @@ describe('createInfiniteRequest — each page is a real entry', () => {
     const { http, create } = setup();
 
     const feed = create(() =>
-      createInfiniteRequest<Item[], number>((page) => ({ url: '/items', params: { page } }), feedOptions()),
+      createInfiniteRequest<Item[], number>(
+        (page) => ({ url: '/items', params: { page } }),
+        feedOptions(),
+      ),
     );
-    const samePage = create(() => createRequest<Item[]>(() => ({ url: '/items', params: { page: 0 } }), { key: () => ['items', 0] }));
+    const samePage = create(() =>
+      createRequest<Item[]>(() => ({ url: '/items', params: { page: 0 } }), {
+        key: () => ['items', 0],
+      }),
+    );
 
     await settle();
     // One request, even though two handles are watching it.
@@ -250,7 +278,10 @@ describe('createInfiniteRequest — each page is a real entry', () => {
     // settle. Each page being its own entry means a reload *replaces*.
     const { http, create } = setup();
     const feed = create(() =>
-      createInfiniteRequest<Item[], number>((page) => ({ url: '/items', params: { page } }), feedOptions()),
+      createInfiniteRequest<Item[], number>(
+        (page) => ({ url: '/items', params: { page } }),
+        feedOptions(),
+      ),
     );
     await settle();
     http.expectOne('/items?page=0').flush(pages[0]);
@@ -290,7 +321,8 @@ describe('createInfiniteRequest — filters, maxPages, teardown', () => {
         {
           key: () => ['items', { filter: filter() }],
           initialPageParam: 0,
-          getNextPageParam: (last, _all, param) => (last && last.length === 2 ? param + 1 : undefined),
+          getNextPageParam: (last, _all, param) =>
+            last && last.length === 2 ? param + 1 : undefined,
         },
       ),
     );
@@ -387,7 +419,10 @@ describe('createInfiniteRequest — filters, maxPages, teardown', () => {
   it('destroy returns every page entry to zero observers', async () => {
     const { http, create } = setup();
     const feed = create(() =>
-      createInfiniteRequest<Item[], number>((page) => ({ url: '/items', params: { page } }), feedOptions()),
+      createInfiniteRequest<Item[], number>(
+        (page) => ({ url: '/items', params: { page } }),
+        feedOptions(),
+      ),
     );
     await settle();
     http.expectOne('/items?page=0').flush(pages[0]);
@@ -409,7 +444,10 @@ describe('createInfiniteRequest — filters, maxPages, teardown', () => {
   it('remove() clears the accumulation but keeps the cache', async () => {
     const { http, create } = setup();
     const feed = create(() =>
-      createInfiniteRequest<Item[], number>((page) => ({ url: '/items', params: { page } }), feedOptions()),
+      createInfiniteRequest<Item[], number>(
+        (page) => ({ url: '/items', params: { page } }),
+        feedOptions(),
+      ),
     );
     await settle();
     http.expectOne('/items?page=0').flush(pages[0]);
@@ -430,7 +468,10 @@ describe('createInfiniteRequest — types', () => {
   it('flattens an array page and leaves an envelope alone', () => {
     const { create } = setup();
     const flat = create(() =>
-      createInfiniteRequest<Item[], number>((page) => ({ url: '/items', params: { page } }), feedOptions()),
+      createInfiniteRequest<Item[], number>(
+        (page) => ({ url: '/items', params: { page } }),
+        feedOptions(),
+      ),
     );
     expectTypeOf(flat).toEqualTypeOf<InfiniteRequest<Item[], number>>();
     expectTypeOf(flat.pages).toEqualTypeOf<Signal<readonly Item[][]>>();
@@ -488,7 +529,9 @@ describe('createInfiniteRequest — the rest of the surface', () => {
     expect(feed.status()).toBe('loading');
     expect(feed.loading()).toBe(true);
 
-    http.expectOne('/items?page=0').flush({ message: 'down' }, { status: 500, statusText: 'Error' });
+    http
+      .expectOne('/items?page=0')
+      .flush({ message: 'down' }, { status: 500, statusText: 'Error' });
     await settle();
 
     expect(feed.status()).toBe('error');
@@ -653,20 +696,19 @@ describe('createInfiniteRequest — the rest of the surface', () => {
     }
     const { http, create } = setup();
     const feed = create(() =>
-      createInfiniteRequest<Envelope, string>(
-        (cursor) => ({ url: '/feed', params: { cursor } }),
-        {
-          key: () => ['feed'],
-          initialPageParam: '',
-          getNextPageParam: (last) => last?.cursor ?? undefined,
-        },
-      ),
+      createInfiniteRequest<Envelope, string>((cursor) => ({ url: '/feed', params: { cursor } }), {
+        key: () => ['feed'],
+        initialPageParam: '',
+        getNextPageParam: (last) => last?.cursor ?? undefined,
+      }),
     );
     await settle();
-    http.expectOne((request) => request.url === '/feed').flush({
-      items: [{ id: 1 }],
-      cursor: null,
-    });
+    http
+      .expectOne((request) => request.url === '/feed')
+      .flush({
+        items: [{ id: 1 }],
+        cursor: null,
+      });
     await settle();
 
     expect(feed.response()).toEqual([{ items: [{ id: 1 }], cursor: null }]);

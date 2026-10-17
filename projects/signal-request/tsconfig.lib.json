@@ -11,15 +11,8 @@
     "declarationMap": true,
     "types": []
   },
-  "include": [
-    "src/**/*.ts",
-    "testing/**/*.ts",
-    "devtools/**/*.ts",
-    "persist/**/*.ts"
-  ],
-  "exclude": [
-    "**/*.spec.ts"
-  ],
+  "include": ["src/**/*.ts", "testing/**/*.ts", "devtools/**/*.ts", "persist/**/*.ts"],
+  "exclude": ["**/*.spec.ts"],
   "angularCompilerOptions": {
     "extendedDiagnostics": {
       "checks": {

@@ -32,7 +32,8 @@ export class MutationRegistry {
     this.total.update((n) => n + 1);
     if (!mutationKey) return;
     const normalized = normalizeKey(mutationKey);
-    if (!this.segments.has(normalized.hash)) this.segments.set(normalized.hash, normalized.segments);
+    if (!this.segments.has(normalized.hash))
+      this.segments.set(normalized.hash, normalized.segments);
     this.byKey.update((current) => {
       const next = new Map(current);
       next.set(normalized.hash, (next.get(normalized.hash) ?? 0) + 1);

@@ -217,8 +217,7 @@ describe('createRequests() — the dynamic set', () => {
     const rows = create(() =>
       createRequests(
         () => ids(),
-        (id) =>
-          createRequest<string>(() => ({ url: `/rows/${id}` }), { key: () => ['rows', id] }),
+        (id) => createRequest<string>(() => ({ url: `/rows/${id}` }), { key: () => ['rows', id] }),
       ),
     );
     expectTypeOf(rows).toEqualTypeOf<RequestSet<string>>();
@@ -245,8 +244,7 @@ describe('createRequests() — the dynamic set', () => {
     const rows = create(() =>
       createRequests(
         () => ids(),
-        (id) =>
-          createRequest<string>(() => ({ url: `/rows/${id}` }), { key: () => ['rows', id] }),
+        (id) => createRequest<string>(() => ({ url: `/rows/${id}` }), { key: () => ['rows', id] }),
       ),
     );
     await settle();
@@ -308,8 +306,7 @@ describe('createRequests() — the dynamic set', () => {
     const rows = create(() =>
       createRequests(
         () => ids(),
-        (id) =>
-          createRequest<string>(() => ({ url: `/rows/${id}` }), { key: () => ['rows', id] }),
+        (id) => createRequest<string>(() => ({ url: `/rows/${id}` }), { key: () => ['rows', id] }),
       ),
     );
     await settle();
@@ -412,8 +409,11 @@ describe('createRequests() — the dynamic set', () => {
 
   it('names the failing call with its full path', () => {
     setup();
-    expect(() => createRequests(() => [1], (id) => createRequest<string>(() => `/rows/${id}`))).toThrowError(
-      /createRequests/,
-    );
+    expect(() =>
+      createRequests(
+        () => [1],
+        (id) => createRequest<string>(() => `/rows/${id}`),
+      ),
+    ).toThrowError(/createRequests/);
   });
 });

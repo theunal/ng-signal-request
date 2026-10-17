@@ -14,13 +14,18 @@ interface SearchParams {
       <h2>3 · Debounce — <code>createRequest</code></h2>
       <p class="hint">
         Her tuş vuruşunda istek atılmıyor; yazma durduktan
-        <strong>{{ 300 }}ms</strong> sonra tek istek gidiyor. Sayaç aynı kelime için kaç
-        istek atıldığını gösteriyor.
+        <strong>{{ 300 }}ms</strong> sonra tek istek gidiyor. Sayaç aynı kelime için kaç istek
+        atıldığını gösteriyor.
       </p>
 
       <label class="block">
         Arama
-        <input type="search" [value]="term()" (input)="onTerm($event)" placeholder="yazmaya başla…" />
+        <input
+          type="search"
+          [value]="term()"
+          (input)="onTerm($event)"
+          placeholder="yazmaya başla…"
+        />
       </label>
 
       <div class="status">
@@ -46,7 +51,9 @@ interface SearchParams {
     </section>
 
     <section class="card">
-      <h2>Retry — <code>{{ '/api/flaky' }}</code></h2>
+      <h2>
+        Retry — <code>{{ '/api/flaky' }}</code>
+      </h2>
       <p class="hint">
         Demo interceptor'ı bu adrese ilk iki istekte <code>503</code> döndürüyor.
         <code>retry: 3</code> ile üçüncü denemede başarılı oluyor ve
@@ -79,8 +86,8 @@ interface SearchParams {
     <section class="card">
       <h2>Polling — <code>pollInterval</code></h2>
       <p class="hint">
-        Sayaç, <code>running()</code> true olduğu sürece 2 saniyede bir kendini yeniden
-        çekiyor. Kapatınca polling de duruyor — aralık reaktif bir fonksiyon.
+        Sayaç, <code>running()</code> true olduğu sürece 2 saniyede bir kendini yeniden çekiyor.
+        Kapatınca polling de duruyor — aralık reaktif bir fonksiyon.
       </p>
 
       <div class="row">
@@ -232,10 +239,7 @@ export class RetrySection {
     },
   );
 
-  protected readonly raw = createRequest<string>(
-    { url: '/posts/1' },
-    { lazy: true, retry: 0 },
-  );
+  protected readonly raw = createRequest<string>({ url: '/posts/1' }, { lazy: true, retry: 0 });
 
   protected onTerm(event: Event): void {
     const q = (event.target as HTMLInputElement).value;

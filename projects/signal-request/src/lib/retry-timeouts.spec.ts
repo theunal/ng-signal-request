@@ -38,7 +38,9 @@ describe('retryTimeouts', () => {
 
   it('retries a timeout by default, which is the 0.1.x behaviour', async () => {
     const { http, create } = setup();
-    const r = create(() => createRequest<number>('/slow', { timeout: 30, retry: { count: 2, delay: 5 } }));
+    const r = create(() =>
+      createRequest<number>('/slow', { timeout: 30, retry: { count: 2, delay: 5 } }),
+    );
 
     await settle();
     http.expectOne('/slow').error(abortEvent('TimeoutError'), timedOut);
@@ -87,7 +89,9 @@ describe('retryTimeouts', () => {
 
   it('reads the global setting when the request does not set one', async () => {
     const { http, create } = setup([provideSignalRequest({ retryTimeouts: false })]);
-    const r = create(() => createRequest<number>('/slow', { timeout: 30, retry: { count: 1, delay: 5 } }));
+    const r = create(() =>
+      createRequest<number>('/slow', { timeout: 30, retry: { count: 1, delay: 5 } }),
+    );
 
     await settle();
     http.expectOne('/slow').error(abortEvent('TimeoutError'), timedOut);
@@ -100,7 +104,11 @@ describe('retryTimeouts', () => {
   it('lets a request turn retries back on over a global `false`', async () => {
     const { http, create } = setup([provideSignalRequest({ retryTimeouts: false })]);
     const r = create(() =>
-      createRequest<number>('/slow', { timeout: 30, retry: { count: 1, delay: 5 }, retryTimeouts: true }),
+      createRequest<number>('/slow', {
+        timeout: 30,
+        retry: { count: 1, delay: 5 },
+        retryTimeouts: true,
+      }),
     );
 
     await settle();
@@ -121,7 +129,11 @@ describe('retryTimeouts', () => {
     // retries off for *it* would be a different feature with a much worse default.
     const { http, create } = setup();
     const r = create(() =>
-      createRequest<number>('/n', { timeout: 30, retry: { count: 1, delay: 5 }, retryTimeouts: false }),
+      createRequest<number>('/n', {
+        timeout: 30,
+        retry: { count: 1, delay: 5 },
+        retryTimeouts: false,
+      }),
     );
 
     await settle();

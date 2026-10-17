@@ -20,12 +20,12 @@ pnpm check:api v0.1.0       # export diff, working tree against a tag
 `angular.json`, so the totals are printed on every run and the thresholds are
 enforced by the builder rather than by a reviewer.
 
-| Metric | Measured | Threshold in `angular.json` | Margin |
-| --- | --- | --- | --- |
-| Statements | 95.8% (2012/2100) | 90 | 5.8 |
-| Branches | 89.96% (986/1096) | 85 | 4.96 |
-| Functions | 96.27% (465/483) | 90 | 6.27 |
-| Lines | 97.84% (1682/1719) | 90 | 7.84 |
+| Metric     | Measured           | Threshold in `angular.json` | Margin |
+| ---------- | ------------------ | --------------------------- | ------ |
+| Statements | 95.8% (2012/2100)  | 90                          | 5.8    |
+| Branches   | 89.96% (986/1096)  | 85                          | 4.96   |
+| Functions  | 96.27% (465/483)   | 90                          | 6.27   |
+| Lines      | 97.84% (1682/1719) | 90                          | 7.84   |
 
 360 tests in 15 files, all passing.
 
@@ -48,12 +48,12 @@ restored; `check:dist` later confirmed the working tree was clean.
 Measured from a production build of the library (`pnpm build`), reporting the
 gzip size of each FESM bundle. These are the numbers `pnpm check:dist` prints.
 
-| Entry point | Raw | Gzip | Budget | Headroom |
-| --- | --- | --- | --- | --- |
-| `ng-signal-request` | 74.3 KB | **15.9 KB** | 20 KB | 4.1 KB |
-| `ng-signal-request/devtools` | 8.5 KB | 2.3 KB | 15 KB | 12.7 KB |
-| `ng-signal-request/persist` | 7.0 KB | 2.3 KB | 15 KB | 12.7 KB |
-| `ng-signal-request/testing` | 1.8 KB | 0.8 KB | 15 KB | 14.2 KB |
+| Entry point                  | Raw     | Gzip        | Budget | Headroom |
+| ---------------------------- | ------- | ----------- | ------ | -------- |
+| `ng-signal-request`          | 74.3 KB | **15.9 KB** | 20 KB  | 4.1 KB   |
+| `ng-signal-request/devtools` | 8.5 KB  | 2.3 KB      | 15 KB  | 12.7 KB  |
+| `ng-signal-request/persist`  | 7.0 KB  | 2.3 KB      | 15 KB  | 12.7 KB  |
+| `ng-signal-request/testing`  | 1.8 KB  | 0.8 KB      | 15 KB  | 14.2 KB  |
 
 The demo application's initial bundle after `pnpm build:demo` is 230.91 KB raw /
 66.78 KB over the wire. It is not a budget — it is the number the tree-shaking
@@ -63,7 +63,7 @@ check is run against, and having it recorded makes a leak visible as a delta.
 
 `pnpm check:dist` searches the demo's production bundle for strings that only
 exist inside `projects/signal-request/devtools/` and
-`projects/signal-request/persist/`, while asserting that core strings *are*
+`projects/signal-request/persist/`, while asserting that core strings _are_
 present. The second half matters: "no devtools strings found" would also be the
 result of an audit that searched nothing, or an app that does not use the library
 at all.
@@ -133,11 +133,11 @@ instruction to `git fetch --tags`, instead of a raw git stack trace.
 The README was audited against the code, not skimmed. Three statements did not
 match reality:
 
-| Location | Claim | Reality | Fix |
-| --- | --- | --- | --- |
-| TanStack comparison, "Errors" row | predicates named `isHttp`, `isTimeout` | The predicates are methods: `http()`, `timeout()`, `network()`, `aborted()`, `unknown()`, plus a `message` getter (`errors.ts`) | Row rewritten to name the real methods |
-| `/testing` entry point list | `setup · settle · respond · fail · isHttpError` | Also exports `cache`, `advanceClock`, and the `TestSetup` / `ChildScope` types | List completed |
-| Bundle section prose | "ships as three entry points" | Four: core, `/devtools`, `/persist`, `/testing` (the table below it already listed four) | Corrected to "four" |
+| Location                          | Claim                                           | Reality                                                                                                                         | Fix                                    |
+| --------------------------------- | ----------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------- |
+| TanStack comparison, "Errors" row | predicates named `isHttp`, `isTimeout`          | The predicates are methods: `http()`, `timeout()`, `network()`, `aborted()`, `unknown()`, plus a `message` getter (`errors.ts`) | Row rewritten to name the real methods |
+| `/testing` entry point list       | `setup · settle · respond · fail · isHttpError` | Also exports `cache`, `advanceClock`, and the `TestSetup` / `ChildScope` types                                                  | List completed                         |
+| Bundle section prose              | "ships as three entry points"                   | Four: core, `/devtools`, `/persist`, `/testing` (the table below it already listed four)                                        | Corrected to "four"                    |
 
 A fourth claim — "Requests are not deduplicated" and the absence of `select` /
 infinite queries — had already been corrected during the 0.1.0 work; the current
@@ -156,10 +156,10 @@ exports.
 ### Claims checked and confirmed true
 
 - `RequestErrorKind` really is five kinds (`aborted | timeout | http | network |
-  unknown`) — `errors.ts`. `RequestErrorView` really carries per-kind predicates
+unknown`) — `errors.ts`. `RequestErrorView` really carries per-kind predicates
   and a `message` getter, not a `switch` target.
 - `debounce` + `ctx.chain()` really throws: `ctx.chain() is only available in
-  auto mode without \`debounce\`` (`create-request.ts:72`).
+auto mode without \`debounce\`` (`create-request.ts:72`).
 - The global `retry` really applies to queries only: `create-mutation.ts` resolves
   `normalizeRetry(options.retry)` with no `config.retry` fallback.
 - `retryAttempt()` really survives retry exhaustion (asserted in `errors.spec.ts`)
@@ -167,12 +167,12 @@ exports.
 - Bundle budgets in the README (20 KB core, 15 KB secondary) match `BUDGETS` in
   `scripts/check-dist.mjs`, so the prose and the gate cannot drift apart quietly.
 
-## 6. What this verification does *not* establish
+## 6. What this verification does _not_ establish
 
 - The export diff is textual. It proves no name disappeared; it does not prove a
   surviving name kept its shape. Behavioural compatibility rests on the 0.1.0
   test suite, which was never modified while 0.1.0 was built.
-- `check:dist` proves the *demo* does not link `/devtools`. A different
+- `check:dist` proves the _demo_ does not link `/devtools`. A different
   application could import them and get exactly what it asked for; that is the
   intended contract, not a gap.
 - Coverage says which lines ran, not whether the assertions were meaningful. The
@@ -185,15 +185,15 @@ exports.
 
 The plan for 0.2.0 asks for the 0.1.0 numbers to be re-measured rather than
 inherited, and they were — on the Phase 5 tree, before Step 0.1 touched anything.
-The figures in sections 1–4 held. Two *other* things did not, and both are recorded
+The figures in sections 1–4 held. Two _other_ things did not, and both are recorded
 where they belong rather than quietly fixed:
 
-| Check | Previous report | This machine, this run |
-| --- | --- | --- |
-| Test suite on the clean tree | 413 passing | 413 collected, **2 failed** — the two perf ceilings |
-| Coverage on the clean tree | 96.06 / 90.39 / 96.65 / 97.95 | the failing run printed no summary; after the fixes, 96.49 / 91.02 / 96.88 / 98.19 |
-| `pnpm verify` | exit 0 | **exit 1** |
-| `pnpm bench` | exit 0, four lines | exit 0 on the first run, **5 s timeout** on a later one |
+| Check                        | Previous report               | This machine, this run                                                             |
+| ---------------------------- | ----------------------------- | ---------------------------------------------------------------------------------- |
+| Test suite on the clean tree | 413 passing                   | 413 collected, **2 failed** — the two perf ceilings                                |
+| Coverage on the clean tree   | 96.06 / 90.39 / 96.65 / 97.95 | the failing run printed no summary; after the fixes, 96.49 / 91.02 / 96.88 / 98.19 |
+| `pnpm verify`                | exit 0                        | **exit 1**                                                                         |
+| `pnpm bench`                 | exit 0, four lines            | exit 0 on the first run, **5 s timeout** on a later one                            |
 
 The `check:api` figure (76 exports, 0 removed) and the core bundle size were
 re-measured after Step 0.1 and are recorded in the 0.2.0 report; they did not move.
@@ -202,7 +202,7 @@ re-measured after Step 0.1 and are recorded in the 0.2.0 report; they did not mo
    in a run with it.** Under `pnpm test`, v8 coverage inflates the capped loop to
    67–71 µs/op, so `pnpm verify` — which is the command the acceptance criteria name
    — was red. Fixed by scoping the tight ceiling to `pnpm bench` and adding a
-   machine-independent *shape* assertion; the full account is in `docs/perf.md`
+   machine-independent _shape_ assertion; the full account is in `docs/perf.md`
    under "Two ceilings, not one".
 2. **The default 5-second test timeout is too short for a 200,000-iteration loop**
    on a loaded machine, so `pnpm bench` could report a timeout instead of a number.
@@ -227,4 +227,3 @@ devtools label counting staged values — which is what moved branches from 90.2
 91.02. The rest are defensive paths (a callback reassigned twice, a plan that was
 never built) and are listed here rather than tested so that nobody mistakes them
 for coverage.
-

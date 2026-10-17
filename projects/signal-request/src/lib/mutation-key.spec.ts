@@ -93,12 +93,15 @@ describe('createMutation — onMutate', () => {
   it('awaits an async onMutate before sending', async () => {
     const { http, create } = setup();
     const save = create(() =>
-      createMutation<number, string, { prepared: string }>((title) => ({ url: '/todos', body: { title } }), {
-        onMutate: async (title) => {
-          await Promise.resolve();
-          return { prepared: title };
+      createMutation<number, string, { prepared: string }>(
+        (title) => ({ url: '/todos', body: { title } }),
+        {
+          onMutate: async (title) => {
+            await Promise.resolve();
+            return { prepared: title };
+          },
         },
-      }),
+      ),
     );
 
     const p = save.run('write');
@@ -145,9 +148,12 @@ describe('createMutation — onMutate', () => {
   it('clears the context on reset()', async () => {
     const { http, create } = setup();
     const save = create(() =>
-      createMutation<number, string, { title: string }>((title) => ({ url: '/todos', body: { title } }), {
-        onMutate: (title) => ({ title }),
-      }),
+      createMutation<number, string, { title: string }>(
+        (title) => ({ url: '/todos', body: { title } }),
+        {
+          onMutate: (title) => ({ title }),
+        },
+      ),
     );
     const p = save.run('write');
     await dispatch();
@@ -173,28 +179,34 @@ describe('createMutation — optimistic target by key', () => {
     await settle();
 
     const save = create(() =>
-      createMutation<Todo[], Todo>(
-        (draft) => ({ url: '/todos', body: draft }),
-        {
-          optimistic: (todos, draft) => [...(todos ?? []), draft],
-          target: ['todos'],
-          invalidates: () => [['todos']],
-        },
-      ),
+      createMutation<Todo[], Todo>((draft) => ({ url: '/todos', body: draft }), {
+        optimistic: (todos, draft) => [...(todos ?? []), draft],
+        target: ['todos'],
+        invalidates: () => [['todos']],
+      }),
     );
 
     const p = save.run({ id: 2, title: 'new' });
     // Visible in the list before the server answered.
-    expect(list.response()).toEqual([{ id: 1, title: 'existing' }, { id: 2, title: 'new' }]);
+    expect(list.response()).toEqual([
+      { id: 1, title: 'existing' },
+      { id: 2, title: 'new' },
+    ]);
 
     http.expectOne('/todos?id=2&title=new').flush(2, { status: 201, statusText: 'Created' });
     await p;
     await settle();
 
     // …and replaced by the real list once the invalidation came back.
-    http.expectOne('/todos').flush([{ id: 1, title: 'existing' }, { id: 2, title: 'new' }]);
+    http.expectOne('/todos').flush([
+      { id: 1, title: 'existing' },
+      { id: 2, title: 'new' },
+    ]);
     await settle();
-    expect(list.response()).toEqual([{ id: 1, title: 'existing' }, { id: 2, title: 'new' }]);
+    expect(list.response()).toEqual([
+      { id: 1, title: 'existing' },
+      { id: 2, title: 'new' },
+    ]);
 
     list.destroy();
     save.destroy();
@@ -210,10 +222,10 @@ describe('createMutation — optimistic target by key', () => {
     await settle();
 
     const save = create(() =>
-      createMutation<Todo[], Todo>(
-        (draft) => ({ url: '/todos', body: draft }),
-        { optimistic: (todos, draft) => [...(todos ?? []), draft], target: ['todos'] },
-      ),
+      createMutation<Todo[], Todo>((draft) => ({ url: '/todos', body: draft }), {
+        optimistic: (todos, draft) => [...(todos ?? []), draft],
+        target: ['todos'],
+      }),
     );
 
     const p = save.tryRun({ id: 2, title: 'new' });
@@ -223,8 +235,7 @@ describe('createMutation — optimistic target by key', () => {
     await p;
     await settle();
 
-    expect(list.response())
-      .toEqual([{ id: 1, title: 'existing' }]);
+    expect(list.response()).toEqual([{ id: 1, title: 'existing' }]);
 
     list.destroy();
     save.destroy();
@@ -235,10 +246,10 @@ describe('createMutation — optimistic target by key', () => {
     // entry would produce one that can never fetch and that nothing subscribes to.
     const { http, create } = setup();
     const save = create(() =>
-      createMutation<Todo[], Todo>(
-        (draft) => ({ url: '/todos', body: draft }),
-        { optimistic: (todos, draft) => [...(todos ?? []), draft], target: ['todos'] },
-      ),
+      createMutation<Todo[], Todo>((draft) => ({ url: '/todos', body: draft }), {
+        optimistic: (todos, draft) => [...(todos ?? []), draft],
+        target: ['todos'],
+      }),
     );
 
     const p = save.run({ id: 1, title: 'x' });

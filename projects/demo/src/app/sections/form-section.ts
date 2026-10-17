@@ -21,24 +21,39 @@ interface PostArgs {
       <h2>2 · Form — <code>createMutation</code></h2>
       <p class="hint">
         Aynı form iki mutation kullanıyor: <code>exhaust</code> (çift tıklama koruması) ve
-        <code>parallel</code>. <code>invalidates</code> sayesinde kaydettikten sonra liste
-        otomatik yenileniyor.
+        <code>parallel</code>. <code>invalidates</code> sayesinde kaydettikten sonra liste otomatik
+        yenileniyor.
       </p>
 
       <form (submit)="create($event)">
         <div class="row">
           <label class="grow">
             Başlık
-            <input name="title" [value]="title()" (input)="title.set($any($event.target).value)" required />
+            <input
+              name="title"
+              [value]="title()"
+              (input)="title.set($any($event.target).value)"
+              required
+            />
           </label>
           <label>
             Kullanıcı
-            <input type="number" name="userId" [value]="userId()" (input)="userId.set(+$any($event.target).value)" />
+            <input
+              type="number"
+              name="userId"
+              [value]="userId()"
+              (input)="userId.set(+$any($event.target).value)"
+            />
           </label>
         </div>
         <label class="block">
           Gövde
-          <textarea name="body" rows="3" [value]="body()" (input)="body.set($any($event.target).value)"></textarea>
+          <textarea
+            name="body"
+            rows="3"
+            [value]="body()"
+            (input)="body.set($any($event.target).value)"
+          ></textarea>
         </label>
 
         <div class="row">
@@ -51,7 +66,9 @@ interface PostArgs {
 
       <div class="status">
         <span class="badge" [class]="'badge ' + save.status()">exhaust: {{ save.status() }}</span>
-        <span class="badge" [class]="'badge ' + rapid.status()">parallel: {{ rapid.status() }}</span>
+        <span class="badge" [class]="'badge ' + rapid.status()"
+          >parallel: {{ rapid.status() }}</span
+        >
         @if (save.loading() || rapid.loading()) {
           <span class="badge busy">loading</span>
         }
@@ -62,13 +79,15 @@ interface PostArgs {
 
       @if (parallelHits() > 1) {
         <p class="hint">
-          parallel: {{ parallelHits() }} istek uçtu. exhaust ise yalnızca 1 tanesini
-          kabul edip diğerlerinde aynı promise'ı döndürür.
+          parallel: {{ parallelHits() }} istek uçtu. exhaust ise yalnızca 1 tanesini kabul edip
+          diğerlerinde aynı promise'ı döndürür.
         </p>
       }
 
       @if (lastSaved(); as saved) {
-        <p class="hint">Son cevap: <strong>#{{ saved.id }}</strong> — {{ saved.title }}</p>
+        <p class="hint">
+          Son cevap: <strong>#{{ saved.id }}</strong> — {{ saved.title }}
+        </p>
       }
     </section>
 
@@ -79,10 +98,9 @@ interface PostArgs {
         <button (click)="updateFirst()">İlkini güncelle (PUT)</button>
       </div>
       <p class="hint">
-        JSONPlaceholder yazma işlemlerini kabul eder (201 / 200 döner) ama saklamaz. Bu
-        yüzden kayıtlar bir <code>reload()</code> sonrası kaybolur — demo bunu gizlemek
-        yerine gösteriyor. <code>invalidates</code> tetikleyicisi çalıştığını bu sayede
-        izleyebilirsin.
+        JSONPlaceholder yazma işlemlerini kabul eder (201 / 200 döner) ama saklamaz. Bu yüzden
+        kayıtlar bir <code>reload()</code> sonrası kaybolur — demo bunu gizlemek yerine gösteriyor.
+        <code>invalidates</code> tetikleyicisi çalıştığını bu sayede izleyebilirsin.
       </p>
     </section>
   `,
@@ -99,22 +117,22 @@ export class FormSection {
   // Note: no explicit `SignalRequest<...>` annotation here. Writing the type by hand would
   // discard the narrowing that `initialValue: []` buys us (`response()` would go back to
   // `LocalPost[] | undefined`).
-  private readonly posts = createRequest<LocalPost[]>({ url: '/posts' }, { initialValue: [], retry: 0 });
+  private readonly posts = createRequest<LocalPost[]>(
+    { url: '/posts' },
+    { initialValue: [], retry: 0 },
+  );
 
   /**
    * The builder stays a bare url: `args` carries `path` and `body`, and the library routes
    * them into the request. `concurrency: 'exhaust'` returns the in-flight promise instead
    * of firing again, which is double-click protection.
    */
-  protected readonly save = createMutation<Post, PostArgs>(
-    () => '/posts',
-    {
-      concurrency: 'exhaust',
-      invalidates: () => [this.posts],
-      onSuccess: (post) => this.lastSaved.set({ ...post, local: true }),
-      onError: (error) => console.warn('kaydetme hatası:', error.message),
-    },
-  );
+  protected readonly save = createMutation<Post, PostArgs>(() => '/posts', {
+    concurrency: 'exhaust',
+    invalidates: () => [this.posts],
+    onSuccess: (post) => this.lastSaved.set({ ...post, local: true }),
+    onError: (error) => console.warn('kaydetme hatası:', error.message),
+  });
 
   /** Same endpoint, but every call goes out. */
   protected readonly rapid = createMutation<Post, PostArgs>(() => '/posts', {
@@ -155,14 +173,16 @@ export class FormSection {
     });
   }
 
-  private readonly deletePost = createMutation.delete<unknown, { path: { id: number } }>(() => ({
-    url: '/posts/:id',
-  }), { invalidates: () => [this.posts] });
-
-  private readonly updatePost = createMutation.put<Post, PostArgs>(
-    () => ({ url: '/posts/:id' }),
+  private readonly deletePost = createMutation.delete<unknown, { path: { id: number } }>(
+    () => ({
+      url: '/posts/:id',
+    }),
     { invalidates: () => [this.posts] },
   );
+
+  private readonly updatePost = createMutation.put<Post, PostArgs>(() => ({ url: '/posts/:id' }), {
+    invalidates: () => [this.posts],
+  });
 
   protected async remove(): Promise<void> {
     const first = this.posts.response()[0];

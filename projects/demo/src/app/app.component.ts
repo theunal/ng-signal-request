@@ -26,9 +26,18 @@ type Tab = 'list' | 'form' | 'retry' | 'infinite' | 'cache';
     <div class="notice">
       <strong>Demo API hakkında:</strong> JSONPlaceholder sahte bir API'dir.
       <ul>
-        <li>Arama (<code>q</code>) sunucuda gerçekten filtrelemez — bu yüzden filtreleme demo'da yerelde yapılıyor.</li>
-        <li>Yazma işlemleri (POST / PUT / DELETE) kabul edilir ama <strong>saklanmaz</strong>; <code>reload()</code> sonrası kayıtlar kaybolur.</li>
-        <li>Gecikme ve 503 üretmek için <code>/api/*</code> adreslerini araya giren bir demo interceptor'ı var.</li>
+        <li>
+          Arama (<code>q</code>) sunucuda gerçekten filtrelemez — bu yüzden filtreleme demo'da
+          yerelde yapılıyor.
+        </li>
+        <li>
+          Yazma işlemleri (POST / PUT / DELETE) kabul edilir ama <strong>saklanmaz</strong>;
+          <code>reload()</code> sonrası kayıtlar kaybolur.
+        </li>
+        <li>
+          Gecikme ve 503 üretmek için <code>/api/*</code> adreslerini araya giren bir demo
+          interceptor'ı var.
+        </li>
       </ul>
     </div>
 

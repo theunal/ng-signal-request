@@ -61,10 +61,17 @@ function exportedNames(text) {
   for (const block of text.matchAll(/export\s+(?:type\s+)?\{([^}]*)\}/g)) {
     for (const entry of block[1].split(',')) {
       // Drop comments before anything else: a commented-out export is not an export.
-      const cleaned = entry.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '').trim();
+      const cleaned = entry
+        .replace(/\/\*[\s\S]*?\*\//g, '')
+        .replace(/\/\/[^\n]*/g, '')
+        .trim();
       if (!cleaned) continue;
       // `a as b` exports `b`; a leading `type ` (as in `type F`) is a modifier, not the name.
-      const name = cleaned.split(/\s+as\s+/).pop().replace(/^type\s+/, '').trim();
+      const name = cleaned
+        .split(/\s+as\s+/)
+        .pop()
+        .replace(/^type\s+/, '')
+        .trim();
       if (name) names.add(name);
     }
   }
@@ -97,7 +104,9 @@ if (before.size === 0 || after.size === 0) {
 const removed = [...before].filter((name) => !after.has(name)).sort();
 const added = [...after].filter((name) => !before.has(name)).sort();
 
-console.log(`comparing ${oldApi.label} (${before.size} exports) -> ${newApi.label} (${after.size} exports)`);
+console.log(
+  `comparing ${oldApi.label} (${before.size} exports) -> ${newApi.label} (${after.size} exports)`,
+);
 console.log(`added   ${added.length}: ${added.join(', ') || '(none)'}`);
 console.log(`removed ${removed.length}: ${removed.join(', ') || '(none)'}`);
 

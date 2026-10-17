@@ -58,7 +58,12 @@ export const demoApiInterceptor: HttpInterceptorFn = (req, next) => {
         status: 200,
         url: req.url,
         body: [
-          { userId: 1, id: attempts, title: `demo kaydı #${attempts}`, body: 'Geçici olarak üretildi.' },
+          {
+            userId: 1,
+            id: attempts,
+            title: `demo kaydı #${attempts}`,
+            body: 'Geçici olarak üretildi.',
+          },
         ],
       }),
     ).pipe(delay(200));
@@ -70,7 +75,12 @@ export const demoApiInterceptor: HttpInterceptorFn = (req, next) => {
         status: 200,
         url: req.url,
         body: [
-          { userId: 1, id: 1, title: 'yavaş cevap', body: 'Bu istek 3 saniye sürüyor, iptal edebilirsin.' },
+          {
+            userId: 1,
+            id: 1,
+            title: 'yavaş cevap',
+            body: 'Bu istek 3 saniye sürüyor, iptal edebilirsin.',
+          },
         ],
       }),
     ).pipe(delay(3000));

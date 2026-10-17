@@ -64,7 +64,12 @@ export type {
 export { QueryCache, type CacheChangeListener } from './lib/cache/query-cache';
 export { QueryClient, type Updater } from './lib/cache/query-client';
 export { MutationRegistry } from './lib/cache/mutation-registry';
-export { CacheEntry, type FetchPlan, type SeedValue, type SettleOutcome } from './lib/cache/cache-entry';
+export {
+  CacheEntry,
+  type FetchPlan,
+  type SeedValue,
+  type SettleOutcome,
+} from './lib/cache/cache-entry';
 export {
   formatKey,
   matchesFilter,

@@ -16,15 +16,16 @@ const LAST_PAGE = 10;
 
       <p class="hint">
         Her sayfa <strong>ayrı bir önbellek kaydı</strong>: anahtar
-        <code>['demo', 'feed', çalıştırma, sayfa]</code>. Bunun iki sonucu var — bir sayfa
-        başka bir bileşenle paylaşılabiliyor, ve <code>invalidate(['demo', 'feed'])</code>
+        <code>['demo', 'feed', çalıştırma, sayfa]</code>. Bunun iki sonucu var — bir sayfa başka bir
+        bileşenle paylaşılabiliyor, ve <code>invalidate(['demo', 'feed'])</code>
         önek eşleşmesiyle yüklü bütün sayfaları birden tazeliyor.
       </p>
 
       <div class="row">
         <button
           (click)="feed.fetchNextPage()"
-          [disabled]="!feed.hasNextPage() || feed.isFetchingNextPage()">
+          [disabled]="!feed.hasNextPage() || feed.isFetchingNextPage()"
+        >
           {{ feed.isFetchingNextPage() ? 'sayfa yükleniyor…' : 'Daha fazla' }}
         </button>
         <button (click)="feed.reload()" [disabled]="feed.isFetching()">Tümünü tazele</button>
@@ -70,10 +71,10 @@ const LAST_PAGE = 10;
       </ul>
 
       <p class="hint">
-        <strong>Baştan başlat</strong> yeni bir anahtar üretiyor:
-        <code>key</code> içindeki çalıştırma sayacı artıyor, birikim sıfırlanıyor ve ilk sayfa
-        yeniden isteniyor. Eski kayıtlar önbellekte <code>gcTime</code> boyunca kalıyor — bir
-        sayfa numarasına geri dönersen ağ isteği olmadan gelir.
+        <strong>Baştan başlat</strong> yeni bir anahtar üretiyor: <code>key</code> içindeki
+        çalıştırma sayacı artıyor, birikim sıfırlanıyor ve ilk sayfa yeniden isteniyor. Eski
+        kayıtlar önbellekte <code>gcTime</code> boyunca kalıyor — bir sayfa numarasına geri dönersen
+        ağ isteği olmadan gelir.
       </p>
     </section>
   `,

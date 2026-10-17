@@ -47,22 +47,22 @@ bench` was re-run, and the file was restored. Two tests fail in that configurati
 (the white-box assertions that the recency map is pruned and sized), which is how
 you know the probe was really in effect.
 
-| Case | 0.2.0 | Recency stamping removed | Δ |
-| --- | --- | --- | --- |
-| `resolve`, warm key — no entry is created | 0.47 µs/op | 0.50 µs/op | probe **slower** by 6% |
-| `resolve` + `subscribe` + release, no cap | 14.99 µs/op | 16.71 µs/op | probe **slower** by 11% |
-| `resolve` + `subscribe` + release, cap 100 | 11.71 µs/op | 11.61 µs/op | probe faster by 1% |
-| At-cap inserts, cap 100 pre-warmed | 6.72 µs/op | 6.36 µs/op | probe faster by 5% |
+| Case                                       | 0.2.0       | Recency stamping removed | Δ                       |
+| ------------------------------------------ | ----------- | ------------------------ | ----------------------- |
+| `resolve`, warm key — no entry is created  | 0.47 µs/op  | 0.50 µs/op               | probe **slower** by 6%  |
+| `resolve` + `subscribe` + release, no cap  | 14.99 µs/op | 16.71 µs/op              | probe **slower** by 11% |
+| `resolve` + `subscribe` + release, cap 100 | 11.71 µs/op | 11.61 µs/op              | probe faster by 1%      |
+| At-cap inserts, cap 100 pre-warmed         | 6.72 µs/op  | 6.36 µs/op               | probe faster by 5%      |
 
 Every delta is inside the spread between two runs of the same code, and two of
-the four have the wrong sign — a version doing strictly *less* work measured
-*slower*. The conclusion is the one the numbers support and no more: **the added
+the four have the wrong sign — a version doing strictly _less_ work measured
+_slower_. The conclusion is the one the numbers support and no more: **the added
 cost is below this harness's noise floor, about ±11%.** That ±11% is why the
 in-suite assertions are ceilings rather than a 10% tolerance: a 10% assertion here
 would fail on a busy machine and be deleted within a week.
 
 (That ±11% was optimistic, and Step 0.3 measured the harness again with a control
-loop in the same run: two consecutive runs of *unchanged* code moved by up to 22%
+loop in the same run: two consecutive runs of _unchanged_ code moved by up to 22%
 on this machine. See "The noise floor, measured" below — the rule needs the control
 that section describes, not the number.)
 
@@ -74,8 +74,7 @@ reaches any 0.2.0 code, and 0.47 µs/op for a map lookup is what that looks like
 
 Two of the four cases explain the shape of the feature without needing a graph:
 
-- The **uncapped** loop grows a map to 200,000 entries. The **capped** loop holds
-  100. The capped run is *faster* despite doing strictly more bookkeeping per
+- The **uncapped** loop grows a map to 200,000 entries. The **capped** loop holds 100. The capped run is _faster_ despite doing strictly more bookkeeping per
   insert, because the work it avoids — rehashing, retaining, and eventually
   collecting 199,900 entries — dwarfs the 100-entry scan it pays. Bounding the
   cache is not a cost, it is the thing that makes the loop's cost flat.
@@ -91,7 +90,7 @@ replacement, and this file is where it should be measured first.
 
 ## Two ceilings, not one (Step 0.3)
 
-Until this step the in-suite assertion was a single `50 µs/op` ceiling in *both*
+Until this step the in-suite assertion was a single `50 µs/op` ceiling in _both_
 ways the suite runs, and `pnpm verify` was **not green** because of it.
 
 `pnpm test` — which `pnpm verify` runs — turns v8 coverage on. Coverage
@@ -99,10 +98,10 @@ instruments every basic block, and the capped loops execute the eviction scan
 ~100 times per insert, so what the number measures is mostly the instrument. The
 same capped loop, on this machine:
 
-| Run | capped loop |
-| --- | --- |
-| `pnpm bench` — no coverage, 200,000 iterations | ~12 µs/op |
-| `pnpm test` — v8 coverage, 20,000 iterations | 67–71 µs/op |
+| Run                                            | capped loop |
+| ---------------------------------------------- | ----------- |
+| `pnpm bench` — no coverage, 200,000 iterations | ~12 µs/op   |
+| `pnpm test` — v8 coverage, 20,000 iterations   | 67–71 µs/op |
 
 A 50 µs ceiling under coverage is an assertion about v8, and it fired: two tests
 failed while the previous report described `pnpm verify` as green. The fix is not
@@ -135,14 +134,14 @@ Every row below is this machine, 200,000 iterations, one **clean-tree Phase 5**
 run and then three runs of the Step 0.1 tree. They are all shown because the
 spread between them is the finding — see the next section.
 
-| Case | Phase 5 (clean) | Run A | Run B | Run C |
-| --- | --- | --- | --- | --- |
-| `resolve`, warm key — **control**, code unchanged | 0.48 | 0.63 | 0.62 | 0.38 |
-| `resolve` + `subscribe` + release, no cap | 16.19 | 19.26 | 22.48 | 18.44 |
-| `resolve` + `subscribe` + release, cap 100 | 12.05 | 12.67 | 15.51 | 14.22 |
-| At-cap inserts, cap 100 pre-warmed | 6.72 | 6.89 | 7.77 | 7.12 |
-| `seed`, no cap | — | 0.68 | 0.91 | 0.69 |
-| `seed`, cap 100 | — | 1.63 | 1.66 | 1.83 |
+| Case                                              | Phase 5 (clean) | Run A | Run B | Run C |
+| ------------------------------------------------- | --------------- | ----- | ----- | ----- |
+| `resolve`, warm key — **control**, code unchanged | 0.48            | 0.63  | 0.62  | 0.38  |
+| `resolve` + `subscribe` + release, no cap         | 16.19           | 19.26 | 22.48 | 18.44 |
+| `resolve` + `subscribe` + release, cap 100        | 12.05           | 12.67 | 15.51 | 14.22 |
+| At-cap inserts, cap 100 pre-warmed                | 6.72            | 6.89  | 7.77  | 7.12  |
+| `seed`, no cap                                    | —               | 0.68  | 0.91  | 0.69  |
+| `seed`, cap 100                                   | —               | 1.63  | 1.66  | 1.83  |
 
 Read the control first. It runs **identical code** before and after Step 0.1 — a
 warm `resolve` returns the existing entry before it reaches any of the new code —
@@ -164,12 +163,12 @@ The four runs above were taken within about fifteen minutes on one machine, and 
 `pnpm bench` output for each is quoted in the table. Consecutive runs of the **same**
 Step 0.1 code disagree by:
 
-| Case | A → B | B → C | A → C |
-| --- | --- | --- | --- |
-| `resolve`, warm key (control) | −2% | −39% | −40% |
-| `resolve` + `subscribe` + release, no cap | +17% | −18% | −4% |
-| `resolve` + `subscribe` + release, cap 100 | +22% | −8% | +12% |
-| At-cap inserts, cap 100 pre-warmed | +13% | −8% | +3% |
+| Case                                       | A → B | B → C | A → C |
+| ------------------------------------------ | ----- | ----- | ----- |
+| `resolve`, warm key (control)              | −2%   | −39%  | −40%  |
+| `resolve` + `subscribe` + release, no cap  | +17%  | −18%  | −4%   |
+| `resolve` + `subscribe` + release, cap 100 | +22%  | −8%   | +12%  |
+| At-cap inserts, cap 100 pre-warmed         | +13%  | −8%   | +3%   |
 
 The ±11% floor recorded after Phase 1 was optimistic: on the cheapest loop the
 harness is off by **40%** between two runs of unchanged code, and on the allocating
@@ -183,7 +182,7 @@ What to do about it, in the order of how much it costs:
 1. Compare a case against the **control in the same run** rather than against the
    previous report, and only trust a move that survives a re-run. That is what the
    rule below now asks for, and it is what made Run C's numbers usable.
-2. Read the *shape*, not the size: the in-suite assertions do this already, by
+2. Read the _shape_, not the size: the in-suite assertions do this already, by
    timing each capped loop in halves and refusing a second half that costs more
    than 4× the first. Complexity changes show up there; a 10% constant does not.
 3. If a real decision ever needs 10% resolution, the harness has to change — repeat
@@ -199,7 +198,7 @@ them is on a hot path, and the reason is structural rather than a measurement:
 
 - The retry predicate runs only after a request has **already failed**, and at
   most `count + 1` times per call. It cannot be reached on a success.
-- `offline` is read when a `network` failure is *classified* — the same failure
+- `offline` is read when a `network` failure is _classified_ — the same failure
   path, once per failure, not once per render.
 - Both dev warnings are evaluated when a handle is **built** (once per component
   instance, deduplicated to one line per session) and are behind `isDevMode()`.
@@ -213,16 +212,16 @@ flag rule asks for.
 `pnpm bench` was re-run on the Phase 5 tree (200,000 iterations, same four cases,
 recorded from `[bench]` output):
 
-| Case | Phase 1 | Phase 5 | Δ |
-| --- | --- | --- | --- |
-| `resolve`, warm key — no entry is created | 0.47 µs/op | 0.44 µs/op | faster by 6% |
-| `resolve` + `subscribe` + release, no cap | 14.99 µs/op | 15.60 µs/op | slower by 4% |
+| Case                                       | Phase 1     | Phase 5     | Δ            |
+| ------------------------------------------ | ----------- | ----------- | ------------ |
+| `resolve`, warm key — no entry is created  | 0.47 µs/op  | 0.44 µs/op  | faster by 6% |
+| `resolve` + `subscribe` + release, no cap  | 14.99 µs/op | 15.60 µs/op | slower by 4% |
 | `resolve` + `subscribe` + release, cap 100 | 11.71 µs/op | 11.96 µs/op | slower by 2% |
-| At-cap inserts, cap 100 pre-warmed | 6.72 µs/op | 6.67 µs/op | faster by 1% |
+| At-cap inserts, cap 100 pre-warmed         | 6.72 µs/op  | 6.67 µs/op  | faster by 1% |
 
 Nothing crosses the 10% flag, and the two cases that moved are the two whose loops
 do the most work per insert — which is the same shape seen in the probe table
-above, where a *smaller* change produced an 11% "regression". The ±11% floor this
+above, where a _smaller_ change produced an 11% "regression". The ±11% floor this
 paragraph used to cite was itself optimistic; Step 0.3 re-measured the harness with
 a control loop in the same run and found ±20–40%, which is why the rule below now
 asks for that control rather than a threshold alone.
@@ -232,7 +231,7 @@ asks for that control rather than a threshold alone.
 A case is flagged when it moves by more than 10% **against the control loop
 measured in the same run**, and the move survives a re-run. Anything smaller than
 that, or that does not reproduce, is noise — as the probe table above demonstrates
-by producing an 11% "regression" in a build that does *less* work, and as the
+by producing an 11% "regression" in a build that does _less_ work, and as the
 Step 0.3 table demonstrates by moving the control itself by 40%.
 
 The control is `resolve` on a warm key: it short-circuits before the code any of
@@ -240,5 +239,3 @@ these changes touches, so its movement in a run is the machine's movement. If a
 case moves less than the control did, the change did not cause it. If the control
 moves by more than the case does in the other direction, there is nothing to
 report either — which is the honest answer for most of the numbers in this file.
-
-

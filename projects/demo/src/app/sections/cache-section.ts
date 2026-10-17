@@ -1,11 +1,4 @@
-import {
-  ChangeDetectionStrategy,
-  Component,
-  computed,
-  inject,
-  input,
-  signal,
-} from '@angular/core';
+import { ChangeDetectionStrategy, Component, computed, inject, input, signal } from '@angular/core';
 import { createMutation, createRequest, QueryCache, QueryClient } from 'ng-signal-request';
 
 import type { Post } from '../models';
@@ -46,7 +39,9 @@ export class CacheTwinSection {
   selector: 'demo-cache-visit',
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
-    <span class="badge" [class]="'badge ' + detail.status()">#{{ id() }} {{ detail.status() }}</span>
+    <span class="badge" [class]="'badge ' + detail.status()"
+      >#{{ id() }} {{ detail.status() }}</span
+    >
   `,
 })
 export class CacheVisitSection {
@@ -81,7 +76,9 @@ export class CacheVisitSection {
       </p>
 
       <div class="status">
-        <span class="badge" [class]="'badge ' + posts.status()">bu bileşen: {{ posts.status() }}</span>
+        <span class="badge" [class]="'badge ' + posts.status()"
+          >bu bileşen: {{ posts.status() }}</span
+        >
         <span class="badge">fetchCount: {{ posts.fetchCount() }}</span>
         <span class="badge">son veri: {{ updated() }}</span>
         @if (posts.loading()) {
@@ -92,8 +89,11 @@ export class CacheVisitSection {
       <demo-cache-twin />
 
       <div class="row">
-        <button (click)="invalidate()">invalidate(['demo','cache'])
-          @if (invalidated(); as count) { <span>({{ count }} kayıt)</span> }
+        <button (click)="invalidate()">
+          invalidate(['demo','cache'])
+          @if (invalidated(); as count) {
+            <span>({{ count }} kayıt)</span>
+          }
         </button>
         <button (click)="posts.reload()">reload() — yalnızca bu handle</button>
         <button (click)="renameFirst()" [disabled]="posts.response().length === 0">
@@ -103,10 +103,9 @@ export class CacheVisitSection {
 
       <p class="hint">
         <strong>invalidate</strong> anahtarı <em>işaretler</em>; açık olan kayıtları tazelemek
-        <code>QueryClient</code>'ın işi. Önek eşleştiği için
-        <code>invalidate(['demo'])</code> daha geniş, <code>['demo','cache','posts']</code> daha
-        dar çalışır. <strong>setData</strong> ise yerel bir yazma: ağ isteği yok, durum
-        <code>local</code> olur.
+        <code>QueryClient</code>'ın işi. Önek eşleştiği için <code>invalidate(['demo'])</code> daha
+        geniş, <code>['demo','cache','posts']</code> daha dar çalışır. <strong>setData</strong> ise
+        yerel bir yazma: ağ isteği yok, durum <code>local</code> olur.
       </p>
     </section>
 
@@ -115,8 +114,8 @@ export class CacheVisitSection {
 
       <p class="hint">
         <code>target</code> ve <code>invalidates</code> burada <strong>anahtar</strong> olarak
-        veriliyor, handle olarak değil. Mutation elinde hiçbir handle tutmuyor: yazdığı yer,
-        sonra tazelediği yer, ikisi de anahtar.
+        veriliyor, handle olarak değil. Mutation elinde hiçbir handle tutmuyor: yazdığı yer, sonra
+        tazelediği yer, ikisi de anahtar.
       </p>
 
       <div class="row">
@@ -124,7 +123,8 @@ export class CacheVisitSection {
           class="grow"
           placeholder="yeni başlık…"
           [value]="draft()"
-          (input)="draft.set($any($event.target).value)" />
+          (input)="draft.set($any($event.target).value)"
+        />
         <button (click)="submit()" [disabled]="!draft().trim()">Ekle</button>
         <button (click)="addFailing()">Hata ile ekle</button>
       </div>
@@ -158,8 +158,8 @@ export class CacheVisitSection {
 
       <p class="hint">
         JSONPlaceholder yazmayı kabul eder ama <strong>saklamaz</strong>. Başarılı eklemeden sonra
-        <code>invalidates</code> listeyi yeniden çektiği için iyimser kayıt kaybolur — bu
-        sunucunun doğrusu, kaybolmuş bir iyimser değer değil. <strong>Hata ile ekle</strong>
+        <code>invalidates</code> listeyi yeniden çektiği için iyimser kayıt kaybolur — bu sunucunun
+        doğrusu, kaybolmuş bir iyimser değer değil. <strong>Hata ile ekle</strong>
         <code>/api/reject</code> adresine gider ve hep 500 döner, böylece geri alma gerçekten
         izlenebilir.
       </p>

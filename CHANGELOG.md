@@ -224,12 +224,12 @@ garbage collection involved in that path.
 
 ### Bundle
 
-| Entry point | Raw | Gzip |
-| --- | --- | --- |
-| `ng-signal-request` | 74.3 KB | 15.9 KB |
-| `ng-signal-request/devtools` | 8.5 KB | 2.3 KB |
-| `ng-signal-request/persist` | 7.0 KB | 2.3 KB |
-| `ng-signal-request/testing` | 1.8 KB | 0.8 KB |
+| Entry point                  | Raw     | Gzip    |
+| ---------------------------- | ------- | ------- |
+| `ng-signal-request`          | 74.3 KB | 15.9 KB |
+| `ng-signal-request/devtools` | 8.5 KB  | 2.3 KB  |
+| `ng-signal-request/persist`  | 7.0 KB  | 2.3 KB  |
+| `ng-signal-request/testing`  | 1.8 KB  | 0.8 KB  |
 
 `/devtools` and `/persist` are separate entry points and are **not** in the core
 bundle; `pnpm check:dist` builds the demo app and asserts that their markers are

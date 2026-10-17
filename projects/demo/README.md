@@ -32,10 +32,10 @@ warning banner in the app states two of its limits outright:
 `retry` and `cancel` need real HTTP behaviour that this API cannot provide, so
 `demo-api.interceptor.ts` only intercepts `/api/*` paths:
 
-| Path | Behaviour |
-| --- | --- |
-| `/api/flaky` | `503` on the first two hits, success on the third → `retry` is observable |
-| `/api/slow` | 3s delay → `cancel()` has something real to abort |
+| Path          | Behaviour                                                                   |
+| ------------- | --------------------------------------------------------------------------- |
+| `/api/flaky`  | `503` on the first two hits, success on the third → `retry` is observable   |
+| `/api/slow`   | 3s delay → `cancel()` has something real to abort                           |
 | `/api/reject` | always `500` after a 0.9s delay → the optimistic **rollback** is observable |
 
 Every other request goes to the real API.

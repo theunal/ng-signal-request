@@ -105,7 +105,11 @@ export async function settle(rounds = 10): Promise<void> {
 }
 
 /** Flushes the single pending request for `url` with `body` and waits for the graph to settle. */
-export async function respond(http: HttpTestingController, url: string, body: unknown): Promise<void> {
+export async function respond(
+  http: HttpTestingController,
+  url: string,
+  body: unknown,
+): Promise<void> {
   http.expectOne(url).flush(body as never);
   await settle();
 }

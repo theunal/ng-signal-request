@@ -44,7 +44,11 @@ describe('createMutation', () => {
     await expect(p).resolves.toEqual({ id: 4, name: 'Ada' });
     expect(save.status()).toBe('success');
     expect(save.response()).toEqual({ id: 4, name: 'Ada' });
-    expect(onSuccess).toHaveBeenCalledWith({ id: 4, name: 'Ada' }, { id: 4, name: 'Ada' }, undefined);
+    expect(onSuccess).toHaveBeenCalledWith(
+      { id: 4, name: 'Ada' },
+      { id: 4, name: 'Ada' },
+      undefined,
+    );
     expect(onSettled).toHaveBeenCalledTimes(1);
   });
 
@@ -91,7 +95,10 @@ describe('createMutation', () => {
     // unconditionally — `toHaveBeenCalledWith` compares the whole argument list, so a callback
     // that grows an optional trailing parameter is observable even to a caller that ignores it.
     expect(onError).toHaveBeenCalledWith(expect.any(HttpErrorResponse), 1, undefined);
-    expect(global).toHaveBeenCalledWith(expect.any(HttpErrorResponse), { url: '/users/1', method: 'DELETE' });
+    expect(global).toHaveBeenCalledWith(expect.any(HttpErrorResponse), {
+      url: '/users/1',
+      method: 'DELETE',
+    });
 
     const t = del.tryRun(2);
     http.expectOne('/users/2').flush('x', { status: 500, statusText: 'Err' });
@@ -169,9 +176,7 @@ describe('createMutation', () => {
     const { http, create } = setup();
     const plain = create(() => createMutation<number>(() => '/a', { timeout: 5_000 }));
     const p = plain.run();
-    http
-      .expectOne('/a')
-      .error({ name: 'TimeoutError' } as unknown as ProgressEvent);
+    http.expectOne('/a').error({ name: 'TimeoutError' } as unknown as ProgressEvent);
     await expect(p).rejects.toBeTruthy();
     expect(plain.requestError()).toEqual({ kind: 'timeout', ms: 5_000 });
   });
@@ -258,9 +263,11 @@ describe('createMutation', () => {
   it('reports upload progress when the builder asks for it', async () => {
     const { http, create } = setup();
     const upload = create(() =>
-      createMutation<number, { body: unknown }>(
-        (args) => ({ url: '/upload', body: args.body, reportProgress: true }),
-      ),
+      createMutation<number, { body: unknown }>((args) => ({
+        url: '/upload',
+        body: args.body,
+        reportProgress: true,
+      })),
     );
 
     expect(upload.progress()).toBeUndefined();
@@ -285,9 +292,11 @@ describe('createMutation', () => {
     // value forever. Covers all three settle paths, not just success.
     const { http, create } = setup();
     const upload = create(() =>
-      createMutation<number, { body: unknown }>(
-        (args) => ({ url: '/upload', body: args.body, reportProgress: true }),
-      ),
+      createMutation<number, { body: unknown }>((args) => ({
+        url: '/upload',
+        body: args.body,
+        reportProgress: true,
+      })),
     );
 
     // success
@@ -638,7 +647,9 @@ describe('createMutation', () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] });
     try {
       const { http, create } = setup();
-      const save = create(() => createMutation<number>(() => '/save', { retry: { count: 1, delay: 50 } }));
+      const save = create(() =>
+        createMutation<number>(() => '/save', { retry: { count: 1, delay: 50 } }),
+      );
       const p = save.run();
       http.expectOne('/save').flush('x', { status: 503, statusText: 'Err' });
       await vi.advanceTimersByTimeAsync(50);
@@ -739,7 +750,9 @@ describe('createMutation', () => {
 
   it('routes body / path from the args bag', async () => {
     const { http, create } = setup();
-    const save = create(() => createMutation<User, { path: { id: number }; body: Partial<User> }>(() => '/users/:id'));
+    const save = create(() =>
+      createMutation<User, { path: { id: number }; body: Partial<User> }>(() => '/users/:id'),
+    );
 
     const p = save.run({ path: { id: 9 }, body: { name: 'Grace' } });
 
@@ -754,7 +767,9 @@ describe('createMutation', () => {
 
   it('is disabled when a referenced :placeholder has no value', async () => {
     const { http, create } = setup();
-    const save = create(() => createMutation<User, { path: { id: number | undefined } }>(() => '/users/:id'));
+    const save = create(() =>
+      createMutation<User, { path: { id: number | undefined } }>(() => '/users/:id'),
+    );
 
     const result = await save.tryRun({ path: { id: undefined } });
 
@@ -811,7 +826,10 @@ describe('createMutation', () => {
     const { http, create } = setup([
       provideSignalRequest(() => {
         const injector = inject(Injector); // only legal because the factory runs in an injection context
-        return { baseUrl: 'https://api.test', onError: (e) => seen.push(`${!!injector}:${e.message}`) };
+        return {
+          baseUrl: 'https://api.test',
+          onError: (e) => seen.push(`${!!injector}:${e.message}`),
+        };
       }),
     ]);
     const save = create(() => createMutation<number>(() => '/save'));

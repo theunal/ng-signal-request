@@ -1,9 +1,21 @@
 import { HttpErrorResponse, HttpParams } from '@angular/common/http';
 import type { HttpTestingController } from '@angular/common/http/testing';
-import { computed, effect, Injector, signal, type Signal, type WritableSignal } from '@angular/core';
+import {
+  computed,
+  effect,
+  Injector,
+  signal,
+  type Signal,
+  type WritableSignal,
+} from '@angular/core';
 import { TestBed } from '@angular/core/testing';
 import { beforeEach, describe, expect, expectTypeOf, it, vi, afterEach } from 'vitest';
-import { createRequest, provideSignalRequest, RequestCancelledError, type RequestConfig } from '../public-api';
+import {
+  createRequest,
+  provideSignalRequest,
+  RequestCancelledError,
+  type RequestConfig,
+} from '../public-api';
 import { fail, respond, settle, setup } from '../../testing/testing';
 
 interface User {
@@ -108,7 +120,9 @@ describe('createRequest – focus / reconnect refetch', () => {
     const { http, create } = setup();
     const enabled = signal(true);
     create(() =>
-      createRequest<string[]>(() => (enabled() ? '/items' : undefined), { refetchOnWindowFocus: true }),
+      createRequest<string[]>(() => (enabled() ? '/items' : undefined), {
+        refetchOnWindowFocus: true,
+      }),
     );
     await seed(http);
 
@@ -193,7 +207,9 @@ describe('createRequest – basics', () => {
   it('is disabled while the source returns undefined / false / null', async () => {
     const { http, create } = setup();
     const id = signal<number | undefined>(undefined);
-    const user = create(() => createRequest<User>(() => (id() === undefined ? undefined : `/users/${id()}`)));
+    const user = create(() =>
+      createRequest<User>(() => (id() === undefined ? undefined : `/users/${id()}`)),
+    );
     await settle();
     expect(user.status()).toBe('idle');
     http.expectNone(() => true);
@@ -336,7 +352,10 @@ describe('createRequest – basics', () => {
   it('run() on a lazy params-gated request rejects until params are set', async () => {
     const { http, create } = setup();
     const r = create(() =>
-      createRequest<number, ListQuery>('/n', { params: { param1: 'a', param2: 1, body: null }, lazy: true }),
+      createRequest<number, ListQuery>('/n', {
+        params: { param1: 'a', param2: 1, body: null },
+        lazy: true,
+      }),
     );
 
     await settle();
@@ -412,7 +431,9 @@ describe('createRequest – basics', () => {
 
   it('throws a helpful error outside of an injection context, works with { injector }', async () => {
     const { http } = setup();
-    expect(() => createRequest('/x')).toThrowError(/createRequest\(\) can only be used within an injection context/);
+    expect(() => createRequest('/x')).toThrowError(
+      /createRequest\(\) can only be used within an injection context/,
+    );
     const r = createRequest<number>('/x', { injector: TestBed.inject(Injector) });
     await settle();
     await respond(http, '/x', 1);
@@ -454,7 +475,9 @@ describe('createRequest – request building', () => {
   it('does not touch absolute urls and disables the request while a path param is missing', async () => {
     const { http, create } = setup([provideSignalRequest({ baseUrl: 'https://api.test' })]);
     const id = signal<number | undefined>(undefined);
-    const r = create(() => createRequest(() => ({ url: 'https://other.test/u/:id', path: { id: id() } })));
+    const r = create(() =>
+      createRequest(() => ({ url: 'https://other.test/u/:id', path: { id: id() } })),
+    );
     await settle();
     expect(r.status()).toBe('idle');
     id.set(3);
@@ -467,7 +490,9 @@ describe('createRequest – lazy mode & run()', () => {
   it('does nothing until run(), resolves with the response, and ignores later signal changes', async () => {
     const { http, create } = setup();
     const term = signal('a');
-    const r = create(() => createRequest<string[]>(() => ({ url: '/s', params: { q: term() } }), { lazy: true }));
+    const r = create(() =>
+      createRequest<string[]>(() => ({ url: '/s', params: { q: term() } }), { lazy: true }),
+    );
     await settle();
     http.expectNone(() => true);
     expect(r.status()).toBe('idle');
@@ -565,7 +590,9 @@ describe('createRequest – retry', () => {
   it('retries transient errors, hides the error meanwhile and succeeds', async () => {
     const { http, create } = setup();
     const onError = vi.fn();
-    const r = create(() => createRequest<number>('/n', { retry: { count: 2, delay: 100 }, onError }));
+    const r = create(() =>
+      createRequest<number>('/n', { retry: { count: 2, delay: 100 }, onError }),
+    );
     await settle();
     await fail(http, '/n', 503);
 
@@ -588,7 +615,9 @@ describe('createRequest – retry', () => {
     const onError = vi.fn();
     const global = vi.fn();
     const s = setup([provideSignalRequest({ onError: global })]);
-    const r = s.create(() => createRequest<number>('/n', { retry: { count: 2, delay: 10 }, onError }));
+    const r = s.create(() =>
+      createRequest<number>('/n', { retry: { count: 2, delay: 10 }, onError }),
+    );
     await settle();
     await fail(s.http, '/n', 500);
     await vi.advanceTimersByTimeAsync(10);
@@ -610,7 +639,9 @@ describe('createRequest – retry', () => {
     const { http, create } = setup();
     const r = create(() => createRequest<number>('/a', { retry: 3 }));
     const custom = create(() =>
-      createRequest<number>('/b', { retry: { count: 1, delay: 0, when: (e) => (e as HttpErrorResponse).status === 404 } }),
+      createRequest<number>('/b', {
+        retry: { count: 1, delay: 0, when: (e) => (e as HttpErrorResponse).status === 404 },
+      }),
     );
     await settle();
     await fail(http, '/a', 404);
@@ -644,7 +675,9 @@ describe('createRequest – retry', () => {
 
   it('cancel() while waiting for a retry stops retrying and surfaces the error', async () => {
     const { http, create } = setup();
-    const r = create(() => createRequest<number>('/n', { retry: { count: 5, delay: 1000 }, lazy: true }));
+    const r = create(() =>
+      createRequest<number>('/n', { retry: { count: 5, delay: 1000 }, lazy: true }),
+    );
     const p = r.run();
     await settle();
     await fail(http, '/n', 500);
@@ -659,7 +692,9 @@ describe('createRequest – retry', () => {
   it('a new source value resets the retry cycle', async () => {
     const { http, create } = setup();
     const id = signal(1);
-    const r = create(() => createRequest<number>(() => `/n/${id()}`, { retry: { count: 3, delay: 1000 } }));
+    const r = create(() =>
+      createRequest<number>(() => `/n/${id()}`, { retry: { count: 3, delay: 1000 } }),
+    );
     await settle();
     await fail(http, '/n/1', 500);
     expect(r.retryAttempt()).toBe(1);
@@ -677,9 +712,13 @@ describe('createRequest – keepPreviousValue, debounce, polling', () => {
     const { http, create } = setup();
     const page = signal(1);
     const r = create(() =>
-      createRequest<string[]>(() => ({ url: '/p', params: { page: page() } }), { keepPreviousValue: true }),
+      createRequest<string[]>(() => ({ url: '/p', params: { page: page() } }), {
+        keepPreviousValue: true,
+      }),
     );
-    const plain = create(() => createRequest<string[]>(() => ({ url: '/q', params: { page: page() } })));
+    const plain = create(() =>
+      createRequest<string[]>(() => ({ url: '/q', params: { page: page() } })),
+    );
     await settle();
     await respond(http, '/p?page=1', ['one']);
     await respond(http, '/q?page=1', ['one']);
@@ -945,7 +984,9 @@ describe('createRequest – chaining (Angular 22 ctx.chain)', () => {
     const { user, posts } = create(() => {
       const user = createRequest<User>('/user');
       // 1st argument is params, 2nd is Angular's params context (where ctx.chain lives)
-      const posts = createRequest<string[], void>((_params, ctx) => `/users/${ctx.chain(user.resource)!.id}/posts`);
+      const posts = createRequest<string[], void>(
+        (_params, ctx) => `/users/${ctx.chain(user.resource)!.id}/posts`,
+      );
       return { user, posts };
     });
     await settle();
@@ -966,7 +1007,9 @@ describe('createRequest – documented limits', () => {
     expect(() =>
       create(() => {
         const a = createRequest<{ id: number }>('/a');
-        return createRequest<number, void>((_params, ctx) => `/b/${ctx.chain(a.resource)!.id}`, { debounce: 100 });
+        return createRequest<number, void>((_params, ctx) => `/b/${ctx.chain(a.resource)!.id}`, {
+          debounce: 100,
+        });
       }),
     ).toThrowError(/ctx\.chain\(\) is only available in auto mode without `debounce`/);
   });
@@ -979,10 +1022,13 @@ describe('createRequest – documented limits', () => {
     const { http, create } = setup([provideSignalRequest({ onError: global })]);
     const armed = signal(true);
     const r = create(() =>
-      createRequest<number>(() => {
-        if (armed()) throw new Error('source blew up');
-        return '/n';
-      }, { retry: 0 }),
+      createRequest<number>(
+        () => {
+          if (armed()) throw new Error('source blew up');
+          return '/n';
+        },
+        { retry: 0 },
+      ),
     );
 
     await settle();
@@ -1036,10 +1082,10 @@ describe('createRequest – params signal', () => {
   it('re-fires when params are set, and success() flips', async () => {
     const { http, create } = setup();
     const r = create(() =>
-      createRequest<Item[], ListQuery>(
-        (params) => ({ url: `/items/${params.param1}` }),
-        { params: { param1: 'a', param2: 1, body: null }, initialValue: [] },
-      ),
+      createRequest<Item[], ListQuery>((params) => ({ url: `/items/${params.param1}` }), {
+        params: { param1: 'a', param2: 1, body: null },
+        initialValue: [],
+      }),
     );
 
     await settle();
@@ -1332,7 +1378,10 @@ describe('createRequest – params placement', () => {
   it('keeps a repeated HttpParams value as an array instead of collapsing it', async () => {
     const { http, create } = setup();
     create(() =>
-      createRequest<Item[]>({ url: '/h', params: new HttpParams().append('tag', 'a').append('tag', 'b') }),
+      createRequest<Item[]>({
+        url: '/h',
+        params: new HttpParams().append('tag', 'a').append('tag', 'b'),
+      }),
     );
 
     await settle();
@@ -1370,7 +1419,9 @@ describe('createRequest – params placement', () => {
     );
 
     await settle();
-    http.expectOne('/q?keep=yes&list=a&list=b&flag=true&when=2026-01-02T03:04:05.000Z').flush([{ id: 1 }]);
+    http
+      .expectOne('/q?keep=yes&list=a&list=b&flag=true&when=2026-01-02T03:04:05.000Z')
+      .flush([{ id: 1 }]);
   });
 
   it('re-fires when only `body` changes', async () => {
@@ -1530,4 +1581,3 @@ describe('createRequest – transforming the response', () => {
 interface Item {
   id: number;
 }
-

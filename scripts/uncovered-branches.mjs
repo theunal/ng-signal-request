@@ -22,7 +22,9 @@ for (const [file, data] of Object.entries(coverage)) {
     counts.forEach((hits, index) => {
       if (hits > 0) return;
       const location = map.locations[index] ?? map.loc;
-      misses.push(`${map.type} @ line ${location.start.line}:${location.start.column} (path ${index})`);
+      misses.push(
+        `${map.type} @ line ${location.start.line}:${location.start.column} (path ${index})`,
+      );
     });
   }
   if (misses.length === 0) continue;

@@ -1,6 +1,11 @@
 import { effect, signal, type Signal } from '@angular/core';
 import { describe, expect, expectTypeOf, it } from 'vitest';
-import { createInfiniteRequest, createRequest, type CachedRequest, type SignalRequest } from '../public-api';
+import {
+  createInfiniteRequest,
+  createRequest,
+  type CachedRequest,
+  type SignalRequest,
+} from '../public-api';
 import { settle, setup } from '../../testing/testing';
 
 interface User {
@@ -11,9 +16,7 @@ interface User {
 describe('select() — the projection', () => {
   it('projects the response, and infers the projection type', async () => {
     const { http, create } = setup();
-    const user = create(() =>
-      createRequest<User>(() => ({ url: '/me' }), { key: () => ['me'] }),
-    );
+    const user = create(() => createRequest<User>(() => ({ url: '/me' }), { key: () => ['me'] }));
 
     const name = user.select((u) => u.name);
     expectTypeOf(name).toEqualTypeOf<Signal<string | undefined>>();
@@ -29,9 +32,7 @@ describe('select() — the projection', () => {
   it('is undefined in, undefined out — the selector never sees an empty response', async () => {
     const { http, create } = setup();
     const calls: User[] = [];
-    const user = create(() =>
-      createRequest<User>(() => ({ url: '/me' }), { key: () => ['me'] }),
-    );
+    const user = create(() => createRequest<User>(() => ({ url: '/me' }), { key: () => ['me'] }));
     const name = user.select((u) => {
       calls.push(u);
       return u.name;
@@ -54,9 +55,7 @@ describe('select() — the projection', () => {
     const { http, create } = setup();
     const plain = create(() => createRequest<User>(() => ({ url: '/me' })));
     expectTypeOf(plain).toEqualTypeOf<SignalRequest<User>>();
-    const cached = create(() =>
-      createRequest<User>(() => ({ url: '/me' }), { key: () => ['me'] }),
-    );
+    const cached = create(() => createRequest<User>(() => ({ url: '/me' }), { key: () => ['me'] }));
     expectTypeOf(cached).toEqualTypeOf<CachedRequest<User>>();
 
     const a = plain.select((u) => u.age);
@@ -79,9 +78,7 @@ describe('select() — the projection', () => {
     // response, so the default `Object.is` would wake the template even when the label is the
     // same. Half of this test is the control — the default *does* notify.
     const { http, create } = setup();
-    const user = create(() =>
-      createRequest<User>(() => ({ url: '/me' }), { key: () => ['me'] }),
-    );
+    const user = create(() => createRequest<User>(() => ({ url: '/me' }), { key: () => ['me'] }));
     await settle();
     http.expectOne('/me').flush({ name: 'Ada', age: 36 });
     await settle();
@@ -146,7 +143,8 @@ describe('select() — the projection', () => {
       createInfiniteRequest<User[], number>((page) => ({ url: '/users', params: { page } }), {
         key: () => ['users'],
         initialPageParam: 0,
-        getNextPageParam: (last, _all, param) => (last && last.length === 2 ? param + 1 : undefined),
+        getNextPageParam: (last, _all, param) =>
+          last && last.length === 2 ? param + 1 : undefined,
       }),
     );
     const names = feed.select((users) => users.map((u) => u.name));
@@ -191,9 +189,7 @@ describe('select() — the reason it is a method', () => {
   it('reads a signal inside the selector, so it re-projects', async () => {
     const { http, create } = setup();
     const suffix = signal('!');
-    const user = create(() =>
-      createRequest<User>(() => ({ url: '/me' }), { key: () => ['me'] }),
-    );
+    const user = create(() => createRequest<User>(() => ({ url: '/me' }), { key: () => ['me'] }));
     const decorated = user.select((u) => u.name + suffix());
 
     await settle();

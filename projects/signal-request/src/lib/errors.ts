@@ -17,7 +17,11 @@ export class RequestCancelledError extends Error {
  * (Angular itself uses the same duck-typing), so we must not wrap it.
  */
 function isErrorLike(value: unknown): value is Error {
-  return typeof value === 'object' && value !== null && typeof (value as { message?: unknown }).message === 'string';
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    typeof (value as { message?: unknown }).message === 'string'
+  );
 }
 
 export function toError(value: unknown): Error {
@@ -45,12 +49,12 @@ export type RequestError =
   | { readonly kind: 'timeout'; readonly ms: number }
   /** The server answered with an HTTP status. */
   | {
-    readonly kind: 'http';
-    readonly status: number;
-    readonly statusText: string;
-    readonly url: string | null;
-    readonly body: unknown;
-  }
+      readonly kind: 'http';
+      readonly status: number;
+      readonly statusText: string;
+      readonly url: string | null;
+      readonly body: unknown;
+    }
   /**
    * The server could not be reached at all (DNS, CORS, offline).
    *
@@ -240,12 +244,12 @@ function classify(cause: unknown, context: RequestErrorContext): RequestError {
     return cause.status === 0
       ? networkFailure(cause)
       : {
-        kind: 'http',
-        status: cause.status,
-        statusText: cause.statusText,
-        url: cause.url ?? null,
-        body: cause.error ?? null,
-      };
+          kind: 'http',
+          status: cause.status,
+          statusText: cause.statusText,
+          url: cause.url ?? null,
+          body: cause.error ?? null,
+        };
   }
 
   // The fetch backend rejects a raw `TypeError` for network failures when it is not

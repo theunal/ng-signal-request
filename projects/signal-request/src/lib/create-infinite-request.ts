@@ -178,14 +178,10 @@ function buildInfiniteInContext<TPage, TParam>(
 
   const buildPage = (param: TParam): Page<TPage, TParam> => {
     const base = baseKey();
-    const built = resolveRequest(
-      source(param),
-      method,
-      globalConfig.baseUrl,
-      undefined,
-    );
+    const built = resolveRequest(source(param), method, globalConfig.baseUrl, undefined);
     if (options.timeout !== undefined && built) built.timeout = options.timeout;
-    const withHeaders = built === undefined ? undefined : withGlobalHeaders(built, globalConfig.headers);
+    const withHeaders =
+      built === undefined ? undefined : withGlobalHeaders(built, globalConfig.headers);
     if (options.headers !== undefined && withHeaders) withHeaders.headers = options.headers;
     return {
       param,
@@ -434,10 +430,8 @@ function buildInfiniteInContext<TPage, TParam>(
   return {
     pages,
     response: flattened,
-    select: <S>(
-      selector: (data: FlattenedPages<TPage>) => S,
-      opts?: SelectOptions<S>,
-    ): Signal<S> => projectFrom<FlattenedPages<TPage>, S>(flattened, selector, opts?.equal),
+    select: <S>(selector: (data: FlattenedPages<TPage>) => S, opts?: SelectOptions<S>): Signal<S> =>
+      projectFrom<FlattenedPages<TPage>, S>(flattened, selector, opts?.equal),
     pageParams: loadedParams,
     loading: computed(() => isFetching()),
     status,
@@ -548,12 +542,16 @@ export interface CreateInfiniteRequest extends CreateInfiniteRequestFn<unknown> 
 
 /** A function whose `name` is shown by Angular in "must be called in an injection context" errors. */
 function named(name: string): () => void {
-  const fn = (): void => { };
+  const fn = (): void => {};
   Object.defineProperty(fn, 'name', { value: name });
   return fn;
 }
 
-function infiniteFactory(label: string, method: string, kind: Kind): CreateInfiniteRequestFn<never> {
+function infiniteFactory(
+  label: string,
+  method: string,
+  kind: Kind,
+): CreateInfiniteRequestFn<never> {
   // The `never` round-trip is the same one `createRequest` uses: the public overloads carry all
   // the typing, so the implementation only has to be assignable, not precise.
   const build = <TPage, TParam>(

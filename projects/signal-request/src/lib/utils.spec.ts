@@ -21,7 +21,8 @@ function headersWithGhostKey(): HttpHeaders {
   return new Proxy(real, {
     get(target, prop, receiver) {
       if (prop === 'keys') return () => ['X-Ghost', 'X-Real'];
-      if (prop === 'getAll') return (key: string) => (key === 'X-Ghost' ? null : target.getAll(key));
+      if (prop === 'getAll')
+        return (key: string) => (key === 'X-Ghost' ? null : target.getAll(key));
       return Reflect.get(target, prop, receiver);
     },
   }) as HttpHeaders;
@@ -43,7 +44,10 @@ describe('resolveRequest – query params', () => {
   it('removes a bag array that is empty after filtering, and keeps the rest', () => {
     // Same rule as the source-side array, reached through the `params` bag this time: an array of
     // only nullish entries disappears entirely instead of leaving `?tags=` on the wire.
-    const dropped = resolveRequest({ url: '/q' }, 'GET', undefined, { tags: [null, undefined], keep: 'y' });
+    const dropped = resolveRequest({ url: '/q' }, 'GET', undefined, {
+      tags: [null, undefined],
+      keep: 'y',
+    });
     expect(dropped?.params).toEqual({ keep: 'y' });
 
     const kept = resolveRequest({ url: '/q' }, 'GET', undefined, { tags: ['a', null] });

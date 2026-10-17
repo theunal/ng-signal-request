@@ -66,8 +66,7 @@ export type RequestValue = string | RequestConfig | null | undefined | false;
  * ```
  */
 export type RequestSource<TParams = void> =
-  | RequestValue
-  | ((params: NoInfer<TParams>, ctx: ResourceParamsContext) => RequestValue);
+  RequestValue | ((params: NoInfer<TParams>, ctx: ResourceParamsContext) => RequestValue);
 
 /* -------------------------------------------------------------------------- */
 /*  Status                                                                    */
@@ -296,8 +295,12 @@ export interface ParamsOption<TParams> {
  * > `equal` for selections that rebuild an object on every response. See "Transforming the
  * > response" in the README.
  */
-export type RequestOptions<T, TParams = void, TRaw = unknown> =
-  RequestOptionsBase<T, TParams, TRaw> & ([TParams] extends [void] ? unknown : ParamsOption<TParams>);
+export type RequestOptions<T, TParams = void, TRaw = unknown> = RequestOptionsBase<
+  T,
+  TParams,
+  TRaw
+> &
+  ([TParams] extends [void] ? unknown : ParamsOption<TParams>);
 
 /** What a cached request does when its **first** subscriber arrives. */
 export type RefetchOnMount =
@@ -392,8 +395,12 @@ export interface CacheOptions<T> {
  * {@link SignalRequest}, with it the request is shared and returns {@link CachedRequest}. One
  * entry point, two behaviours, no second import.
  */
-export type CachedRequestOptions<T, TParams = void, TRaw = unknown> =
-  RequestOptions<T, TParams, TRaw> & CacheOptions<T>;
+export type CachedRequestOptions<T, TParams = void, TRaw = unknown> = RequestOptions<
+  T,
+  TParams,
+  TRaw
+> &
+  CacheOptions<T>;
 
 /** Options for {@link RequestBase.select}. */
 export interface SelectOptions<S> {
@@ -412,7 +419,11 @@ export interface SelectOptions<S> {
  * @typeParam R       the type of `response()` (`T` when `initialValue` is given, else `T | undefined`)
  * @typeParam TParams the type of the writable `params` signal
  */
-export interface SignalRequest<T, R = T | undefined, TParams = void> extends RequestBase<T, R, TParams> {
+export interface SignalRequest<T, R = T | undefined, TParams = void> extends RequestBase<
+  T,
+  R,
+  TParams
+> {
   /** The underlying `httpResource`, for interop (snapshots, chaining, devtools). */
   readonly resource: HttpResourceRef<T | undefined>;
 }
@@ -428,7 +439,11 @@ export interface SignalRequest<T, R = T | undefined, TParams = void> extends Req
  * - **Freshness is visible.** `isStale` / `isFetching` / `dataUpdatedAt` only mean something
  *   against a shared entry, so they exist only here.
  */
-export interface CachedRequest<T, R = T | undefined, TParams = void> extends RequestBase<T, R, TParams> {
+export interface CachedRequest<T, R = T | undefined, TParams = void> extends RequestBase<
+  T,
+  R,
+  TParams
+> {
   /**
    * Whether the entry owes a fetch by its own clock: no data yet, invalidated, or `staleTime`
    * elapsed since the last value.
@@ -557,8 +572,7 @@ export interface RequestBase<T, R = T | undefined, TParams = void> {
 }
 
 export type RunResult<T> =
-  | { ok: true; response: T; error?: undefined }
-  | { ok: false; error: Error; response?: undefined };
+  { ok: true; response: T; error?: undefined } | { ok: false; error: Error; response?: undefined };
 
 /* -------------------------------------------------------------------------- */
 /*  Infinite query (createInfiniteRequest)                                    */
@@ -589,14 +603,22 @@ export interface InfiniteRequestOptions<TPage, TParam> {
    * Receives the page data as it is cached, which is how a cursor-based API works:
    * `getNextPageParam: (last) => last.cursor`, and `undefined` when the server says it is done.
    */
-  getNextPageParam: (lastPage: TPage | undefined, pages: readonly TPage[], lastParam: TParam) => TParam | undefined;
+  getNextPageParam: (
+    lastPage: TPage | undefined,
+    pages: readonly TPage[],
+    lastParam: TParam,
+  ) => TParam | undefined;
   /**
    * The mirror of `getNextPageParam` for `fetchPreviousPage()`.
    *
    * Optional: most infinite scroll is one-directional, and leaving this out keeps `hasPreviousPage()`
    * permanently `false` rather than pretending a feature exists.
    */
-  getPreviousPageParam?: (firstPage: TPage | undefined, pages: readonly TPage[], firstParam: TParam) => TParam | undefined;
+  getPreviousPageParam?: (
+    firstPage: TPage | undefined,
+    pages: readonly TPage[],
+    firstParam: TParam,
+  ) => TParam | undefined;
   /**
    * Keep at most this many pages in memory, dropping the oldest.
    *

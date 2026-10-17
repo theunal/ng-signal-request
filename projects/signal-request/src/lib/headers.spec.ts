@@ -56,7 +56,9 @@ describe('global headers', () => {
 
   it('a function is re-read on every request', async () => {
     const token = signal('first');
-    const s = setup([provideSignalRequest({ headers: () => ({ Authorization: `Bearer ${token()}` }) })]);
+    const s = setup([
+      provideSignalRequest({ headers: () => ({ Authorization: `Bearer ${token()}` }) }),
+    ]);
     const r = s.create(() => createRequest<number>('/n', { retry: 0 }));
 
     await settle();
@@ -76,7 +78,9 @@ describe('global headers', () => {
     // This is the behaviour an `HttpInterceptorFn` cannot give you: the interceptor only runs
     // when a request is already on its way out, so it cannot make a satisfied resource refetch.
     const token = signal('first');
-    const s = setup([provideSignalRequest({ headers: () => ({ Authorization: `Bearer ${token()}` }) })]);
+    const s = setup([
+      provideSignalRequest({ headers: () => ({ Authorization: `Bearer ${token()}` }) }),
+    ]);
     const r = s.create(() => createRequest<number>('/n', { retry: 0 }));
 
     await settle();
@@ -100,9 +104,7 @@ describe('global headers', () => {
 
   it('flattens [name, value] pairs from the source instead of dropping them', async () => {
     const s = setup([provideSignalRequest({ headers: { 'X-App': 'demo' } })]);
-    s.create(() =>
-      createRequest<number>({ url: '/n', headers: [['X-Trace', 'abc']] } as never),
-    );
+    s.create(() => createRequest<number>({ url: '/n', headers: [['X-Trace', 'abc']] } as never));
 
     await settle();
     const req = s.http.expectOne('/n');
@@ -148,7 +150,9 @@ describe('global headers', () => {
 
   it('applies to mutations too, read at call time', async () => {
     const token = signal('first');
-    const s = setup([provideSignalRequest({ headers: () => ({ Authorization: `Bearer ${token()}` }) })]);
+    const s = setup([
+      provideSignalRequest({ headers: () => ({ Authorization: `Bearer ${token()}` }) }),
+    ]);
     const save = s.create(() => createMutation<number>(() => '/save'));
 
     const p = save.run();

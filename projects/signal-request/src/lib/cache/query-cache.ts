@@ -40,7 +40,7 @@ function normalizeCap(cap: number | undefined): number {
  */
 @Injectable({ providedIn: 'root' })
 export class QueryCache {
-  private readonly entries = new Map<string, CacheEntry<unknown>>();
+  private readonly entries = new Map<string, CacheEntry>();
   private readonly listeners = new Set<CacheChangeListener>();
   private readonly activityListeners = new Set<CacheChangeListener>();
   /** Detaches the settle listener of each entry, so a forgotten entry leaves nothing behind. */
@@ -133,7 +133,7 @@ export class QueryCache {
   }
 
   /** Whether an entry may be taken: nobody is watching, and no request is waiting on an answer. */
-  private isEvictable(entry: CacheEntry<unknown>): boolean {
+  private isEvictable(entry: CacheEntry): boolean {
     return entry.observerCount === 0 && !entry.isFetching();
   }
 
@@ -207,8 +207,8 @@ export class QueryCache {
     return oldest;
   }
 
-  private leastRecentlyUsedIdle(): CacheEntry<unknown> | undefined {
-    let best: CacheEntry<unknown> | undefined;
+  private leastRecentlyUsedIdle(): CacheEntry | undefined {
+    let best: CacheEntry | undefined;
     let bestSeq = Number.POSITIVE_INFINITY;
     for (const entry of this.entries.values()) {
       if (!this.isEvictable(entry)) continue;
@@ -282,7 +282,7 @@ export class QueryCache {
       // with the restored value instead, so a seeded entry is never briefly empty.
       seed,
     );
-    this.entries.set(normalized.hash, entry as CacheEntry<unknown>);
+    this.entries.set(normalized.hash, entry as CacheEntry);
     this.recency.set(normalized.hash, ++this.useSeq);
 
     this.settleDetachers.set(
@@ -326,7 +326,7 @@ export class QueryCache {
    */
   seed(key: QueryKey, value: unknown, dataUpdatedAt: number): void {
     const normalized = normalizeKey(key);
-    const existing = this.entries.get(normalized.hash) as CacheEntry<unknown> | undefined;
+    const existing = this.entries.get(normalized.hash);
     if (existing && !existing.isDestroyed) {
       existing.restore(value, dataUpdatedAt);
       return;
@@ -373,12 +373,12 @@ export class QueryCache {
   }
 
   /** Every live entry. Iteration order is insertion order. */
-  all(): readonly CacheEntry<unknown>[] {
+  all(): readonly CacheEntry[] {
     return [...this.entries.values()].filter((entry) => !entry.isDestroyed);
   }
 
   /** Entries matching a filter — see `matchesFilter` for the two accepted shapes. */
-  matching(filter: QueryKeyFilter): CacheEntry<unknown>[] {
+  matching(filter: QueryKeyFilter): CacheEntry[] {
     return this.all().filter((entry) =>
       matchesFilter({ hash: entry.hash, segments: entry.segments, raw: entry.raw }, filter),
     );

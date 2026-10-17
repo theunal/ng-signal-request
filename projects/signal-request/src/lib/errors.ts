@@ -97,13 +97,15 @@ const ABORT_ERROR_NAMES: ReadonlySet<string> = new Set(['AbortError', 'TimeoutEr
  * out of the public surface.
  */
 export function isAbortLike(cause: unknown): boolean {
-  const candidate = cause instanceof HttpErrorResponse ? cause.error : cause;
+  // `HttpErrorResponse.error` is `any` — it is whatever the server sent, or the abort reason. The
+  // annotation is the point: everything below treats it as untrusted input.
+  const candidate: unknown = cause instanceof HttpErrorResponse ? cause.error : cause;
 
   return (
     typeof candidate === 'object' &&
     candidate !== null &&
     'name' in candidate &&
-    ABORT_ERROR_NAMES.has((candidate as { name: unknown }).name as string)
+    ABORT_ERROR_NAMES.has(candidate.name as string)
   );
 }
 
@@ -246,6 +248,9 @@ function classify(cause: unknown, context: RequestErrorContext): RequestError {
       : {
           kind: 'http',
           status: cause.status,
+          // `statusText` is deprecated upstream — with HTTP/2 it can remain `'OK'` on a non-200 —
+          // but it is part of this library's public `RequestError` and 0.1.0 callers read it.
+          // eslint-disable-next-line @typescript-eslint/no-deprecated
           statusText: cause.statusText,
           url: cause.url ?? null,
           body: cause.error ?? null,

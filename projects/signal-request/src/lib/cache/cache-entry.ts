@@ -1,5 +1,5 @@
 import type { HttpHeaders, HttpProgressEvent, HttpResourceRequest } from '@angular/common/http';
-import { HttpClient, HttpEventType, type HttpEvent, type HttpResponse } from '@angular/common/http';
+import { type HttpClient, HttpEventType, type HttpEvent } from '@angular/common/http';
 import { computed, signal, untracked, type Signal, type WritableSignal } from '@angular/core';
 import { retry, throwError, timer, type Subscription } from 'rxjs';
 import { RequestCancelledError, toError } from '../errors';
@@ -458,15 +458,14 @@ export class CacheEntry<T = unknown> {
         switch (raw.type) {
           case HttpEventType.UploadProgress:
           case HttpEventType.DownloadProgress:
-            this.progress.set(raw as HttpProgressEvent);
+            this.progress.set(raw);
             return;
           case HttpEventType.Response: {
-            const response = raw as HttpResponse<unknown>;
             // Recorded before the body is promoted, so `statusCode()` survives a `parse` that
             // throws — a failed call still told you what the server answered.
-            this.statusCode.set(response.status);
-            this.headers.set(response.headers);
-            succeed(response.body);
+            this.statusCode.set(raw.status);
+            this.headers.set(raw.headers);
+            succeed(raw.body);
             return;
           }
           default:
@@ -483,6 +482,10 @@ export class CacheEntry<T = unknown> {
       };
 
       this.subscription = stream.subscribe({ next: onEvent, error: (e) => fail(toError(e)) });
+      // A custom `HttpBackend` may answer synchronously, in which case `finish()` has already run
+      // and left the completed subscription behind. The type checker narrows `settled` to `false`
+      // because it cannot see that the callback ran inside `subscribe`.
+      // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
       if (settled) this.subscription.unsubscribe();
     });
   }
@@ -571,12 +574,7 @@ export class CacheEntry<T = unknown> {
 }
 
 function isHttpEvent(raw: unknown): raw is HttpEvent<unknown> {
-  return (
-    typeof raw === 'object' &&
-    raw !== null &&
-    'type' in raw &&
-    (raw as { type: unknown }).type !== undefined
-  );
+  return typeof raw === 'object' && raw !== null && 'type' in raw && raw.type !== undefined;
 }
 
 /** A rejected promise that is never left unhandled by a fire-and-forget caller. */

@@ -55,9 +55,11 @@ describe('cached request — sharing', () => {
     const one = a.create(() =>
       createRequest<User[]>('/users', { key: () => ['users'], initialValue: [] }),
     );
+    expect(one).toBeDefined();
     const two = b.create(() =>
       createRequest<User[]>('/users', { key: () => ['users'], initialValue: [] }),
     );
+    expect(two).toBeDefined();
     await settle();
     http.expectOne('/users').flush([{ id: 1, name: 'Ada' }]);
     await settle();
@@ -382,7 +384,9 @@ describe('cached request — abort', () => {
     const options = { key: () => ['users'], initialValue: [] as User[] };
 
     const one = a.create(() => createRequest<User[]>('/users', options));
+    expect(one).toBeDefined();
     const two = b.create(() => createRequest<User[]>('/users', options));
+    expect(two).toBeDefined();
     await settle();
     const request = http.expectOne('/users');
 
@@ -422,7 +426,9 @@ describe('cached request — abort', () => {
     const options = { key: () => ['users'], initialValue: [] as User[] };
 
     const one = a.create(() => createRequest<User[]>('/users', options));
+    expect(one).toBeDefined();
     const two = b.create(() => createRequest<User[]>('/users', options));
+    expect(two).toBeDefined();
     await settle();
     const request = http.expectOne('/users');
 
@@ -626,13 +632,15 @@ describe('cached handle — types', () => {
 
     expectTypeOf(cached).toEqualTypeOf<CachedRequest<User[], User[] | undefined, void>>();
     expectTypeOf(cached.isStale).toEqualTypeOf<() => boolean>();
-    expectTypeOf(cached.fetchCount).toEqualTypeOf<import('@angular/core').Signal<number>>();
+    expectTypeOf(cached.fetchCount).toEqualTypeOf<Signal<number>>();
 
     expectTypeOf(plain).toEqualTypeOf<SignalRequest<User[], User[] | undefined, void>>();
     // @ts-expect-error — freshness only means something against a shared entry.
-    plain.isStale;
+    const _isStale = plain.isStale;
     // @ts-expect-error — a cached request has no `httpResource` behind it.
-    cached.resource;
+    const _resource = cached.resource;
+    expect(_isStale).toBeUndefined();
+    expect(_resource).toBeUndefined();
   });
 
   it('keeps the initialValue narrowing on both paths', () => {
@@ -641,12 +649,12 @@ describe('cached handle — types', () => {
       createRequest<User[]>('/users', { key: () => ['users'], initialValue: [] }),
     );
     const plain = create(() => createRequest<User[]>('/users', { initialValue: [] }));
-    expectTypeOf(cached.response).toEqualTypeOf<import('@angular/core').Signal<User[]>>();
-    expectTypeOf(plain.response).toEqualTypeOf<import('@angular/core').Signal<User[]>>();
+    expectTypeOf(cached.response).toEqualTypeOf<Signal<User[]>>();
+    expectTypeOf(plain.response).toEqualTypeOf<Signal<User[]>>();
   });
 
   it('still requires a params option when TParams is declared, keyed or not', () => {
-    const { create } = setup();
+    setup();
     interface Query {
       page: number;
     }
@@ -998,7 +1006,7 @@ describe('cached request — options and the disabled state', () => {
 
     // A cached entry is shared and outlives the handle, so chaining it to one component's resource
     // is not merely unimplemented - it would be wrong. The message says which, and why.
-    expect(() => captured!.chain(undefined)).toThrowError(
+    expect(() => captured!.chain(undefined)).toThrow(
       /ctx\.chain\(\) is not available on a cached request/,
     );
     users.destroy();

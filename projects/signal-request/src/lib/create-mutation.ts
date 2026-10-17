@@ -3,7 +3,6 @@ import {
   HttpEventType,
   type HttpEvent,
   type HttpProgressEvent,
-  type HttpResponse,
 } from '@angular/common/http';
 import {
   assertInInjectionContext,
@@ -24,12 +23,12 @@ import { QueryClient } from './cache/query-client';
 import { RequestCancelledError, toError, toRequestError, type RequestErrorView } from './errors';
 import type { QueryKey } from './cache/key';
 import {
-  MutationOptions,
-  MutationStatus,
-  OptimisticTarget,
-  RequestValue,
-  RunResult,
-  SignalMutation,
+  type MutationOptions,
+  type MutationStatus,
+  type OptimisticTarget,
+  type RequestValue,
+  type RunResult,
+  type SignalMutation,
   type InvalidationTarget,
 } from './types';
 import { nextRetryDelay, noop, normalizeRetry, resolveRequest, withGlobalHeaders } from './utils';
@@ -106,6 +105,10 @@ const POST = mutationFactory('createMutation', 'POST');
  * // → PUT /users/1   body: {"name":"Ada"}
  * ```
  */
+/* The `as CreateMutation` below is not redundant: without it `Object.assign` would infer the
+   intersection of `POST` and the object literal, and `createMutation`'s public type would be that
+   intersection rather than the documented interface. */
+// eslint-disable-next-line @typescript-eslint/no-unnecessary-type-assertion
 export const createMutation: CreateMutation = Object.assign(POST, {
   post: mutationFactory('createMutation.post', 'POST'),
   put: mutationFactory('createMutation.put', 'PUT'),
@@ -334,7 +337,9 @@ function buildMutation<T, TArgs, TContext>(
 
     const promise = new Promise<T>((resolve, reject) => {
       let settled = false;
-      let subscription: Subscription | undefined;
+      // Read by `call.cancel` above, assigned below once the request is subscribed, so it cannot be
+      // a `const`. The initializer is what keeps `prefer-const` from asking for one it cannot have.
+      let subscription: Subscription | undefined = undefined;
       /** Undoes this call's optimistic write. See `applyOptimistic`. */
       let undo: () => void = noop;
 
@@ -361,10 +366,7 @@ function buildMutation<T, TArgs, TContext>(
         progress.set(undefined);
       };
       const isEvent = (raw: unknown): raw is HttpEvent<unknown> =>
-        typeof raw === 'object' &&
-        raw !== null &&
-        'type' in raw &&
-        (raw as { type: unknown }).type !== undefined;
+        typeof raw === 'object' && raw !== null && 'type' in raw && raw.type !== undefined;
 
       const succeed = (raw: unknown): void => {
         if (settled) return;
@@ -413,10 +415,10 @@ function buildMutation<T, TArgs, TContext>(
         switch (raw.type) {
           case HttpEventType.UploadProgress:
           case HttpEventType.DownloadProgress:
-            progress.set(raw as HttpProgressEvent);
+            progress.set(raw);
             return;
           case HttpEventType.Response:
-            succeed((raw as HttpResponse<unknown>).body);
+            succeed(raw.body);
             return;
           default:
             return; // `Sent` and anything else carry no body
@@ -428,6 +430,10 @@ function buildMutation<T, TArgs, TContext>(
       // template sees together with the optimistic value rather than before it.
       undo = applyOptimistic(callArgs);
       subscription = stream.subscribe({ next: onEvent, error: (e) => fail(toError(e)) });
+      // A custom `HttpBackend` may answer synchronously, in which case `settled` is already true
+      // here and the completed subscription must not be handed to `cancel`. The type checker
+      // narrows `settled` to `false` because it cannot see that the callback ran inside `subscribe`.
+      // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
       if (settled) subscription.unsubscribe();
     });
     promise.catch(noop);
@@ -509,7 +515,7 @@ function buildMutation<T, TArgs, TContext>(
     tryRun: (...a: [TArgs?]): Promise<RunResult<T>> =>
       run(a[0] as TArgs).then(
         (value): RunResult<T> => ({ ok: true, response: value }),
-        (e): RunResult<T> => ({ ok: false, error: toError(e) }),
+        (e: unknown): RunResult<T> => ({ ok: false, error: toError(e) }),
       ),
     cancel: cancelAll,
     reset: (): void => {
@@ -522,5 +528,5 @@ function buildMutation<T, TArgs, TContext>(
     },
     destroy,
   };
-  return api as unknown as SignalMutation<T, TArgs, TContext>;
+  return api;
 }

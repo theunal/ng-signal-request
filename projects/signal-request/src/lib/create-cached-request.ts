@@ -16,7 +16,7 @@ import {
   type ResourceParamsContext,
   type Signal,
 } from '@angular/core';
-import { CacheEntry, type FetchPlan, type SettleOutcome } from './cache/cache-entry';
+import { type CacheEntry, type FetchPlan, type SettleOutcome } from './cache/cache-entry';
 import { normalizeKey } from './cache/key';
 import { QueryCache } from './cache/query-cache';
 import { resolveStructuralSharing } from './cache/structural-sharing';
@@ -34,7 +34,6 @@ import type {
 import { selectFrom } from './select';
 import {
   debouncedSignal,
-  nextRetryDelay,
   noop,
   normalizeRetry,
   RESPONSE_TYPE,
@@ -70,9 +69,6 @@ interface Plan<T> {
   readonly request: HttpResourceRequest;
 }
 
-/** Options as they arrive, before the defaults from `provideSignalRequest` are folded in. */
-type OptionSet<T, TParams> = CachedRequestOptions<T, TParams, unknown>;
-
 /**
  * Builds a request handle backed by a shared cache entry.
  *
@@ -89,7 +85,7 @@ export function buildCachedRequest<T, R, TParams>(
   kind: Kind,
   method: string,
   source: RequestSource<TParams>,
-  options: CachedRequestOptions<T, TParams, unknown>,
+  options: CachedRequestOptions<T, TParams>,
   caller: () => void,
 ): CachedRequest<T, R, TParams> {
   const explicit = (options as { injector?: Injector }).injector;
@@ -114,7 +110,7 @@ function buildCachedInContext<T, R, TParams>(
   kind: Kind,
   method: string,
   source: RequestSource<TParams>,
-  options: CachedRequestOptions<T, TParams, unknown>,
+  options: CachedRequestOptions<T, TParams>,
   injector: Injector,
   caller: () => void,
 ): CachedRequest<T, R, TParams> {
@@ -144,13 +140,11 @@ function buildCachedInContext<T, R, TParams>(
   const refetchOnWindowFocus =
     options.refetchOnWindowFocus ?? globalConfig.refetchOnWindowFocus ?? false;
   const refetchOnReconnect = options.refetchOnReconnect ?? globalConfig.refetchOnReconnect ?? false;
-  const share = resolveStructuralSharing<T>(options.structuralSharing, options.equal as never);
+  const share = resolveStructuralSharing<T>(options.structuralSharing, options.equal);
 
   /* ------------------------------ request building ----------------------------- */
 
-  const params = signal<TParams | undefined>(
-    (options as { params?: TParams }).params as TParams | undefined,
-  );
+  const params = signal<TParams | undefined>((options as { params?: TParams }).params);
   const gateOnParams = Object.hasOwn(options, 'params');
 
   const evaluate = (p: TParams): HttpResourceRequest | undefined => {
@@ -209,7 +203,7 @@ function buildCachedInContext<T, R, TParams>(
     request: p.request,
     structuralSharing: share,
     retry: retryPolicy,
-    parse: options.parse as ((raw: unknown) => T) | undefined,
+    parse: options.parse,
     responseType: RESPONSE_TYPE[kind],
   });
 
@@ -468,7 +462,7 @@ function buildCachedInContext<T, R, TParams>(
       const promise = current ? startFetch(current) : rejected<T | undefined>(disabledError());
       return promise.then(
         (value): RunResult<T> => ({ ok: true, response: value as T }),
-        (e): RunResult<T> => ({ ok: false, error: toError(e) }),
+        (e: unknown): RunResult<T> => ({ ok: false, error: toError(e) }),
       );
     },
     reload: (): boolean => {
@@ -507,5 +501,5 @@ function buildCachedInContext<T, R, TParams>(
       // subscriber its own refcount has already dropped to zero and cancelled the fetch, and if
       // it was not, somebody else is still waiting for it.
     },
-  } as unknown as CachedRequest<T, R, TParams>;
+  };
 }

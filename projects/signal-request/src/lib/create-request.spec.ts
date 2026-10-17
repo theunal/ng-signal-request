@@ -431,7 +431,7 @@ describe('createRequest – basics', () => {
 
   it('throws a helpful error outside of an injection context, works with { injector }', async () => {
     const { http } = setup();
-    expect(() => createRequest('/x')).toThrowError(
+    expect(() => createRequest('/x')).toThrow(
       /createRequest\(\) can only be used within an injection context/,
     );
     const r = createRequest<number>('/x', { injector: TestBed.inject(Injector) });
@@ -573,7 +573,9 @@ describe('createRequest – lazy mode & run()', () => {
     const unhandled = vi.fn();
     process.on('unhandledRejection', unhandled);
     const r = create(() => createRequest<number>('/n', { lazy: true }));
-    r.run();
+    // The subject of the test: deliberately not awaited, and it must not report an unhandled
+    // rejection. `void` is how the rule (and this test) says "ignored on purpose".
+    void r.run();
     await settle();
     await fail(http, '/n', 400);
     await new Promise((res) => setTimeout(res, 10));
@@ -1011,7 +1013,7 @@ describe('createRequest – documented limits', () => {
           debounce: 100,
         });
       }),
-    ).toThrowError(/ctx\.chain\(\) is only available in auto mode without `debounce`/);
+    ).toThrow(/ctx\.chain\(\) is only available in auto mode without `debounce`/);
   });
 
   it('reports a throwing source to the global hooks without a url', async () => {
@@ -1059,7 +1061,7 @@ describe('createRequest – documented limits', () => {
       ),
     );
     const p = r.run();
-    await expect(p).rejects.toThrowError('source blew up');
+    await expect(p).rejects.toThrow('source blew up');
   });
 });
 
@@ -1247,9 +1249,9 @@ describe('createRequest – method variants', () => {
   it('names the failing call with its full path', () => {
     setup();
     // Called outside an injection context on purpose, so Angular reports the function name.
-    expect(() => createRequest.post.text('/x')).toThrowError(/createRequest\.post\.text/);
-    expect(() => createRequest.put('/x')).toThrowError(/createRequest\.put/);
-    expect(() => createRequest('/x')).toThrowError(/createRequest\(\)/);
+    expect(() => createRequest.post.text('/x')).toThrow(/createRequest\.post\.text/);
+    expect(() => createRequest.put('/x')).toThrow(/createRequest\.put/);
+    expect(() => createRequest('/x')).toThrow(/createRequest\(\)/);
   });
 
   it('rejects a `method` field in a source at compile time', () => {
@@ -1431,13 +1433,13 @@ describe('createRequest – params placement', () => {
     );
 
     await settle();
-    (await http.expectOne('/save')).flush([{ id: 1 }]);
+    http.expectOne('/save').flush([{ id: 1 }]);
     await settle();
     expect(r.response()).toEqual([{ id: 1 }]);
 
     r.params.set({ body: { v: 2 } });
     await settle();
-    (await http.expectOne('/save')).flush([{ id: 2 }]);
+    http.expectOne('/save').flush([{ id: 2 }]);
     await settle();
     expect(r.response()).toEqual([{ id: 2 }]);
   });
@@ -1484,7 +1486,7 @@ describe('createRequest – success()', () => {
 
 describe('createRequest – params typing', () => {
   it('requires a params option whenever TParams is given', () => {
-    const { create } = setup();
+    setup();
 
     // @ts-expect-error — a `params` option is required once TParams is declared
     const missing = () => createRequest<number, ListQuery>(() => '/n', { initialValue: 0 });

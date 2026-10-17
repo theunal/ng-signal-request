@@ -107,7 +107,7 @@ export function snapshotEntries(
   return entries.map((entry) => describe(entry, now));
 }
 
-function describe(entry: CacheEntry<unknown>, now: number): DevtoolsEntry {
+function describe(entry: CacheEntry, now: number): DevtoolsEntry {
   const error = entry.error();
   const data = entry.data();
   const local = entry.local();

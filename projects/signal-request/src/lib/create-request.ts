@@ -60,10 +60,10 @@ type ResourceFactory = (
 ) => HttpResourceRef<unknown>;
 
 const FACTORIES: Record<Kind, ResourceFactory> = {
-  json: httpResource as unknown as ResourceFactory,
-  text: httpResource.text as unknown as ResourceFactory,
-  blob: httpResource.blob as unknown as ResourceFactory,
-  arrayBuffer: httpResource.arrayBuffer as unknown as ResourceFactory,
+  json: httpResource,
+  text: httpResource.text,
+  blob: httpResource.blob,
+  arrayBuffer: httpResource.arrayBuffer,
 };
 
 /** `ctx.chain()` only exists while Angular evaluates the params function of a resource. */
@@ -80,7 +80,7 @@ function buildRequest<T, R, TParams>(
   kind: Kind,
   method: string,
   source: RequestSource<TParams>,
-  options: RequestOptions<T, TParams, unknown>,
+  options: RequestOptions<T, TParams>,
   caller: () => void,
 ): SignalRequest<T, R, TParams> {
   let injector = options.injector;
@@ -97,7 +97,7 @@ function buildInContext<T, R, TParams>(
   kind: Kind,
   method: string,
   source: RequestSource<TParams>,
-  options: RequestOptions<T, TParams, unknown>,
+  options: RequestOptions<T, TParams>,
   injector: Injector,
   caller: () => void,
 ): SignalRequest<T, R, TParams> {
@@ -129,9 +129,7 @@ function buildInContext<T, R, TParams>(
    * Without a `TParams` the source is always evaluated and simply ignores the signal, so common
    * sources like `() => \`/jobs/${id()}\`` keep working untouched.
    */
-  const params = signal<TParams | undefined>(
-    (options as { params?: TParams }).params as TParams | undefined,
-  );
+  const params = signal<TParams | undefined>((options as { params?: TParams }).params);
   const gateOnParams = Object.hasOwn(options, 'params');
 
   /**
@@ -187,7 +185,7 @@ function buildInContext<T, R, TParams>(
       return gated();
     },
     {
-      parse: options.parse as ((raw: unknown) => unknown) | undefined,
+      parse: options.parse,
       defaultValue: initial,
       equal: options.equal as ((a: unknown, b: unknown) => boolean) | undefined,
       injector,
@@ -248,7 +246,7 @@ function buildInContext<T, R, TParams>(
 
   const response = computed<T | undefined>(() => {
     const s = resource.status();
-    if (s === 'resolved' || s === 'local' || s === 'reloading') return resource.value() as T;
+    if (s === 'resolved' || s === 'local' || s === 'reloading') return resource.value();
     return options.keepPreviousValue ? lastGood() : initial;
   }) as unknown as Signal<R>;
 
@@ -357,7 +355,7 @@ function buildInContext<T, R, TParams>(
       case 'resolved': {
         resetRetry();
         const value = resource.value();
-        lastGood.set(value as T);
+        lastGood.set(value);
         if (statusChanged || keyChanged || pending.size > 0 || value !== lastValue) {
           lastValue = value;
           resolvePending(value as T);
@@ -532,7 +530,7 @@ function buildInContext<T, R, TParams>(
     tryRun: (): Promise<RunResult<T>> =>
       run().then(
         (value): RunResult<T> => ({ ok: true, response: value }),
-        (e): RunResult<T> => ({ ok: false, error: toError(e) }),
+        (e: unknown): RunResult<T> => ({ ok: false, error: toError(e) }),
       ),
 
     reload: reloadNow,
@@ -611,12 +609,12 @@ export interface CreateRequestFn<TRaw = unknown, TDefault = unknown> {
  * source reads. For writes that must not re-fire on their own, use `createMutation`
  * (or `lazy: true`).
  */
-export interface CreateRequest extends CreateRequestFn<unknown, unknown> {
-  get: CreateRequestFn<unknown, unknown>;
-  post: CreateRequestFn<unknown, unknown>;
-  put: CreateRequestFn<unknown, unknown>;
-  patch: CreateRequestFn<unknown, unknown>;
-  delete: CreateRequestFn<unknown, unknown>;
+export interface CreateRequest extends CreateRequestFn {
+  get: CreateRequestFn;
+  post: CreateRequestFn;
+  put: CreateRequestFn;
+  patch: CreateRequestFn;
+  delete: CreateRequestFn;
 }
 
 /** A function whose `name` is shown by Angular in "must be called in an injection context" errors. */
@@ -627,7 +625,7 @@ function named(name: string): () => void {
 }
 
 function createFn(method: string, kind: Kind, caller: () => void) {
-  return (source: RequestSource<never>, options: RequestOptions<never, never, unknown> = {}) =>
+  return (source: RequestSource<never>, options: RequestOptions<never, never> = {}) =>
     // The one branch in the whole library that decides how a request is transported. Everything
     // after it — overloads, verbs, response types — is shared by both paths.
     (options as { key?: unknown }).key !== undefined
@@ -699,4 +697,4 @@ export const createRequest: CreateRequest = Object.assign(GET_JSON, {
   put: createVariant('createRequest.put', 'PUT'),
   patch: createVariant('createRequest.patch', 'PATCH'),
   delete: createVariant('createRequest.delete', 'DELETE'),
-}) as unknown as CreateRequest;
+});

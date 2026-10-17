@@ -1,4 +1,4 @@
-import { ChangeDetectionStrategy, Component, inject, signal } from '@angular/core';
+import { ChangeDetectionStrategy, Component, signal } from '@angular/core';
 import { createMutation, createRequest } from 'ng-signal-request';
 
 import type { LocalPost, Post } from '../models';
@@ -185,14 +185,16 @@ export class FormSection {
   });
 
   protected async remove(): Promise<void> {
-    const first = this.posts.response()[0];
+    // `.at(0)` rather than `[0]`: the array is empty before the first response lands, and `[0]` is
+    // typed `Post` while being `undefined` at runtime.
+    const first = this.posts.response().at(0);
     if (!first) return;
     const result = await this.deletePost.tryRun({ path: { id: first.id } });
     console.log('DELETE sonucu:', result.ok ? '200 OK' : result.error.message);
   }
 
   protected async updateFirst(): Promise<void> {
-    const first = this.posts.response()[0];
+    const first = this.posts.response().at(0);
     if (!first) return;
     const result = await this.updatePost.tryRun({
       path: { id: first.id },

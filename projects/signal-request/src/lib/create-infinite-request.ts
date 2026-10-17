@@ -20,7 +20,7 @@ import { normalizeKey } from './cache/key';
 import { QueryCache } from './cache/query-cache';
 import { resolveStructuralSharing } from './cache/structural-sharing';
 import { SIGNAL_REQUEST_CONFIG } from './config';
-import { RequestCancelledError, toError, toRequestError } from './errors';
+import { RequestCancelledError, toRequestError } from './errors';
 import type {
   FlattenedPages,
   InfiniteRequest,
@@ -110,7 +110,7 @@ function injectionContextInjector(caller: () => void): Injector {
  * passes through unchanged — the library has no way to know which of its fields is the list, and
  * guessing would be worse than not flattening.
  */
-function flatten<TPage>(loaded: readonly TPage[]): unknown {
+function flatten(loaded: readonly unknown[]): unknown {
   const out: unknown[] = [];
   for (const page of loaded) {
     if (Array.isArray(page)) {
@@ -532,12 +532,12 @@ export interface CreateInfiniteRequestFn<TDefault = unknown> {
  * practice: an infinite query is a read. They are still `createVariant`-generated so the response
  * types line up, but nothing about the design encourages them.
  */
-export interface CreateInfiniteRequest extends CreateInfiniteRequestFn<unknown> {
-  get: CreateInfiniteRequestFn<unknown>;
-  post: CreateInfiniteRequestFn<unknown>;
-  put: CreateInfiniteRequestFn<unknown>;
-  patch: CreateInfiniteRequestFn<unknown>;
-  delete: CreateInfiniteRequestFn<unknown>;
+export interface CreateInfiniteRequest extends CreateInfiniteRequestFn {
+  get: CreateInfiniteRequestFn;
+  post: CreateInfiniteRequestFn;
+  put: CreateInfiniteRequestFn;
+  patch: CreateInfiniteRequestFn;
+  delete: CreateInfiniteRequestFn;
 }
 
 /** A function whose `name` is shown by Angular in "must be called in an injection context" errors. */
@@ -568,7 +568,7 @@ function createVariant(label: string, method: string): CreateInfiniteRequestFn<n
     text: infiniteFactory(`${label}.text`, method, 'text'),
     blob: infiniteFactory(`${label}.blob`, method, 'blob'),
     arrayBuffer: infiniteFactory(`${label}.arrayBuffer`, method, 'arrayBuffer'),
-  }) as unknown as CreateInfiniteRequestFn<never>;
+  });
 }
 
 const GET_JSON = createVariant('createInfiniteRequest', 'GET');
@@ -615,4 +615,4 @@ export const createInfiniteRequest: CreateInfiniteRequest = Object.assign(GET_JS
   put: createVariant('createInfiniteRequest.put', 'PUT'),
   patch: createVariant('createInfiniteRequest.patch', 'PATCH'),
   delete: createVariant('createInfiniteRequest.delete', 'DELETE'),
-}) as unknown as CreateInfiniteRequest;
+});

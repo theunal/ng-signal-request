@@ -14,13 +14,13 @@ import { isPlatformBrowser } from '@angular/common';
 import {
   assertInInjectionContext,
   DestroyRef,
-  ENVIRONMENT_INITIALIZER,
   inject,
   InjectionToken,
   Injector,
   makeEnvironmentProviders,
   makeStateKey,
   PLATFORM_ID,
+  provideEnvironmentInitializer,
   runInInjectionContext,
   signal,
   TransferState,
@@ -29,7 +29,7 @@ import {
   type Signal,
   type StateKey,
 } from '@angular/core';
-import { QueryCache, type CacheEntry, type QueryKey, type QueryKeyFilter } from 'ng-signal-request';
+import { QueryCache, type CacheEntry, type QueryKeyFilter } from 'ng-signal-request';
 
 /* -------------------------------------------------------------------------- */
 /*  The snapshot                                                              */
@@ -116,10 +116,7 @@ export interface HydrateOptions {
 }
 
 /** The entries `include` / `exclude` select, using the cache's own matcher. */
-function selectEntries(
-  cache: QueryCache,
-  options: SnapshotFilterOptions,
-): readonly CacheEntry<unknown>[] {
+function selectEntries(cache: QueryCache, options: SnapshotFilterOptions): readonly CacheEntry[] {
   const included = options.include === undefined ? cache.all() : cache.matching(options.include);
   if (options.exclude === undefined) return included;
   const excluded = new Set(cache.matching(options.exclude).map((entry) => entry.hash));
@@ -528,14 +525,10 @@ export function providePersistedCache(options: PersistOptions = {}): Environment
         return persister;
       },
     },
-    {
-      provide: ENVIRONMENT_INITIALIZER,
-      multi: true,
-      // Forces the factory eagerly. Without this the persister would be created by the first
-      // `inject(CACHE_PERSISTER)`, which may be long after the first request resolved — and the
-      // stored snapshot has to be in place before that.
-      useValue: () => void inject(CACHE_PERSISTER),
-    },
+    // Forces the factory eagerly. Without this the persister would be created by the first
+    // `inject(CACHE_PERSISTER)`, which may be long after the first request resolved — and the
+    // stored snapshot has to be in place before that.
+    provideEnvironmentInitializer(() => void inject(CACHE_PERSISTER)),
   ]);
 }
 
@@ -574,29 +567,25 @@ export interface CacheTransferOptions extends SnapshotFilterOptions {
 export function provideCacheTransfer(options: CacheTransferOptions = {}): EnvironmentProviders {
   const stateKey = options.key ?? CACHE_TRANSFER_KEY;
   return makeEnvironmentProviders([
-    {
-      provide: ENVIRONMENT_INITIALIZER,
-      multi: true,
-      useValue: () => {
-        const cache = inject(QueryCache);
-        const transfer = inject(TransferState);
+    provideEnvironmentInitializer(() => {
+      const cache = inject(QueryCache);
+      const transfer = inject(TransferState);
 
-        if (isPlatformBrowser(inject(PLATFORM_ID))) {
-          const snapshot = transfer.get(stateKey, null);
-          // Read once. Leaving it in place would keep a second copy of the data in the document for
-          // nothing, and would re-hydrate every time the injector is created.
-          transfer.remove(stateKey);
-          if (snapshot !== null) {
-            hydrate(cache, snapshot, { codec: options.codec, maxAge: options.maxAge });
-          }
-          return;
+      if (isPlatformBrowser(inject(PLATFORM_ID))) {
+        const snapshot = transfer.get(stateKey, null);
+        // Read once. Leaving it in place would keep a second copy of the data in the document for
+        // nothing, and would re-hydrate every time the injector is created.
+        transfer.remove(stateKey);
+        if (snapshot !== null) {
+          hydrate(cache, snapshot, { codec: options.codec, maxAge: options.maxAge });
         }
+        return;
+      }
 
-        inject(DestroyRef).onDestroy(() => {
-          transfer.set(stateKey, dehydrate(cache, options));
-        });
-      },
-    },
+      inject(DestroyRef).onDestroy(() => {
+        transfer.set(stateKey, dehydrate(cache, options));
+      });
+    }),
   ]);
 }
 

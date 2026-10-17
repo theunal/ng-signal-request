@@ -39,7 +39,7 @@ export class QueryClient {
    * Keyed rather than an array because the whole point is coalescing: three mutations that each
    * invalidate `['users']` in the same tick must produce **one** refetch, not three.
    */
-  private readonly pending = new Map<string, CacheEntry<unknown>>();
+  private readonly pending = new Map<string, CacheEntry>();
   private scheduled = false;
 
   /** Bumped when the *set* of entries changes; {@link size} is a `computed` over it. */
@@ -115,7 +115,13 @@ export class QueryClient {
     return matched.length;
   }
 
-  /** The cached value for an exact key, or `undefined`. Never creates an entry. */
+  /**
+   * The cached value for an exact key, or `undefined`. Never creates an entry.
+   *
+   * The type argument is the caller's assertion about what was cached; the cache cannot know it.
+   * Removing it, as `no-unnecessary-type-parameters` suggests, would push a cast onto every call.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-parameters
   getData<T>(key: QueryKey): T | undefined {
     return this.cache.peek<T>(key)?.data();
   }
@@ -209,7 +215,7 @@ export class QueryClient {
    * same turn, and the user should not see a frame where half the queries have already
    * refetched and half have not.
    */
-  private schedule(entries: readonly CacheEntry<unknown>[]): void {
+  private schedule(entries: readonly CacheEntry[]): void {
     for (const entry of entries) this.pending.set(entry.hash, entry);
     if (this.scheduled) return;
     this.scheduled = true;

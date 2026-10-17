@@ -46,10 +46,10 @@ describe('normalizeKey()', () => {
   it('refuses a function or symbol segment, with a message that says what to do', () => {
     // A function in a key is a new function on every evaluation, so the entry would never be
     // reused: the cache would grow without ever hitting. Silence there is the worst outcome.
-    expect(() => normalizeKey(['users', () => 1])).toThrowError(
+    expect(() => normalizeKey(['users', () => 1])).toThrow(
       /cannot be a function or symbol \(got function\)/,
     );
-    expect(() => normalizeKey(['users', Symbol('id')])).toThrowError(
+    expect(() => normalizeKey(['users', Symbol('id')])).toThrow(
       /cannot be a function or symbol \(got symbol\)/,
     );
   });

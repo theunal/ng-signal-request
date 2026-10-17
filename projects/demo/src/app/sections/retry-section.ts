@@ -245,6 +245,8 @@ export class RetrySection {
     const q = (event.target as HTMLInputElement).value;
     this.term.set(q);
     // One write; `debounce` collapses the rest.
-    this.search.params.set({ ...this.search.params()!, q });
+    const current = this.search.params();
+    if (!current) return; // disabled: no params to write into
+    this.search.params.set({ ...current, q });
   }
 }

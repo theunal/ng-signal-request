@@ -165,7 +165,7 @@ export function createRequests<T, TItem>(
     injector = inject(Injector);
   }
   return runInInjectionContext(injector, () =>
-    buildRequestSet(items, build, injector as Injector, options?.key),
+    buildRequestSet(items, build, injector, options?.key),
   );
 }
 

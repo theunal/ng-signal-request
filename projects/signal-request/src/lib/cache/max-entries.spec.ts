@@ -1,7 +1,12 @@
 import { PLATFORM_ID } from '@angular/core';
 import { TestBed } from '@angular/core/testing';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createRequest, provideSignalRequest, QueryCache, QueryClient } from '../../public-api';
+import {
+  createRequest,
+  provideSignalRequest,
+  type QueryCache,
+  QueryClient,
+} from '../../public-api';
 import { cache, settle, setup } from '../../../testing/testing';
 
 /**

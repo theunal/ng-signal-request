@@ -314,7 +314,10 @@ describe('createRequests() — the dynamic set', () => {
     http.expectOne('/rows/2').flush('two');
     await settle();
 
+    // One handle per row, before the list shrinks.
+    expect(rows.handles()).toHaveLength(2);
     const dropped = rows.handles()[1];
+    expect(dropped).toBeDefined();
 
     ids.set([1]);
     await settle();
@@ -414,6 +417,6 @@ describe('createRequests() — the dynamic set', () => {
         () => [1],
         (id) => createRequest<string>(() => `/rows/${id}`),
       ),
-    ).toThrowError(/createRequests/);
+    ).toThrow(/createRequests/);
   });
 });

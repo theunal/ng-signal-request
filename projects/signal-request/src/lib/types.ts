@@ -186,7 +186,7 @@ export interface SignalRequestConfig {
 /*  Query (createRequest)                                                     */
 /* -------------------------------------------------------------------------- */
 
-interface RequestOptionsBase<T, TParams, TRaw> {
+interface RequestOptionsBase<T, TRaw> {
   /**
    * `false` (default): fires automatically and re-fires whenever a signal used in the source changes.
    * `true`: nothing happens until you call `run()`. Later signal changes do NOT re-fire.
@@ -295,11 +295,10 @@ export interface ParamsOption<TParams> {
  * > `equal` for selections that rebuild an object on every response. See "Transforming the
  * > response" in the README.
  */
-export type RequestOptions<T, TParams = void, TRaw = unknown> = RequestOptionsBase<
-  T,
-  TParams,
-  TRaw
-> &
+export type RequestOptions<T, TParams = void, TRaw = unknown> = RequestOptionsBase<T, TRaw> &
+  // `void` in a tuple is the "no params declared" marker this API is built on, and the type-level
+  // use is invisible to the rule, which knows only the return-type position.
+  // eslint-disable-next-line @typescript-eslint/no-invalid-void-type
   ([TParams] extends [void] ? unknown : ParamsOption<TParams>);
 
 /** What a cached request does when its **first** subscriber arrives. */

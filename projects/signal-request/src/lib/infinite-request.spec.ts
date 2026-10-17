@@ -505,7 +505,7 @@ describe('createInfiniteRequest — types', () => {
         initialPageParam: 0,
         getNextPageParam: () => undefined,
       }),
-    ).toThrowError(/createInfiniteRequest/);
+    ).toThrow(/createInfiniteRequest/);
   });
 });
 

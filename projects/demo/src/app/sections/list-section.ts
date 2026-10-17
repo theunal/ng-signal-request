@@ -186,6 +186,7 @@ export class ListSection {
       // `!` is only needed for the type system: `detail.resource` is `Post | undefined`
       // because it has no `initialValue`. At runtime chain() resolves exactly when the value
       // IS there, and parks us in `loading` otherwise.
+      // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
       url: `/posts/${ctx.chain(this.detail.resource)!.id}/comments`,
       params,
     }),
@@ -206,13 +207,17 @@ export class ListSection {
   protected changePage(event: Event): void {
     const page = Math.max(1, Number((event.target as HTMLInputElement).value) || 1);
     this.page.set(page);
-    this.list.params.set({ ...this.list.params()!, page });
+    const current = this.list.params();
+    if (!current) return; // the request is disabled; there is nothing to page
+    this.list.params.set({ ...current, page });
   }
 
   protected changePerPage(event: Event): void {
     const perPage = Number((event.target as HTMLSelectElement).value) || 10;
     this.perPage.set(perPage);
-    this.list.params.set({ ...this.list.params()!, perPage });
+    const current = this.list.params();
+    if (!current) return;
+    this.list.params.set({ ...current, perPage });
   }
 
   /** `undefined` disables the request entirely. */
@@ -244,7 +249,8 @@ export class ListSection {
   /** `set()` overwrites the whole value. */
   protected renameFirst(): void {
     const all = this.list.response();
-    const first = all[0];
+    // `.at(0)` rather than `[0]`: an empty list is a real state, and `[0]` would be typed `LocalPost`.
+    const first = all.at(0);
     if (!first) return;
     this.list.set([{ ...first, title: `${first.title} (düzenlendi)` }, ...all.slice(1)]);
   }

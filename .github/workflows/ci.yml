@@ -30,6 +30,12 @@ jobs:
       - name: Typecheck
         run: pnpm run typecheck
 
+      - name: Lint (angular-eslint + typescript-eslint strict-type-checked)
+        run: pnpm run lint
+
+      - name: Check formatting
+        run: pnpm run format:check
+
       - name: Test (v8 coverage; the thresholds in angular.json are enforced)
         run: pnpm run test
 

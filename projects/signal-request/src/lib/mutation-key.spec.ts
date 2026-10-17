@@ -31,7 +31,7 @@ describe('createMutation — onMutate', () => {
       createMutation<Todo[], string, { seen: number }>(
         (title) => ({ url: '/todos', body: { title } }),
         {
-          onMutate: (title) => {
+          onMutate: (_title) => {
             order.push(`onMutate saw ${list.response().length}`);
             return { seen: list.response().length };
           },
@@ -135,7 +135,7 @@ describe('createMutation — onMutate', () => {
     await settle();
 
     expect(result.ok).toBe(false);
-    expect(result.ok === false && result.error.message).toBe('could not prepare');
+    expect(!result.ok && result.error.message).toBe('could not prepare');
     // The decisive part: nothing was sent, so a failed preparation cannot half-write.
     http.expectNone(() => true);
     expect(save.status()).toBe('error');

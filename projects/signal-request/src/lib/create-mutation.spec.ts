@@ -226,8 +226,8 @@ describe('createMutation', () => {
 
   it('names the failing call with its full path', () => {
     setup();
-    expect(() => createMutation.put(() => '/x')).toThrowError(/createMutation\.put/);
-    expect(() => createMutation(() => '/x')).toThrowError(/createMutation\(\)/);
+    expect(() => createMutation.put(() => '/x')).toThrow(/createMutation\.put/);
+    expect(() => createMutation(() => '/x')).toThrow(/createMutation\(\)/);
   });
 
   it('destroy() aborts in-flight calls and makes the handle unusable', async () => {
@@ -505,7 +505,8 @@ describe('createMutation', () => {
       return { list, add };
     });
 
-    add.run('cancelled');
+    // Deliberately not awaited: the call is cancelled below, which rejects this promise.
+    add.run('cancelled').catch(() => undefined);
     const req = http.expectOne('/todos');
     expect(list.response()).toEqual(['cancelled (sending…)', 'existing']);
 
@@ -545,7 +546,8 @@ describe('createMutation', () => {
       }),
     );
 
-    const a = save.run('a');
+    // `a` is the call that fails below; its rejection is what the state assertions describe.
+    save.run('a').catch(() => undefined);
     const b = save.run('b');
     const [ra, rb] = http.match('/save');
 
@@ -704,7 +706,7 @@ describe('createMutation', () => {
     expect(m.loading()).toBe(true);
     http.expectOne('/n').flush({ anything: true });
 
-    await expect(p).rejects.toThrowError('bad shape');
+    await expect(p).rejects.toThrow('bad shape');
     await settle();
 
     expect(m.loading()).toBe(false);
@@ -774,7 +776,7 @@ describe('createMutation', () => {
     const result = await save.tryRun({ path: { id: undefined } });
 
     expect(result.ok).toBe(false);
-    expect(result.ok === false && result.error).toBeInstanceOf(RequestCancelledError);
+    expect(!result.ok && result.error).toBeInstanceOf(RequestCancelledError);
     http.expectNone(() => true);
   });
 

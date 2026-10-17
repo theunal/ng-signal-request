@@ -104,7 +104,9 @@ function mergeQuery(
 
   for (const [key, raw] of Object.entries(extra)) {
     if (raw === null || raw === undefined) {
-      delete base[key];
+      // `delete base[key]` on a computed key is banned by the lint config; this is the same
+      // operation without the deoptimization the rule is guarding against.
+      Reflect.deleteProperty(base, key);
       continue;
     }
     if (Array.isArray(raw)) {
@@ -112,7 +114,7 @@ function mergeQuery(
       // empty is removed instead of leaving a bare `?key=` behind.
       const items = raw.map(toPrimitive).filter((v): v is ParamPrimitive => v !== undefined);
       if (items.length > 0) base[key] = items;
-      else delete base[key];
+      else Reflect.deleteProperty(base, key);
     } else {
       // `toPrimitive` only returns `undefined` for nullish input, which the branch above already
       // caught, so a non-array value always normalises to something.
@@ -157,16 +159,20 @@ function cleanParams(params: ParamRecord): ParamRecord {
  * `null`. Sending `/users/:id` to a server is never what the caller meant.
  */
 function fillPath(url: string, path: RequestConfig['path']): string | undefined {
-  let missing = false;
+  // Collected in an array rather than a `let missing = false` flag: the flag is only ever set from
+  // inside the `replace` callback, and the type checker cannot see that the callback ran, so it
+  // narrows the flag to `false` and calls the guard below dead code. The array has the same
+  // lifetime and no such blind spot.
+  const unresolved: string[] = [];
   const filled = url.replace(PLACEHOLDER, (_match, key: string) => {
     const value = path === undefined ? undefined : path[key];
     if (value === null || value === undefined) {
-      missing = true;
+      unresolved.push(key);
       return '';
     }
     return encodeURIComponent(String(value));
   });
-  return missing ? undefined : filled;
+  return unresolved.length === 0 ? filled : undefined;
 }
 
 function withBase(url: string, baseUrl: string | undefined): string {

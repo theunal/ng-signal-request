@@ -1,4 +1,4 @@
-import { ComponentFixture, TestBed } from '@angular/core/testing';
+import { type ComponentFixture, TestBed } from '@angular/core/testing';
 import { describe, expect, expectTypeOf, it, vi } from 'vitest';
 import { inject } from '@angular/core';
 import { createRequest, provideSignalRequest, QueryClient } from 'ng-signal-request';
@@ -316,7 +316,7 @@ describe('DevtoolsPanel — the table', () => {
     fixture.detectChanges();
 
     const cells = [...fixture.nativeElement.querySelectorAll('tbody td')].map((cell: Element) =>
-      cell.textContent?.trim(),
+      cell.textContent.trim(),
     );
     expect(cells[0]).toBe('["rows"]');
     expect(cells[1]).toBe('loading');

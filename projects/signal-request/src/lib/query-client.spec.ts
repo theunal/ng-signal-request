@@ -1,5 +1,5 @@
 import { inject } from '@angular/core';
-import { afterEach, describe, expect, expectTypeOf, it, vi } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { createMutation, createRequest, QueryClient, type MutationOptions } from '../public-api';
 import { cache, settle, setup } from '../../testing/testing';
 
@@ -172,7 +172,7 @@ describe('QueryClient — invalidate', () => {
   });
 
   it('fires onSuccess once per fetch even when two handles share the entry', async () => {
-    const { http, create, createChild } = setup();
+    const { http, createChild } = setup();
     const a = createChild();
     const b = createChild();
     const first = vi.fn();
@@ -330,7 +330,7 @@ describe('createMutation — invalidates by key', () => {
   it('invalidates: [["users"]] refreshes every open ["users", …] query', async () => {
     // The acceptance criterion. Two separate components hold two pages of the same list, and the
     // mutation invalidates a key — so neither needs to be referenced by the mutation.
-    const { http, create, createChild } = setup();
+    const { http, createChild } = setup();
     const pageOne = createChild();
     const pageTwo = createChild();
     const writer = createChild();

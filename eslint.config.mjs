@@ -35,7 +35,18 @@ import tseslint from 'typescript-eslint';
 export default tseslint.config(
   {
     name: 'ng-signal-request/ignores',
-    ignores: ['dist/**', 'coverage/**', '.angular/**', 'node_modules/**'],
+    ignores: [
+      'dist/**',
+      'coverage/**',
+      '.angular/**',
+      'node_modules/**',
+      // The 0.1.0 compatibility fixture is compiled by `pnpm check:types-compat`, not by the
+      // linter, and it is dated on purpose: it is written the way a 0.1.0 application wrote code,
+      // so the strict type-aware rules reject it for the era it is pinned to rather than for a
+      // mistake. Linting it would mean either relaxing rules for the whole repository or editing
+      // the fixture into something that no longer proves anything about 0.1.0.
+      'compat/**',
+    ],
   },
   {
     name: 'ng-signal-request/typescript',

@@ -6,7 +6,7 @@ import {
   TransferState,
 } from '@angular/core';
 import { TestBed } from '@angular/core/testing';
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, expectTypeOf, it, vi } from 'vitest';
 import {
   createRequest,
   provideSignalRequest,
@@ -15,6 +15,7 @@ import {
   type CachedRequest,
 } from 'ng-signal-request';
 import {
+  anyDataDehydrateFilter,
   CACHE_PERSISTER,
   CACHE_TRANSFER_KEY,
   createPersister,
@@ -26,8 +27,11 @@ import {
   provideCacheTransfer,
   providePersistedCache,
   SNAPSHOT_VERSION,
+  type AsyncCacheStorage,
   type CacheSnapshot,
   type CacheStorage,
+  type Persister,
+  type RestoreOf,
   type SnapshotCodec,
 } from './persist';
 import { cache, settle, setup } from '../testing/testing';
@@ -1752,5 +1756,70 @@ describe('the default dehydrate filter', () => {
     expect(snapshot.entries).toHaveLength(1);
     expect(snapshot.entries[0].data).toEqual(rows([1]));
     handle.destroy();
+  });
+
+  it('is restored to 0.1.0 behaviour by `anyDataDehydrateFilter`', async () => {
+    const { http, create } = setup();
+    const handle = keyed<Row[]>(create, ['rows']);
+    await settle();
+    http.expectOne('/rows').flush(rows([1]));
+    await settle();
+
+    create(() => inject(QueryClient)).invalidate(['rows']);
+    await settle();
+    // The narrowed default excludes this entry because its refetch is in flight.
+    expect(cache().peek(['rows'])?.isFetching()).toBe(true);
+    expect(dehydrate(cache()).entries).toEqual([]);
+
+    // `anyDataDehydrateFilter` is the documented opt-out, and it is 0.1.0's clause exactly: an
+    // entry with data is stored, whatever it is doing at the moment.
+    const restored = dehydrate(cache(), { dehydrateFilter: anyDataDehydrateFilter });
+    expect(restored.entries).toHaveLength(1);
+    expect(restored.entries[0].data).toEqual(rows([1]));
+
+    http.expectOne('/rows').flush(rows([2]));
+    await settle();
+    handle.destroy();
+  });
+
+  it('also keeps an entry that still holds a value after a failed refetch', async () => {
+    const { http, create } = setup();
+    const handle = keyed<Row[]>(create, ['rows']);
+    await settle();
+    http.expectOne('/rows').flush(rows([1]));
+    await settle();
+
+    create(() => inject(QueryClient)).invalidate(['rows']);
+    await settle();
+    http.expectOne('/rows').flush({ message: 'down' }, { status: 500, statusText: 'Error' });
+    await settle();
+
+    expect(dehydrate(cache()).entries).toEqual([]);
+    expect(dehydrate(cache(), { dehydrateFilter: anyDataDehydrateFilter }).entries).toHaveLength(1);
+    handle.destroy();
+  });
+});
+
+describe('the type of hydrate()', () => {
+  it('is a number for every 0.1.0 storage, and a promise only for an asynchronous one', () => {
+    // The default storage, and no storage at all, are synchronous.
+    expectTypeOf<RestoreOf<undefined>>().toEqualTypeOf<number>();
+    expectTypeOf<RestoreOf<null>>().toEqualTypeOf<number>();
+    expectTypeOf<RestoreOf<Storage>>().toEqualTypeOf<number>();
+
+    // An explicitly asynchronous storage can only answer later.
+    expectTypeOf<RestoreOf<AsyncCacheStorage>>().toEqualTypeOf<Promise<number>>();
+
+    // A storage widened to the whole interface is neither provably one nor the other. The union is
+    // the honest answer, and it is what `Persister` written with no type argument means.
+    expectTypeOf<RestoreOf<CacheStorage>>().toEqualTypeOf<number | Promise<number>>();
+    expectTypeOf<Persister>().toEqualTypeOf<Persister<number | Promise<number>>>();
+
+    // `indexedDbStorage` is the one built-in that is asynchronous, which is what makes the
+    // inference above reachable without a cast on the caller's side.
+    expectTypeOf<ReturnType<typeof indexedDbStorage>>().toEqualTypeOf<AsyncCacheStorage>();
+    // The end-to-end claim — "a 0.1.0 caller still reads a number" — is pinned where it belongs:
+    // `compat/v0.1.0/usage.ts` annotates the results of both `createPersister({ storage:
+    // localStorage })` and `createPersister()` as `number`, and compiles against the build.
   });
 });

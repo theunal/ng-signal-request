@@ -159,6 +159,22 @@ export interface DehydrateOptions extends SnapshotFilterOptions {
 export const defaultDehydrateFilter: DehydratePredicate = (entry) =>
   entry.hasData() && !entry.isFetching() && entry.error() === undefined;
 
+/**
+ * The 0.1.0 {@link DehydratePredicate}: "anything with data", and nothing else.
+ *
+ * It exists to be the documented **opt-out** from {@link defaultDehydrateFilter}, which narrowed in
+ * 0.2.0 to also require that the entry is not fetching and not in an error state. An application
+ * that relied on the old default — typically one whose restore is deliberately tolerant of a
+ * mid-flight or failed entry — passes this value and gets 0.1.0's behaviour back:
+ *
+ * ```ts
+ * providePersistedCache({ dehydrateFilter: anyDataDehydrateFilter });
+ * ```
+ *
+ * It is the old filter exactly: `data !== undefined`, no other clause.
+ */
+export const anyDataDehydrateFilter: DehydratePredicate = (entry) => entry.hasData();
+
 export interface HydrateOptions {
   readonly codec?: SnapshotCodec;
   /**
@@ -383,14 +399,38 @@ export interface CacheStorage {
   removeItem(key: string): void | Promise<void>;
 }
 
-export interface PersistOptions extends SnapshotFilterOptions {
+/**
+ * A {@link CacheStorage} whose every operation answers on a later turn.
+ *
+ * An interface of its own rather than a second set of option names, and it exists for exactly one
+ * reason: a read from a storage like this cannot be answered on the current stack, and the
+ * storage's **own type** is how {@link createPersister} knows whether `hydrate()` returns a number
+ * or a promise. A storage that is asynchronous says so here; a storage that is not never mentions
+ * it, and neither does an application that never uses one.
+ *
+ * It is a subtype of {@link CacheStorage}, so anything that accepted the wider interface keeps
+ * accepting this one — every storage written against 0.1.0 included.
+ */
+export interface AsyncCacheStorage extends CacheStorage {
+  getItem(key: string): Promise<string | null>;
+  setItem(key: string, value: string): Promise<void>;
+  removeItem(key: string): Promise<void>;
+}
+
+export interface PersistOptions<
+  S extends CacheStorage | null | undefined = CacheStorage,
+> extends SnapshotFilterOptions {
   /**
    * Where to write. Defaults to `localStorage` when it is reachable, and to `null` — persistence
    * disabled — everywhere else, which covers the server, a sandboxed iframe, and a browser with
    * storage blocked. Pass `sessionStorage`, {@link indexedDbStorage}, an in-memory double, or
    * `null` explicitly to override.
+   *
+   * The parameter is what lets {@link createPersister} say whether `hydrate()` is a number or a
+   * promise: it is inferred from the value written here, and the default keeps the interface usable
+   * with no type argument at all.
    */
-  readonly storage?: CacheStorage | null;
+  readonly storage?: S | null;
   /** The storage key. Defaults to `'ng-signal-request'`. */
   readonly key?: string;
   readonly codec?: SnapshotCodec;
@@ -427,13 +467,45 @@ export interface PersistOptions extends SnapshotFilterOptions {
 }
 
 /**
+ * What `hydrate()` answers for a persister built over storage `S`.
+ *
+ * A conditional type rather than an overload pair, because the storage is the thing that knows the
+ * answer and its type is the only honest source for it:
+ *
+ * - a storage whose `getItem` returns `string | null` — `localStorage`, `sessionStorage`, an
+ *   in-memory double — can be read on the current stack, so `hydrate()` is a **`number`**;
+ * - a storage whose `getItem` returns a promise — {@link AsyncCacheStorage}, i.e.
+ *   {@link indexedDbStorage} — cannot, so `hydrate()` is a **`Promise<number>`**;
+ * - a storage widened to the whole {@link CacheStorage} interface, or one that is both depending on
+ *   which call it makes, is neither provably one nor the other, so `hydrate()` is the union. Saying
+ *   `number` there is the silent wrong answer this type exists to avoid;
+ * - no storage at all (`undefined`) and an explicitly disabled one (`null`) fall back to the
+ *   default storage, which is synchronous: **`number`**.
+ *
+ * This is what restores 0.1.0's `const n: number = persister.hydrate()` for every 0.1.0 spelling of
+ * `createPersister`.
+ */
+export type RestoreOf<S> = S extends { getItem(key: string): infer TRead }
+  ? TRead extends string | null
+    ? number
+    : TRead extends Promise<unknown>
+      ? Promise<number>
+      : number | Promise<number>
+  : number;
+
+/**
  * The handle {@link createPersister} returns.
  *
  * Also a {@link RestoreGate}: the persistence layer *is* the thing that knows whether a restore is
  * in flight, so it implements the core's interface rather than being wrapped in an adapter that
  * would be a second source of truth for the same boolean.
+ *
+ * `R` is what {@link Persister.hydrate} answers. It is derived from the storage by
+ * {@link RestoreOf} and is **never written by hand** at a call site; the default is the union, which
+ * is what a `Persister` written without a type argument — the `CACHE_PERSISTER` token, most
+ * importantly — has to mean.
  */
-export interface Persister extends RestoreGate {
+export interface Persister<R = number | Promise<number>> extends RestoreGate {
   /**
    * `false` when there is no usable storage, in which case every method is a no-op.
    *
@@ -447,12 +519,15 @@ export interface Persister extends RestoreGate {
   /**
    * Loads the stored snapshot. Returns how many entries were staged; `0` is normal, not a failure.
    *
-   * **The return type widened in 0.2.0**: a storage whose `getItem` returns a promise (IndexedDB)
-   * cannot be answered synchronously, so this is `number | Promise<number>`. `await
-   * persister.hydrate()` compiles and behaves exactly as before; a caller that used the number
-   * directly now gets a compile error rather than a wrong answer, which is the failure worth having.
+   * **The return type widened in 0.2.0, and is derived rather than declared**: a storage whose
+   * `getItem` returns a promise (IndexedDB) cannot be answered synchronously, so this is
+   * `Promise<number>` there. For every storage a 0.1.0 application could have used — and therefore
+   * for every 0.1.0 call to `createPersister` — it stays `number`, which is the point of
+   * {@link RestoreOf}. `await persister.hydrate()` compiles and behaves the same in both cases; a
+   * caller that used the number directly gets a compile error rather than a wrong answer, which is
+   * the failure worth having. See the `Persister` type parameter.
    */
-  hydrate(): number | Promise<number>;
+  hydrate(): R;
   /** Writes now, ignoring the debounce. */
   persist(): void;
   /** Removes the stored snapshot. The in-memory cache is left alone. */
@@ -507,7 +582,9 @@ function defaultStorage(): CacheStorage | null {
  * a slower first paint next visit; the worst outcome of an unhandled `QuotaExceededError` inside a
  * fetch's settle listener is a broken application.
  */
-export function createPersister(options: PersistOptions = {}): Persister {
+export function createPersister<S extends CacheStorage | null | undefined = undefined>(
+  options: PersistOptions<S> = {},
+): Persister<RestoreOf<S>> {
   const caller = (): void => {};
   Object.defineProperty(caller, 'name', { value: 'createPersister' });
 
@@ -517,10 +594,15 @@ export function createPersister(options: PersistOptions = {}): Persister {
     injector = inject(Injector);
   }
 
-  return runInInjectionContext(injector, () => buildPersister(options));
+  // The one assertion in this module, and it is a narrowing the compiler cannot make on its own:
+  // the runtime answer is always `number | Promise<number>`, because only the storage knows which,
+  // and `RestoreOf<S>` is what the caller's own storage type proves about it. Every other spelling
+  // is checked; this one is promised, and the fixture that pins it is `compat/v0.1.0/usage.ts`.
+  const built = runInInjectionContext(injector, () => buildPersister(options));
+  return built as Persister<RestoreOf<S>>;
 }
 
-function buildPersister(options: PersistOptions): Persister {
+function buildPersister(options: PersistOptions<CacheStorage | null | undefined>): Persister {
   const cache = inject(QueryCache);
   const destroyRef = inject(DestroyRef);
   const isBrowser = isPlatformBrowser(inject(PLATFORM_ID));
@@ -926,7 +1008,7 @@ export interface IndexedDbStorageOptions {
  * that off, and a closed connection is noticed and reopened), and it does not version the *data* —
  * that is `CacheSnapshot.version` and `buster`.
  */
-export function indexedDbStorage(options: IndexedDbStorageOptions = {}): CacheStorage {
+export function indexedDbStorage(options: IndexedDbStorageOptions = {}): AsyncCacheStorage {
   const databaseName = options.database ?? DEFAULT_DB_NAME;
   const storeName = options.store ?? DEFAULT_DB_STORE;
   const schemaVersion = options.version ?? 1;

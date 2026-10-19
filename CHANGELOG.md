@@ -142,6 +142,26 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
     string belonging to another one — the same boundary the demo-bundle check
     measures, one level up, so a cross-entry import is caught even when nothing in
     the demo exercises the pair.
+- **`AsyncCacheStorage`, and `RestoreOf<S>` — the persistence types that say what the
+  storage can do.** `AsyncCacheStorage` is a `CacheStorage` whose three methods return
+  promises, and `indexedDbStorage()` now returns it, so "this read cannot answer on
+  the current stack" is visible in the type rather than only in the implementation.
+  `RestoreOf<S>` is the conditional type that turns a storage type into the return
+  type of `hydrate()`; it exists so that widening the persister did not cost 0.1.0
+  callers their `number` — see Changed.
+- **`anyDataDehydrateFilter` — the 0.1.0 dehydrate predicate, as a named value.** The
+  documented opt-out from the narrowed default: `(entry) => entry.hasData()`, which is
+  exactly the old clause. See Changed.
+- **`pnpm check:types-compat`, and `compat/v0.1.0/`.** `pnpm check:api` answers "which
+  export names went away"; this answers the harder question — **does code written
+  against 0.1.0 still compile?** `compat/v0.1.0/usage.ts` is written against the 0.1.0
+  public API across all four entry points, in strict mode, and it is compiled against
+  the **built** declarations (`pnpm verify` runs it right after `build`). It is not
+  documentation: it is the claim "0.1.0 code still type-checks", and it fails the build
+  when that stops being true. Where a spelling cannot be kept, it is written behind a
+  load-bearing `// @ts-expect-error` that names the accepted break — so if a later
+  change quietly restores it, the unused directive fails the check and the exception
+  gets deleted with it.
 
 ### Fixed
 
@@ -174,13 +194,31 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   previous value of the same key was written by the previous write — and it applies
   to `provideCacheTransfer` too, since the SSR snapshot goes through the same
   `dehydrate`. `dehydrateFilter` replaces the whole predicate when you want the old
-  behaviour (`(entry) => entry.hasData()`).
-- **`Persister.hydrate()` returns `number | Promise<number>`.** A storage that cannot
-  answer synchronously cannot be counted synchronously. `await persister.hydrate()`
-  compiles and behaves exactly as before; a caller that used the returned number
-  directly now gets a compile error instead of a wrong answer, which is the failure
-  worth having. The free `hydrate(cache, snapshot, options)` function is unchanged —
-  it is handed an already-parsed snapshot and stays synchronous.
+  behaviour (`(entry) => entry.hasData()`), and 0.2.0 names that predicate for you:
+  **`anyDataDehydrateFilter`**, which is what to pass when you want 0.1.0's rule back
+  rather than the default. This is the one change in this release that reaches an
+  unmodified 0.1.0 application.
+- **`Persister.hydrate()` returns whatever the storage's own type says it can.**
+  Deriving it from the storage instead of declaring it once is what keeps 0.1.0
+  compiling: an application that wrote `const n: number = persister.hydrate()` — with
+  `localStorage`, `sessionStorage`, or any hand-written storage returning a value —
+  still compiles, because a storage that returns a value is a storage the read can
+  answer on the current stack. `createPersister({ storage: indexedDbStorage() })`
+  gives `Promise<number>`, and `await` works on both. Two spellings keep the honest
+  union `number | Promise<number>` and are the **accepted residual**: annotating the
+  interface itself (`const p: Persister = …`) and going through the `CACHE_PERSISTER`
+  token, because neither can carry the storage's type. A token cannot carry a type
+  parameter, and the persister it resolves may have been built over any storage, so
+  saying `number` there would be a silent wrong answer. Both are pinned by
+  `@ts-expect-error` in the compatibility fixture and listed under Migration.
+  The free `hydrate(cache, snapshot, options)` function is unchanged — it is handed an
+  already-parsed snapshot and stays synchronous.
+- **A first fetch now waits for an asynchronous restore (`waitForRestore`, default
+  `true`).** New in 0.2.0 and inert for every 0.1.0 application, because 0.1.0 had no
+  way to configure a storage whose read is not synchronous: with `localStorage` the
+  read finishes during injector creation, so nothing is ever held. The opt-outs are
+  `waitForRestore: false` on the request, `restoreTimeout: 0` globally, or simply not
+  using an asynchronous storage.
 - **`QueryCache.seed` no longer overwrites an entry whose data is newer than the
   value being staged** (see Added for the rule and why). A seed is a _restore_, and a
   restore means "this is what the last session had"; use `CacheEntry.setData` to
@@ -208,6 +246,18 @@ configure, so no existing application is in that position.
   known limitations.
 - **If you called `seed()` expecting it to win over newer data**, that is the one
   behaviour that changed. `CacheEntry.setData` is the method for a forced write.
+- **If you want the old dehydrate default**, pass `anyDataDehydrateFilter` as
+  `dehydrateFilter` — to `providePersistedCache`, `provideCacheTransfer`, or a direct
+  `dehydrate()` call. It is `(entry) => entry.hasData()`, the 0.1.0 rule, and it is the
+  only thing to write.
+- **Two spellings of `Persister` keep the union `number | Promise<number>` from
+  `hydrate()`** — they are the accepted part of the widening, not an oversight:
+  `const p: Persister = createPersister({ storage: localStorage })` (annotating the
+  interface) and `inject(CACHE_PERSISTER).hydrate()`. Both cannot know what the
+  storage is, so neither is told `number`. Write `const p = createPersister({ storage:
+localStorage })` and the storage's own type decides, which is `number` for every
+  0.1.0 storage; or `await`, which compiles for both. `pnpm check:types-compat`
+  compiles both cases and documents each behind an `@ts-expect-error`.
 
 ### Deprecated
 

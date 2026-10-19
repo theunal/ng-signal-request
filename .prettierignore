@@ -4,3 +4,7 @@ coverage
 .angular
 node_modules
 pnpm-lock.yaml
+
+# The 0.1.0 compatibility fixture is dated on purpose: it is written the way a 0.1.0 application
+# wrote code, and Prettier's current style is not part of what it is proving.
+compat

@@ -15,7 +15,8 @@ itself.
 | 0     | Verify the 0.1.0 claims                 | **Done** — see `docs/verification.md`      |
 | 1     | Bound the cache in space (`maxEntries`) | **Done** in this session                   |
 | 5     | Remove the known traps                  | **Done** in this session                   |
-| 2     | Offline / `networkMode`                 | Designed here, deferred to its own session |
+| A     | Type-compatibility audit against 0.1.0  | **Done** in this session, below            |
+| 2     | Offline / `networkMode`                 | **Done** in this session, below            |
 | 3     | Async persistence and migrations        | Designed here, deferred to its own session |
 | 4     | Non-HTTP sources (`queryFn`)            | Designed here, deferred to its own session |
 | 6     | Devtools depth                          | Designed here, deferred to its own session |
@@ -45,6 +46,130 @@ signals, better messages, no change to how a fetch is executed.
   entry point never reaches a production bundle.
 - **Strict TypeScript, inference intact.** `createRequest<User[]>(url, { key })`
   must stay callable with one type argument.
+
+---
+
+## Step A — the 0.1.0 type-compatibility audit
+
+Phase 0 asked "which export names went away?", and the answer is measured by
+`pnpm check:api`. It never asked the harder question: **does code written against
+0.1.0 still compile?** A name can survive and still become unusable, because the
+shape behind it changed — which is exactly what 0.2.0's `/persist` work did to
+`Persister.hydrate()`.
+
+So the check is an executable one. `compat/v0.1.0/` holds a fixture written
+against the **0.1.0 public API only** — the four entry points, the usage the 0.1.0
+README shows, and the shapes a 0.1.0 caller would have annotated by hand — and
+`pnpm check:types-compat` compiles it, in strict mode, against the **built
+`dist/signal-request` declarations**. `pnpm verify` runs it after `build`.
+
+The fixture is not documentation. It is the claim "this still works", and it fails
+the build when the claim stops being true.
+
+### The rule for a failure
+
+For each name that stops compiling, there are two outcomes, and the default is the
+first:
+
+1. **Restore it.** If there is a way to keep the 0.1.0 meaning _and_ have the new
+   one, the new one is expressed in terms that do not cost the old one anything.
+   `Persister.hydrate()` is the worked case below.
+2. **Accept it.** Only when the two meanings are genuinely incompatible, and only
+   with a written justification and a `// @ts-expect-error` line in the fixture
+   that carries the reasoning. The directive is load-bearing: if a later change
+   accidentally restores the old spelling, the `@ts-expect-error` becomes an
+   _unused_ directive and the check fails, which is the prompt to delete it and
+   the accepted break with it.
+
+### `Persister.hydrate()` — restored, not accepted
+
+0.1.0's `hydrate(): number` became `hydrate(): number | Promise<number>`, because an
+IndexedDB read cannot answer synchronously. `await persister.hydrate()` is
+unaffected; `const n: number = persister.hydrate()` broke.
+
+The fix is a conditional return type, not a cast and not an overload pair. The
+storage is the thing that knows the answer, so the storage's type is what selects
+it:
+
+```ts
+export type RestoreOf<S> = S extends { getItem(key: string): infer R }
+  ? R extends string | null
+    ? number // a synchronous storage: `hydrate()` answers on this stack
+    : R extends Promise<unknown>
+      ? Promise<number> // an asynchronous one: it cannot, and says so
+      : number | Promise<number> // mixed or unknown: the honest union
+  : number;
+```
+
+and `createPersister` infers it from the option:
+
+```ts
+export function createPersister<S extends CacheStorage | null | undefined = undefined>(
+  options?: PersistOptions<S>,
+): Persister<RestoreOf<S>>;
+```
+
+So `createPersister({ storage: localStorage }).hydrate()` is `number` again,
+`createPersister({ storage: indexedDbStorage() }).hydrate()` is `Promise<number>`,
+and `createPersister().hydrate()` is `number`. The distribution over the union is
+what makes the middle case work: `CacheStorage`'s `string | null | Promise<string |
+null>` distributes to `number | Promise<number>`, which is why a caller who widened
+their own storage to the interface keeps the union rather than a lie.
+
+`indexedDbStorage()` also gained a narrower return type (`AsyncCacheStorage`, a new
+export) so the inference has something to bite on. It is a subtype of
+`CacheStorage`, so nothing that took the old return type breaks.
+
+**The residual, accepted.** The `Persister` _type_ — and therefore the
+`CACHE_PERSISTER` token — keeps the union when it is written without a type
+argument. A non-generic interface cannot mean two things, and a token cannot carry
+a type parameter, so `inject(CACHE_PERSISTER).hydrate()` is `number | Promise<number>`
+where 0.1.0 said `number`. That case is in the fixture behind a
+`// @ts-expect-error`. Justification: the union is _true_ through the token — the
+persister a token resolves may have been built over any storage — and refusing to
+say so would be the silent-wrong-answer failure the widening exists to avoid.
+
+### The `dehydrateFilter` default — accepted, with an opt-out
+
+`dehydrate`'s default filter narrowed from "anything with data" to "has data, is
+not fetching, is not in an error state" (Phase 3, `defaultDehydrateFilter`). It
+changes no type, so the fixture cannot see it; it is a behaviour change and it is
+in the CHANGELOG's `Changed` with a migration note.
+
+The brief asked for an opt-out that restores the 0.1.0 filter if none existed, and
+none did. `anyDataDehydrateFilter` is that value:
+
+```ts
+providePersistedCache({ dehydrateFilter: anyDataDehydrateFilter });
+```
+
+It is `(entry) => entry.hasData()`, which is 0.1.0's `data !== undefined` clause
+and nothing more.
+
+### The rest of the audit
+
+Everything else 0.2.0 added is optional and therefore additive: new options on
+`SignalRequestConfig`, `CacheOptions`, `MutationOptions`, `PersistOptions`,
+`DehydrateOptions`, `HydrateOptions`; new signals and methods on the handles and
+`QueryCache` / `QueryClient`; new members on the `RequestError` union. The fixture
+compiles all of it against the built declarations, so "no type-level break" is a
+measurement rather than a reading of the diff. `Persister extends RestoreGate` —
+two added members — is the one place where a _consumer who implements_ the
+interface breaks; nobody can, since `createPersister` is the only producer, and the
+fixture pins the intended direction (assigning a `Persister` to a `RestoreGate`
+compiles).
+
+### Behaviour changes a 0.1.0 consumer could notice without a compile error
+
+Listed here so the CHANGELOG can point at a single source:
+
+| Change                          | Default now         | 0.1.0                 | Opt-out                                          |
+| ------------------------------- | ------------------- | --------------------- | ------------------------------------------------ |
+| `dehydrateFilter`               | narrowed            | anything with data    | `anyDataDehydrateFilter`                         |
+| `waitForRestore`                | `true`              | n/a (no gate existed) | `waitForRestore: false`, or `restoreTimeout: 0`  |
+| `retryTimeouts`                 | `true`              | retried timeouts too  | `retryTimeouts: false` (default flips in 0.3.0)  |
+| seeds count toward `maxEntries` | yes                 | no seeds existed      | none needed (no seeds unless `/persist` is used) |
+| `Persister.hydrate()`           | `number \| Promise` | `number`              | none (restored for `createPersister`)            |
 
 ---
 
@@ -485,32 +610,315 @@ README's "Known limitations", and pinned by a `@ts-expect-error` test in
 
 ---
 
-## Phase 2 — offline / `networkMode` (deferred, sketch)
+## Phase 2 — offline / `networkMode` (as built)
+
+### The correction this phase starts from
+
+The sketch this section replaces wrote:
 
 ```ts
-@Injectable({ providedIn: 'root' })
-class OnlineManager {
-  readonly online: Signal<boolean>;
-  setOnline(value: boolean): void; // the test seam
-}
-
 interface SignalRequestConfig {
   networkMode?: NetworkMode; // 'online' (default) | 'always' | 'offlineFirst'
 }
+```
 
-class RequestBase {
-  paused: Signal<boolean>;
+**That comment is wrong.** 0.1.0 sent every request regardless of what the browser
+said about connectivity. `refetchOnReconnect` only decided whether a _reconnect
+event_ started a refetch; the `offline: true` field on a `network` error was a
+classifier read at failure time, not a gate; and nothing anywhere consulted
+`navigator.onLine` before opening a connection. No code path was ever paused.
+
+So the behaviour that exists today is `'always'`, and `'online'` has to be opt-in.
+Making `'online'` the default would be a silent change for every existing
+application: a request that used to fire and fail loudly while offline would
+instead sit paused with a pending `run()` promise, and the failure a caller was
+already handling would stop arriving. The brief's own rule — "the effective default
+must equal today's behaviour; if requests today fire while `navigator.onLine === false`, the effective default stays `'always'`" — settles it in one line.
+
+**Decided: `'always'` is the default. `'online'` is opt-in.** Recorded rather than
+edited away, per the rule at the top of this document.
+
+### API
+
+```ts
+export type NetworkMode = 'online' | 'always' | 'offlineFirst';
+
+/** The seam the core reads connectivity through. `OnlineManager` is its implementation. */
+export interface Connectivity {
+  readonly online: Signal<boolean>;
+  onReconnect(listener: () => void): () => void;
+}
+
+@Injectable({ providedIn: 'root' })
+export class OnlineManager implements Connectivity {
+  readonly online: Signal<boolean>;
+  onReconnect(listener: () => void): () => void;
+  /** The test seam: a test drives connectivity without a browser. */
+  setOnline(value: boolean): void;
+}
+
+interface SignalRequestConfig { networkMode?: NetworkMode }   // global default
+interface RequestOptionsBase { networkMode?: NetworkMode }    // per request, cached and uncached
+interface MutationOptions<…> { networkMode?: NetworkMode }    // per mutation
+interface FetchPlan<T> { networkMode?: NetworkMode }          // what the entry reads
+interface RequestBase { paused: Signal<boolean> }             // new signal, every handle
+
+QueryClient.isPaused(filter?: QueryKeyFilter): boolean
+```
+
+### `online` is state, `reconnect` is an event
+
+`OnlineManager` owns the only `window` listener pair in the library and one
+`WritableSignal`, and it is the only place connectivity is read. It has **two**
+outputs because the library needs two different things:
+
+- `online()`, the **state**, read before deciding whether to start something. It
+  comes from `navigator.onLine`, updated by the `online` / `offline` events. This
+  is what `networkMode` and the `offline: true` classifier read.
+- `onReconnect(listener)`, the **event**, for "the browser says a connection just
+  appeared". This is what `refetchOnReconnect` — and a paused fetch's resume —
+  hang off. A state cannot express it: `online` is already `true` at
+  start-up on a connected machine, so "it is true" is not a reconnect.
+
+That split is what keeps 0.1.0's `refetchOnReconnect` test passing untouched. The
+test dispatches `window.dispatchEvent(new Event('online'))`; jsdom's
+`navigator.onLine` is `true` throughout, so the _state_ does not change and a
+state-based subscriber would see nothing. The event subscriber sees the event,
+which is exactly what 0.1.0's `fromEvent(window, 'online')` did.
+
+Bursts are coalesced: the listener set is notified from one microtask, so three
+`online` events in a turn call each listener once. State writes are synchronous,
+because a paused fetch has to be released in the same turn the connection is
+reported back.
+
+On the **server** `OnlineManager` reads `true` and registers nothing — no
+`navigator`, no `window`, no timer — so `networkMode` is inert there and
+`vi.getTimerCount() === 0` is assertable on the `server` platform. The platform
+check is `isPlatformBrowser`, the same one the rest of the library uses.
+
+Read defensively: a missing `navigator`, or an `onLine` that is not exactly
+`false`, means "no report", i.e. online. That is 0.1.0's own reading in
+`errors.ts:isOffline`, kept.
+
+### Where the pause lives, and why in the entry
+
+The sketch said the pause check belongs around the retry scheduling in
+`CacheEntry.execute`. Half right. It is around retry scheduling **and** around the
+decision to open a connection at all, and for keyed requests both belong to the
+**entry**, not the handle:
+
+- The pause state is shared. Two components on one key are one request; if one of
+  them could be "paused" and the other not, the same fetch would be described two
+  ways.
+- The resume is shared. One reconnect must release one fetch, not one per
+  subscriber.
+- `QueryClient.isPaused()` asks about keys, and a key is an entry.
+
+So `CacheEntry` gained a `paused` signal, and `fetch()` gained one branch in front
+of the existing dedup:
+
+```ts
+fetch(plan) {
+  if (this.destroyed) return rejected(…);
+  if (this.inFlight) return this.inFlight;         // unchanged: join the in-flight one
+  if (this.shouldPause(plan)) return this.hold(plan);   // new
+  return this.start(plan);                          // the old body, renamed
 }
 ```
 
-`OnlineManager` owns one `window` listener pair and one `WritableSignal`, and is
-the only place in the library that touches connectivity. `'online'` pauses a
-query with no network and a status of `loading`; a new `paused()` signal says
-why, since `loading` alone cannot. A paused retry must not burn an attempt, which
-means the pause check belongs _around_ the retry scheduling in
-`CacheEntry.execute` — the same method Phase 4 rewrites, which is why both are
-deferred together. Mutation replay is an ordered queue owned by the cache, with
-`persist`-style opt-in for surviving a reload.
+`shouldPause` is `plan.networkMode === 'online' && !online()`. `hold` sets
+`paused`, stores the plan, registers one `onReconnect` listener, and returns a
+promise that is kept as `inFlight` — so a second handle still _joins_ rather than
+starting a second request, and a paused entry is indistinguishable from a
+fetching one to the dedup. `resume` clears the hold, unregisters the listener,
+calls `start`, and hands the outcome to the held promise.
+
+`cancel()` releases the hold too, rejecting the held promise with
+`RequestCancelledError` — which is how "a paused request that loses its last
+observer is cancelled like any other" falls out of the existing `release()`
+without a second mechanism.
+
+**`networkMode` travels in the `FetchPlan`, not the constructor.** The entry
+already keeps the last registered plan and rebuilds requests from it; the mode is
+one more thing the plan describes, so the entry needs no new plumbing and a
+cache-driven refetch (`invalidate`) obeys the mode the last subscriber registered.
+The rule for two handles on one key with different modes is therefore the rule the
+plan already has, and it is documented rather than new: **the newest registered
+plan wins, and two handles on one key should agree on `networkMode` for the same
+reason they should agree on the request.** A constructor parameter was rejected: it
+would have added a positional argument to a public constructor for something the
+plan already carries.
+
+`Connectivity` reaches the entry through the constructor's trailing optional
+parameter, defaulting to a shared `ALWAYS_ONLINE` — so an entry built without one
+is online forever, which is 0.1.0's behaviour and what the entry's own unit tests
+get by default. `QueryCache` injects `OnlineManager` and passes it in.
+
+### Semantics, mode by mode
+
+| Mode             | First attempt                | Retry while offline    | `offline` ignored                  |
+| ---------------- | ---------------------------- | ---------------------- | ---------------------------------- |
+| `'always'`       | runs                         | runs (the timer fires) | yes                                |
+| `'online'`       | **held** until online        | held until online      | `network.offline` still reports it |
+| `'offlineFirst'` | runs (a cache/SW may answer) | held until online      | yes                                |
+
+- **`'online'` — do not start while offline; start or resume once on reconnect.**
+  One fetch per reconnect, guaranteed by the entry's own dedup: the resume runs
+  synchronously inside the notification and puts a promise in `inFlight`, so
+  anything else that reacts to the same reconnect joins it instead of opening a
+  second connection. This is also why `refetchOnReconnect: true` plus
+  `networkMode: 'online'` does not double-fire — the reconnect refetch joins the
+  resumed fetch.
+- **`'offlineFirst'` — the first attempt always runs**, because the point of the
+  mode is that a service worker, a cache or a proxy may answer it. Retries pause,
+  which is where the mode differs from `'always'` under a flapping connection.
+- **`'always'` — connectivity is never consulted.** Every 0.2.0 handle defaults
+  to this, so the default path changes not at all.
+
+### Paused retries do not burn an attempt
+
+The retry is scheduled by rxjs's `retry({ delay })` in `CacheEntry.execute`, and
+the `delay` callback is the seam: it is asked for a notifier, and the notifier is
+where the timer lives. So:
+
+```ts
+delay: (err, attemptNo) => {
+  const delay = nextRetryDelay(policy, attemptNo, toError(err));
+  if (delay === undefined) return throwError(() => err);
+  if (mode !== 'always' && !connectivity.online()) {
+    // No timer is armed and `attemptNo` is not spent on a clock that is not running.
+    return waitForReconnect(connectivity).pipe(finalize(() => paused.set(false)));
+  }
+  this.retryAttempt.set(attemptNo);
+  return timer(delay);
+};
+```
+
+The attempt counter is set **only** on the branch that actually arms a timer, so
+the retry budget is untouched while offline and the retry happens once the
+connection is back — with no additional back-off, because the offline wait _is_
+the spacing. `waitForReconnect` is one shared helper in `connectivity.ts`; it
+completes on the next reconnect and unsubscribes its listener on teardown, so
+cancelling while a retry is paused leaves nothing behind.
+
+`retryAttempt()` is deliberately left at `0` while held: it means "a retry is
+scheduled", and nothing is. `paused` is what says the entry is waiting.
+
+### `paused` next to `loading`
+
+`paused()` is a new signal on every request handle and on every mutation handle. A
+paused handle reports `status: 'loading'` (or `'reloading'` when it already has
+data) **and** `paused() === true`. `loading` alone cannot tell a spinner that will
+finish from one that cannot start, which is the reason the signal exists; the
+documented advice is to read `paused()` before showing the indefinite state. This
+matches TanStack's `status: 'pending'` alongside `fetchStatus: 'paused'`, and it
+keeps `RequestStatus` a closed union of four states with no new member.
+
+### Mutations offline
+
+With `networkMode: 'online'`, `run()` while offline **queues** the call:
+
+- `onMutate` still runs at `run()` time, and the optimistic write still lands
+  immediately, because the call _was_ made from the caller's point of view — it has
+  simply not been sent. The rollback happens on final failure or cancellation,
+  never merely because the connection is missing.
+- The call counts as in-flight: `inFlight` is incremented and
+  `MutationRegistry.begin()` is called at enqueue, so `isMutating()` is true and a
+  toolbar spinner is honest.
+- `run()`'s promise stays **pending** until the call is replayed or cancelled.
+- On reconnect the queue is drained **in call order**, with `concurrency` honoured:
+  `parallel` replays every queued call, in order; `exhaust` has at most one queued
+  call because the second `run()` returned the first's promise; `switch` cancelled
+  the previous queued call when the newer `run()` arrived.
+- `cancel()` (and `destroy()`) rejects a queued call with `RequestCancelledError`
+  and rolls its optimistic write back — the same `undo` compare-and-swap the
+  in-flight path uses, so a sibling call's value is never wiped.
+- `onSuccess` and `invalidates` run after the **replayed** call succeeds, in the
+  same settle order as an online one (invalidate → `onSuccess` → `onSettled`).
+
+**A replay that fails because the connection dropped again goes back to the
+queue**, not to a final error. The heuristic, stated as a heuristic because that is
+what it is: if the failure classifies as `kind: 'network'` **and**
+`onlineManager.online()` is `false`, the call is re-queued and stays pending; if
+the manager says online, it is a real failure (a CORS rejection, a blocked
+request, DNS) and is reported normally. `status: 0` cannot distinguish those two
+cases — that is Phase 5.3's documented ambiguity — so the manager's own state is
+what breaks the tie, and the README says so where a reader will find it.
+
+**Persisting the mutation queue across a reload is a non-goal**, and it is in the
+README's "Known limitations". Replay semantics need the application's own
+idempotency story — a replayed POST that already reached the server before the
+reload is a duplicate write — and a library that replays one because it was in
+`localStorage` would be inventing an at-least-once guarantee the application never
+agreed to. The queue lives in memory and dies with the page, like the in-flight
+requests it is made of.
+
+### Ordering against the restore gate
+
+A request that is both waiting for a restore and offline resolves **restore
+first, then connectivity**, and it does so without a special case: `run()` already
+waits for `restoreGate.restored()` before reading the plan, and the plan it then
+reads goes into `entry.fetch()`, which is where the connectivity hold is. The
+composed order is the order the code already had, with one more wait inside the
+inner call. `waitForRestore: false` skips the first wait only.
+
+### Devtools: the minimum
+
+Phase 6 is the depth pass. This phase adds only what it must: `online` on the
+`QueryDevtools` service, `paused` on `DevtoolsEntry`, an offline marker and a
+per-row paused marker in the panel. `DevtoolsStatus` gains no member; a paused
+entry shows its real status with the marker beside it.
+
+### Tests
+
+`OnlineManager` is overridden in the specs that need to drive connectivity
+(`{ provide: OnlineManager, useValue: fake }`), so nothing in the suite depends on
+a browser's `navigator`. The fake is the test seam `setOnline` exists for.
+
+Covered: offline at mount; going offline mid-request; ordered replay for all three
+`concurrency` modes; flapping producing no duplicate; the retry interaction (no
+attempt burnt, no timer armed); `cancel()` while paused; losing the last observer
+while paused; the restore-gate + offline order; SSR no-op (`vi.getTimerCount() ===
+0`, no listeners); one keyed entry shared by two handles while paused; and the
+races — reconnect during an invalidation, reconnect during `destroy()`, a replay
+while a new `run()` arrives, `switch` superseding a queued call. Every new public
+signature has an `expectTypeOf` test.
+
+### Rejected alternatives
+
+- **`'online'` as the default.** Rejected above; it is a silent behaviour change.
+- **A connectivity parameter on `CacheEntry`'s constructor.** Positional, public,
+  and redundant with the plan the entry already stores.
+- **A global pause gate in `QueryClient`.** The cache would then own per-entry
+  fetch policy, which it deliberately does not: `QueryClient` knows _what a user
+  means by a key_, `CacheEntry` knows _whether to fetch_.
+- **`fromEvent(window, 'online')` per handle, as today.** It was the source of two
+  truths about connectivity and could not be faked in a test without a global stub.
+- **Persisting the mutation queue.** Above.
+- **A `paused` member on `RequestStatus`.** A status is what the data is; being
+  paused is why nothing is happening. Two questions, two signals.
+- **Pausing the _first_ attempt in `'offlineFirst'`.** That is `'online'`. The mode
+  exists precisely so an offline-capable source still gets its chance.
+
+### Risks
+
+- **A pause that never releases.** If `onReconnect` is never called (a browser that
+  never fires the event, or a test that forgets to), the held promise is pending for
+  ever. The bound is the same one every pending `run()` has: `cancel()`, `destroy()`
+  and losing the last observer all reject it. There is deliberately **no timeout** —
+  offline is not an error, and a timer that gave up would fabricate a failure the
+  user did not have.
+- **Two handles, two modes, one key.** Resolved as "newest plan wins", documented.
+  The failure mode is a request that fires when one subscriber expected it held.
+- **The `status: 0` heuristic for replay.** Stated as a heuristic; a mutation
+  replayed into a server that has already applied it is the application's problem,
+  not something this library can detect.
+- **Bundle size.** The offline code lives in the core, so it is not separable and
+  `check:dist` cannot prove it absent. Its gzip cost is in the report.
+
+---
+
+## Phase 3 — async persistence (`/persist`)
 
 ## Phase 3 — async persistence (`/persist`)
 

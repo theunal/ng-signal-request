@@ -42,6 +42,9 @@ jobs:
       - name: Build the library
         run: pnpm run build
 
+      - name: Check the 0.1.0 type compatibility fixture
+        run: pnpm run check:types-compat
+
       - name: Build the demo and check the distribution
         run: |
           pnpm run build:demo

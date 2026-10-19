@@ -1238,18 +1238,18 @@ creation — before any component exists, and therefore before any request can
 resolve — so the first render reads restored data. There is no ordering rule to
 get right and nothing to remember in `main.ts`.
 
-| Option                |                                                                                                                                                                   |
-| --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `storage`             | Defaults to `localStorage` where it is reachable, `null` (disabled) everywhere else. Pass `sessionStorage`, `indexedDbStorage()`, an in-memory object, or `null`. |
-| `key`                 | Storage key. Default `'ng-signal-request'`.                                                                                                                       |
-| `include` / `exclude` | Which keys are written — the same filter vocabulary `QueryClient.invalidate` takes. `exclude` wins.                                                               |
-| `dehydrateFilter`     | Which entries are written, by state. Default: has data, is not fetching, is not in an error state.                                                                |
-| `codec`               | `{ serialize, deserialize }`, for values JSON cannot carry.                                                                                                       |
-| `maxAge`              | Entries older than this are not restored.                                                                                                                         |
-| `buster`              | An application-defined stamp for the shape _inside_ the entries. A mismatch drops the snapshot.                                                                   |
-| `migrate`             | `(snapshot, fromVersion) => snapshot \| null`, for a snapshot from an older shape.                                                                                |
-| `debounce`            | Write coalescing, default `1000` ms.                                                                                                                              |
-| `restoreTimeout`      | How long a restore may hold the first fetch, default `2000` ms. `0` never holds it.                                                                               |
+| Option                |                                                                                                                                                                    |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `storage`             | Defaults to `localStorage` where it is reachable, `null` (disabled) everywhere else. Pass `sessionStorage`, `indexedDbStorage()`, an in-memory object, or `null`.  |
+| `key`                 | Storage key. Default `'ng-signal-request'`.                                                                                                                        |
+| `include` / `exclude` | Which keys are written — the same filter vocabulary `QueryClient.invalidate` takes. `exclude` wins.                                                                |
+| `dehydrateFilter`     | Which entries are written, by state. Default: has data, is not fetching, is not in an error state. Pass `anyDataDehydrateFilter` for 0.1.0's "anything with data". |
+| `codec`               | `{ serialize, deserialize }`, for values JSON cannot carry.                                                                                                        |
+| `maxAge`              | Entries older than this are not restored.                                                                                                                          |
+| `buster`              | An application-defined stamp for the shape _inside_ the entries. A mismatch drops the snapshot.                                                                    |
+| `migrate`             | `(snapshot, fromVersion) => snapshot \| null`, for a snapshot from an older shape.                                                                                 |
+| `debounce`            | Write coalescing, default `1000` ms.                                                                                                                               |
+| `restoreTimeout`      | How long a restore may hold the first fetch, default `2000` ms. `0` never holds it.                                                                                |
 
 Three details are worth knowing, because each is a bug that is easy to ship:
 
@@ -1276,6 +1276,16 @@ inject(CACHE_PERSISTER).clear();
 a no-op — when there is no usable storage, or when storage starts refusing writes
 (`QuotaExceededError`, Safari private mode), and `isRestoring` / `restored()` for
 the ordering rule below.
+
+`hydrate()` returns a `number` — how many entries were staged — or a
+`Promise<number>`, and **which one is derived from the storage you passed**, not
+declared by you. `localStorage`, `sessionStorage` and any storage that returns a
+value are read on the current stack, so `const n = createPersister({ storage:
+localStorage }).hydrate()` is a `number`, exactly as in 0.1.0; `indexedDbStorage()`
+returns an `AsyncCacheStorage`, so its `hydrate()` is a promise, and `await` works on
+both. Two spellings keep the union `number | Promise<number>`, because neither can
+know what the storage is: annotating the interface (`const p: Persister = …`) and
+`inject(CACHE_PERSISTER)`. Say nothing and TypeScript knows.
 
 ### Asynchronous storage, and the restore gate
 
@@ -1662,7 +1672,7 @@ report and one you read here is a design decision.
 
 ### `ng-signal-request/persist`
 
-`providePersistedCache` · `createPersister` · `CACHE_PERSISTER` · `Persister` · `PersistOptions` · `CacheStorage` · `indexedDbStorage` · `IndexedDbStorageOptions` · `dehydrate` · `defaultDehydrateFilter` · `DehydratePredicate` · `DehydrateOptions` · `hydrate` · `HydrateOptions` · `CacheSnapshot` · `CacheSnapshotEntry` · `SNAPSHOT_VERSION` · `SnapshotCodec` · `dateRevivingCodec` · `provideCacheTransfer` · `CACHE_TRANSFER_KEY` · `CacheTransferOptions` · `prefetch` · `Prefetchable` · `PrefetchReport`
+`providePersistedCache` · `createPersister` · `CACHE_PERSISTER` · `Persister` · `PersistOptions` · `CacheStorage` · `AsyncCacheStorage` · `RestoreOf` · `indexedDbStorage` · `IndexedDbStorageOptions` · `dehydrate` · `defaultDehydrateFilter` · `anyDataDehydrateFilter` · `DehydratePredicate` · `DehydrateOptions` · `hydrate` · `HydrateOptions` · `CacheSnapshot` · `CacheSnapshotEntry` · `SNAPSHOT_VERSION` · `SnapshotCodec` · `dateRevivingCodec` · `provideCacheTransfer` · `CACHE_TRANSFER_KEY` · `CacheTransferOptions` · `prefetch` · `Prefetchable` · `PrefetchReport`
 
 ## Devtools
 
@@ -1745,9 +1755,10 @@ pnpm typecheck     # tsc --noEmit over the lib, spec, devtools and demo projects
 pnpm lint          # eslint, type-aware, over every file
 pnpm format        # prettier --write
 pnpm watch         # rebuild on change (development configuration)
-pnpm verify        # typecheck + lint + format:check + test + build + build:demo + check:dist
+pnpm verify        # typecheck + lint + format:check + test + build + check:types-compat + build:demo + check:dist
 pnpm check:dist    # post-build assertions (see "Bundle" below)
 pnpm check:api     # export diff against a git ref: `pnpm check:api v0.1.0`
+pnpm check:types-compat  # compile the 0.1.0 compatibility fixture against the build
 pnpm bench         # the resolve() benchmark at 200k iterations (see docs/perf.md)
 ```
 
@@ -1760,6 +1771,16 @@ two never disagree. Every rule that is not on has a written reason next to it.
 `pnpm check:api` fails only when a name that existed before is gone, so it is the
 command behind every "no breaking change" claim in this repository. Its output is
 recorded in [`docs/verification.md`](docs/verification.md).
+
+`pnpm check:api` answers a narrower question than it sounds like it does, though. A
+name can survive and still become unusable, because the shape behind it changed —
+which is exactly what widening `Persister.hydrate()` did. So `pnpm check:types-compat`
+compiles [`compat/v0.1.0/usage.ts`](compat/v0.1.0/usage.ts): code written against the
+**0.1.0 public API only**, across all four entry points, in strict mode, against the
+**built** declarations. It is the same kind of claim, made one level down, and it is
+part of `pnpm verify`. Where a 0.1.0 spelling could not be kept, it is written behind
+a load-bearing `// @ts-expect-error` that names the accepted break, so a later change
+that quietly restores it fails the check and the exception gets removed with it.
 
 > On Windows, `packageManager` pins a pnpm version newer than the one on
 > `PATH`. If `pnpm install` fails with _"is not recognized as an internal or

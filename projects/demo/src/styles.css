@@ -80,6 +80,21 @@ code {
   margin: 3px 0;
 }
 
+.offline-banner {
+  margin: 16px 0 0;
+  padding: 12px 16px;
+  border: 1px solid var(--warn);
+  border-left: 3px solid var(--warn);
+  border-radius: 8px;
+  background: rgba(251, 191, 36, 0.08);
+  color: var(--fg);
+  font-size: 13px;
+}
+
+.offline-banner code {
+  color: var(--warn);
+}
+
 .tabs {
   display: flex;
   gap: 8px;

@@ -13,7 +13,9 @@ import { delay, of, switchMap, throwError } from 'rxjs';
  * Everything else is passed straight through to the real API.
  */
 export const demoApiInterceptor: HttpInterceptorFn = (req, next) => {
-  if (req.url.startsWith('/api/reject')) {
+  const path = pathOf(req.url);
+
+  if (path.startsWith('/api/reject')) {
     return of(null).pipe(
       delay(900), // long enough that the optimistic row is visibly on screen first
       switchMap(() =>
@@ -30,7 +32,7 @@ export const demoApiInterceptor: HttpInterceptorFn = (req, next) => {
     );
   }
 
-  if (req.url.startsWith('/api/flaky')) {
+  if (path.startsWith('/api/flaky')) {
     const key = req.urlWithParams;
     const attempts = (flakyCounters.get(key) ?? 0) + 1;
     flakyCounters.set(key, attempts);
@@ -69,7 +71,7 @@ export const demoApiInterceptor: HttpInterceptorFn = (req, next) => {
     ).pipe(delay(200));
   }
 
-  if (req.url.startsWith('/api/slow')) {
+  if (path.startsWith('/api/slow')) {
     return of(
       new HttpResponse({
         status: 200,
@@ -91,3 +93,18 @@ export const demoApiInterceptor: HttpInterceptorFn = (req, next) => {
 
 /** Attempt counter per url, so `/api/flaky` fails twice then succeeds. */
 const flakyCounters = new Map<string, number>();
+
+/**
+ * The path of a request, after `baseUrl` may have made the url absolute.
+ *
+ * `provideSignalRequest({ baseUrl })` rewrites `/api/slow` before `HttpClient` sees it, so
+ * matching `req.url` against `/api/slow` would silently stop working the day a base url is
+ * configured — which is exactly this demo. The path is the part the interceptor means.
+ */
+function pathOf(url: string): string {
+  try {
+    return new URL(url, 'http://demo.local').pathname;
+  } catch {
+    return url;
+  }
+}

@@ -1,17 +1,19 @@
-import { ChangeDetectionStrategy, Component, signal } from '@angular/core';
+import { ChangeDetectionStrategy, Component, inject, signal } from '@angular/core';
+import { OnlineManager } from 'ng-signal-request';
 
 import { CacheSection } from './sections/cache-section';
 import { FormSection } from './sections/form-section';
 import { InfiniteSection } from './sections/infinite-section';
 import { ListSection } from './sections/list-section';
+import { OfflineSection } from './sections/offline-section';
 import { RetrySection } from './sections/retry-section';
 
-type Tab = 'list' | 'form' | 'retry' | 'infinite' | 'cache';
+type Tab = 'list' | 'form' | 'retry' | 'infinite' | 'cache' | 'offline';
 
 @Component({
   selector: 'demo-root',
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [ListSection, FormSection, RetrySection, InfiniteSection, CacheSection],
+  imports: [ListSection, FormSection, RetrySection, InfiniteSection, CacheSection, OfflineSection],
   template: `
     <header>
       <h1>ng-signal-request</h1>
@@ -22,6 +24,14 @@ type Tab = 'list' | 'form' | 'retry' | 'infinite' | 'cache';
         </a>
       </p>
     </header>
+
+    @if (!online()) {
+      <div class="offline-banner">
+        <strong>Çevrimdışısın.</strong>
+        <code>networkMode: 'online'</code> kullanan istekler duraklatıldı; mutation'lar kuyrukta
+        bekliyor ve bağlantı gelince çağrı sırasıyla gönderilecek.
+      </div>
+    }
 
     <div class="notice">
       <strong>Demo API hakkında:</strong> JSONPlaceholder sahte bir API'dir.
@@ -66,6 +76,9 @@ type Tab = 'list' | 'form' | 'retry' | 'infinite' | 'cache';
         @case ('cache') {
           <demo-cache />
         }
+        @case ('offline') {
+          <demo-offline />
+        }
       }
     </main>
   `,
@@ -77,7 +90,11 @@ export class AppComponent {
     { id: 'retry', label: 'Retry, debounce, polling' },
     { id: 'infinite', label: 'Sonsuz liste' },
     { id: 'cache', label: 'Paylaşılan önbellek' },
+    { id: 'offline', label: 'Çevrimdışı (offline)' },
   ];
 
   protected readonly tab = signal<Tab>('list');
+
+  /** The banner reads the same signal the library acts on, not `navigator.onLine`. */
+  protected readonly online = inject(OnlineManager).online;
 }

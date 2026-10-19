@@ -82,6 +82,16 @@ export interface RequestErrorContext {
    * indistinguishable from a user-initiated cancellation.
    */
   readonly timeout?: number;
+  /**
+   * Whether the browser reported no connection when this failure was classified.
+   *
+   * When present it **wins** over the defensive `navigator` read below, and that is what makes the
+   * classification follow the library's own connectivity source rather than a second, independently
+   * read global — a test that drives `OnlineManager.setOnline(false)` gets an `offline: true` error
+   * without touching `navigator`. When absent, the read stays: `toRequestError` is public and can be
+   * called from anywhere, including code that never constructed a manager.
+   */
+  readonly offline?: boolean;
 }
 
 /** Names used by `AbortController.abort()` and by Angular's fetch-backend timeout. */
@@ -244,7 +254,7 @@ function classify(cause: unknown, context: RequestErrorContext): RequestError {
 
   if (cause instanceof HttpErrorResponse) {
     return cause.status === 0
-      ? networkFailure(cause)
+      ? networkFailure(cause, context)
       : {
           kind: 'http',
           status: cause.status,
@@ -260,7 +270,7 @@ function classify(cause: unknown, context: RequestErrorContext): RequestError {
   // The fetch backend rejects a raw `TypeError` for network failures when it is not
   // wrapped in an `HttpErrorResponse`.
   if (cause instanceof TypeError) {
-    return networkFailure(cause);
+    return networkFailure(cause, context);
   }
 
   return { kind: 'unknown', cause };
@@ -272,9 +282,14 @@ function classify(cause: unknown, context: RequestErrorContext): RequestError {
  * Built as two object shapes rather than one shape with an `undefined` field: a `network` error
  * serializes as plain data, and a property that is present but meaningless is a property somebody
  * will branch on. Absent means "nobody said".
+ *
+ * `context.offline` is consulted first and the global read is the fallback, so the answer can come
+ * from the same `OnlineManager` the rest of the library uses — or, for a caller that has none,
+ * from the browser exactly as before.
  */
-function networkFailure(cause: unknown): RequestErrorOf<'network'> {
-  return isOffline() ? { kind: 'network', cause, offline: true } : { kind: 'network', cause };
+function networkFailure(cause: unknown, context: RequestErrorContext): RequestErrorOf<'network'> {
+  const offline = context.offline ?? isOffline();
+  return offline ? { kind: 'network', cause, offline: true } : { kind: 'network', cause };
 }
 
 /** Builds the `requestError` signal that sits next to a raw `error` signal. */

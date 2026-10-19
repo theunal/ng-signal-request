@@ -2,6 +2,8 @@
  * Public API surface of ng-signal-request.
  */
 export { provideSignalRequest, SIGNAL_REQUEST_CONFIG } from './lib/config';
+export { ALWAYS_ONLINE, OnlineManager } from './lib/connectivity';
+export type { Connectivity, NetworkMode } from './lib/connectivity';
 export { createRequest } from './lib/create-request';
 export type { CreateRequest, CreateRequestFn } from './lib/create-request';
 export {

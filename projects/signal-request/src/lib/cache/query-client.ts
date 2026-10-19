@@ -184,6 +184,25 @@ export class QueryClient {
     return this.cache.matching(filter).length;
   }
 
+  /**
+   * Whether anything is waiting for a connection.
+   *
+   * With a filter: whether anything **matching** is paused. Without: whether anything at all is.
+   * The counterpart of {@link isFetching}, and the same shape on purpose — a global banner reads the
+   * bare call, a per-screen banner reads the filtered one.
+   *
+   * Queries only: a queued mutation is reported by its own `paused()`, because the cache does not own
+   * mutations and `isMutating` is a signal while this is a plain read.
+   *
+   * ```ts
+   * if (client.isPaused(['todos'])) banner = 'waiting for a connection';
+   * ```
+   */
+  isPaused(filter?: QueryKeyFilter): boolean {
+    const matched = filter === undefined ? this.cache.all() : this.cache.matching(filter);
+    return matched.some((entry) => entry.paused());
+  }
+
   /** Empties the cache. Mostly for tests and devtools. */
   clear(): void {
     this.cache.clear();

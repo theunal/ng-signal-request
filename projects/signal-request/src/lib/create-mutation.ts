@@ -17,6 +17,7 @@ import {
 } from '@angular/core';
 import { retry, throwError, timer, type Observable, type Subscription } from 'rxjs';
 import { SIGNAL_REQUEST_CONFIG } from './config';
+import { OnlineManager, type NetworkMode } from './connectivity';
 import { QueryCache } from './cache/query-cache';
 import { MutationRegistry } from './cache/mutation-registry';
 import { QueryClient } from './cache/query-client';
@@ -33,8 +34,23 @@ import {
 } from './types';
 import { nextRetryDelay, noop, normalizeRetry, resolveRequest, withGlobalHeaders } from './utils';
 
-interface Call {
+/**
+ * The handle a mutation keeps for one accepted call.
+ *
+ * It exists so a call that is waiting for a connection can be sent later, from a stack that no
+ * longer has the `run()` frame that accepted it — without a second copy of the send/cancel logic.
+ * Everything else (the request, the stream, the optimistic undo, the settle handlers) stays in the
+ * closure that created it.
+ */
+interface AcceptedCall {
+  /** Subscribes the request. Called at `run()` when online, and once per replay. */
+  send(): void;
+  /** Rejects with `RequestCancelledError` and rolls the optimistic write back. */
   cancel(): void;
+  /** Stops waiting for a connection without sending. Idempotent. */
+  release(): void;
+  /** `true` while the call is waiting for a connection. */
+  paused: boolean;
 }
 
 interface MutationFactory {
@@ -137,6 +153,8 @@ function buildMutation<T, TArgs, TContext>(
     timeouts: options.retryTimeouts ?? config.retryTimeouts,
   });
   const concurrency = options.concurrency ?? 'parallel';
+  const online = inject(OnlineManager);
+  const networkMode: NetworkMode = options.networkMode ?? config.networkMode ?? 'always';
 
   const response = signal<T | undefined>(undefined);
   const error = signal<Error | undefined>(undefined);
@@ -150,7 +168,10 @@ function buildMutation<T, TArgs, TContext>(
     const cause = error();
     if (cause === undefined) return undefined;
     const timeout = errorTimeout();
-    return toRequestError(cause, timeout === undefined ? {} : { timeout });
+    return toRequestError(cause, {
+      ...(timeout === undefined ? {} : { timeout }),
+      offline: !online.online(),
+    });
   });
   const args = signal<TArgs | undefined>(undefined);
   /** Whatever the last call's `onMutate` produced. See `MutationOptions.onMutate`. */
@@ -162,9 +183,44 @@ function buildMutation<T, TArgs, TContext>(
   const status = computed<MutationStatus>(() => (inFlight() > 0 ? 'loading' : finished()));
   const loading = computed(() => inFlight() > 0);
 
-  const calls = new Set<Call>();
+  /**
+   * Every accepted call that has not settled, in call order.
+   *
+   * Queued calls are members too, which is what makes `cancel()` and `switch` treat a call that has
+   * not been sent the same way as one that has: it counts towards `isMutating`, it is cancelled the
+   * same way, and it settles exactly once.
+   */
+  const calls = new Set<AcceptedCall>();
+  /** Paused calls, oldest first. Its length is what `paused()` reports. */
+  const queue: AcceptedCall[] = [];
+  const queuedCount = signal(0);
+  const paused = computed(() => queuedCount() > 0);
+  /** The one reconnect listener a mutation needs, armed while anything is queued. */
+  let detachReplay: (() => void) | undefined;
   let exhausted: Promise<T> | undefined;
   let destroyed = false;
+
+  /**
+   * Sends everything that was queued when the reconnect arrived, in call order.
+   *
+   * The queue is drained **by snapshot** rather than by `while (queue.length)`: a send that fails
+   * synchronously (a custom backend, a test double) re-queues itself, and a `while` loop would pick
+   * it straight back up and spin. Snapshotting also makes the order a fact — `splice` preserves the
+   * order the calls were accepted in, which is the order the application made them in.
+   */
+  const replay = (): void => {
+    detachReplay?.();
+    detachReplay = undefined;
+    // Drained by snapshot: a send that fails synchronously re-queues itself, and a `while` loop
+    // would pick it straight back up and spin. Snapshotting also makes the order a fact — `splice`
+    // preserves the order the calls were accepted in, which is the order the application made them.
+    const batch = queue.splice(0);
+    queuedCount.update((n) => n - batch.length);
+    for (const call of batch) {
+      call.paused = false;
+      call.send();
+    }
+  };
 
   const safe = (fn: () => void): void => {
     try {
@@ -281,7 +337,7 @@ function buildMutation<T, TArgs, TContext>(
     return await options.onMutate(callArgs);
   };
 
-  const execute = (callArgs: TArgs, ctx: TContext): Promise<T> => {
+  const prepare = (callArgs: TArgs, ctx: TContext): Promise<T> => {
     // `TArgs` doubles as a params bag: its `body` / `path` / `headers` keys fill the
     // matching request slots and the rest become the query string. The verb comes from
     // the variant that was called.
@@ -335,28 +391,75 @@ function buildMutation<T, TArgs, TContext>(
     progress.set(undefined);
     mutations.begin(options.mutationKey);
 
+    // The state flips synchronously on `online`, but the reconnect is announced in a microtask. A
+    // `run()` that lands in that window must not overtake writes that were made earlier, so the
+    // queue is drained before this call is sent.
+    if (queue.length > 0 && online.online()) replay();
+
     const promise = new Promise<T>((resolve, reject) => {
       let settled = false;
-      // Read by `call.cancel` above, assigned below once the request is subscribed, so it cannot be
-      // a `const`. The initializer is what keeps `prefer-const` from asking for one it cannot have.
+      // Read by `call.cancel`, assigned by `send`. The initializer is what keeps `prefer-const` from
+      // asking for a binding it cannot have.
       let subscription: Subscription | undefined = undefined;
       /** Undoes this call's optimistic write. See `applyOptimistic`. */
       let undo: () => void = noop;
 
-      const call: Call = {
+      /** Leaves the queue, if this call is in it. Idempotent — `finish` and a replay both call it. */
+      const releaseQueued = (): void => {
+        if (!call.paused) return;
+        call.paused = false;
+        const index = queue.indexOf(call);
+        if (index >= 0) queue.splice(index, 1);
+        queuedCount.update((n) => n - 1);
+        if (queue.length === 0) {
+          detachReplay?.();
+          detachReplay = undefined;
+        }
+      };
+
+      /**
+       * Parks the call until the next reconnect.
+       *
+       * The optimistic write stays — the call is not failing, it is waiting — and the promise stays
+       * pending, which is what makes `await run()` mean "the write happened", offline included.
+       * Nothing is sent and no timer is armed, so a device that stays offline costs one queue entry
+       * and no work.
+       */
+      const hold = (): void => {
+        call.paused = true;
+        progress.set(undefined);
+        queue.push(call);
+        queuedCount.update((n) => n + 1);
+        detachReplay ??= online.onReconnect(replay);
+      };
+
+      const send = (): void => {
+        subscription = stream.subscribe({ next: onEvent, error: (e) => fail(toError(e)) });
+        // A custom `HttpBackend` may answer synchronously, in which case `settled` is already true
+        // here and the completed subscription must not be handed to `cancel`. The type checker
+        // narrows `settled` to `false` because it cannot see that the callback ran inside `subscribe`.
+        if (settled) subscription.unsubscribe();
+      };
+
+      const call: AcceptedCall = {
+        paused: false,
+        send,
         cancel: () => {
           if (settled) return;
           // A destroyed handle has no observer left to correct, and writing to a dead signal is
           // pure noise; a plain `cancel()` (or a `switch` superseding this call) does roll back,
           // because leaving an invented value on screen is the worse outcome.
           if (!destroyed) undo();
+          releaseQueued();
           finish();
           subscription?.unsubscribe();
           reject(new RequestCancelledError());
         },
+        release: releaseQueued,
       };
       const finish = (): void => {
         settled = true;
+        releaseQueued();
         calls.delete(call);
         inFlight.update((n) => n - 1);
         mutations.end(options.mutationKey);
@@ -391,6 +494,20 @@ function buildMutation<T, TArgs, TContext>(
       };
       const fail = (err: Error): void => {
         if (settled) return;
+        // A replay that died because the connection dropped again is not a final failure — it is the
+        // same call, still waiting. The heuristic is deliberately narrow: `'online'` mode, the
+        // manager still reports offline, and the failure classifies as `network` (an
+        // `HttpErrorResponse` with `status: 0`, or a raw `TypeError`). So an HTTP status, a timeout
+        // or an abort stays a failure even while the browser is offline, and a status-0 failure
+        // while the browser says it is online is a real one rather than a reason to wait forever.
+        if (
+          networkMode === 'online' &&
+          !online.online() &&
+          toRequestError(err).kind === 'network'
+        ) {
+          hold();
+          return;
+        }
         // The optimistic value never became real, so it must not stay on screen. `undo` is a
         // compare-and-swap, so a value another call wrote in the meantime survives.
         undo();
@@ -429,12 +546,15 @@ function buildMutation<T, TArgs, TContext>(
       // Applied last, so the state above (`args`, cleared `error`, cleared `progress`) is what the
       // template sees together with the optimistic value rather than before it.
       undo = applyOptimistic(callArgs);
-      subscription = stream.subscribe({ next: onEvent, error: (e) => fail(toError(e)) });
-      // A custom `HttpBackend` may answer synchronously, in which case `settled` is already true
-      // here and the completed subscription must not be handed to `cancel`. The type checker
-      // narrows `settled` to `false` because it cannot see that the callback ran inside `subscribe`.
-      // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
-      if (settled) subscription.unsubscribe();
+
+      // Offline under `'online'`: the write is already prepared and shown, and it is sent by the
+      // reconnect rather than by this stack. Everything else — including `'offlineFirst'`, whose
+      // first attempt always runs — sends now.
+      if (networkMode === 'online' && !online.online()) {
+        hold();
+        return;
+      }
+      send();
     });
     promise.catch(noop);
     return promise;
@@ -447,6 +567,8 @@ function buildMutation<T, TArgs, TContext>(
   const destroy = (): void => {
     if (destroyed) return;
     destroyed = true;
+    detachReplay?.();
+    detachReplay = undefined;
     cancelAll();
   };
 
@@ -461,10 +583,10 @@ function buildMutation<T, TArgs, TContext>(
    * a promise chain "for symmetry" would push dispatch into a microtask and quietly change that.
    */
   const start = (callArgs: TArgs): Promise<T> => {
-    if (!options.onMutate) return execute(callArgs, undefined as TContext);
+    if (!options.onMutate) return prepare(callArgs, undefined as TContext);
 
     return runOnMutate(callArgs).then(
-      (ctx) => execute(callArgs, ctx),
+      (ctx) => prepare(callArgs, ctx),
       // `onMutate` threw or rejected: the call was never made, so it fails like any other
       // failed call — hooks run, the promise rejects, nothing was sent.
       (reason: unknown) => {
@@ -511,6 +633,7 @@ function buildMutation<T, TArgs, TContext>(
     args: args.asReadonly(),
     context: context.asReadonly(),
     progress: progress.asReadonly(),
+    paused,
     run: (...a: [TArgs?]) => run(a[0] as TArgs),
     tryRun: (...a: [TArgs?]): Promise<RunResult<T>> =>
       run(a[0] as TArgs).then(

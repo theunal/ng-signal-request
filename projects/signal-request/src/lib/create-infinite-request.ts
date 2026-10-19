@@ -20,6 +20,7 @@ import { normalizeKey } from './cache/key';
 import { QueryCache } from './cache/query-cache';
 import { resolveStructuralSharing } from './cache/structural-sharing';
 import { SIGNAL_REQUEST_CONFIG } from './config';
+import { OnlineManager, type NetworkMode } from './connectivity';
 import { RequestCancelledError, toRequestError } from './errors';
 import type {
   FlattenedPages,
@@ -134,6 +135,7 @@ function buildInfiniteInContext<TPage, TParam>(
   const errorHandler = inject(ErrorHandler);
   const destroyRef = inject(DestroyRef);
   const isBrowser = isPlatformBrowser(inject(PLATFORM_ID));
+  const online = inject(OnlineManager);
 
   const retryPolicy = normalizeRetry(options.retry, {
     timeout: options.timeout,
@@ -144,6 +146,7 @@ function buildInfiniteInContext<TPage, TParam>(
   const share = resolveStructuralSharing<TPage>(options.structuralSharing, options.equal);
   const debounceMs = isBrowser ? (options.debounce ?? 0) : 0;
   const maxPages = options.maxPages;
+  const networkMode: NetworkMode = options.networkMode ?? globalConfig.networkMode ?? 'always';
 
   const safe = (fn: () => void): void => {
     try {
@@ -200,6 +203,7 @@ function buildInfiniteInContext<TPage, TParam>(
     retry: retryPolicy,
     parse: options.parse,
     responseType: RESPONSE_TYPE[kind],
+    networkMode,
   });
 
   const rawPages = debounceMs > 0 ? debouncedSignal(pagesOf, debounceMs) : pagesOf;
@@ -292,9 +296,18 @@ function buildInfiniteInContext<TPage, TParam>(
 
   const isFetching = computed(() => pagesOf().some((page) => page.entry.isFetching()));
 
+  /**
+   * Any page waiting for a connection.
+   *
+   * Read from the entries rather than tracked on the handle, so a page paused by a *different*
+   * handle on the same key — the entry is shared — is reported here too.
+   */
+  const paused = computed(() => pagesOf().some((page) => page.entry.paused()));
+
   const hasData = computed(() => pages().length > 0);
 
   const status = computed<RequestStatus>(() => {
+    if (paused()) return hasData() ? 'reloading' : 'loading';
     if (error() && !retrying()) return 'error';
     if (isFetching()) return hasData() ? 'reloading' : 'loading';
     if (hasData()) return 'resolved';
@@ -409,16 +422,19 @@ function buildInfiniteInContext<TPage, TParam>(
     };
 
     const subs: Subscription[] = [];
+    const detaches: Array<() => void> = [];
     if (options.refetchOnWindowFocus) {
       subs.push(fromEvent(document, 'visibilitychange').subscribe(whenVisible));
       subs.push(fromEvent(window, 'focus').subscribe(whenVisible));
     }
     if (options.refetchOnReconnect) {
-      subs.push(fromEvent(window, 'online').subscribe(refetch));
+      detaches.push(online.onReconnect(refetch));
     }
     destroyRef.onDestroy(() => {
       for (const sub of subs) sub.unsubscribe();
       subs.length = 0;
+      for (const detach of detaches) detach();
+      detaches.length = 0;
     });
   }
 
@@ -442,6 +458,7 @@ function buildInfiniteInContext<TPage, TParam>(
       return toRequestError(cause);
     }),
     isFetching,
+    paused,
     isFetchingNextPage: computed(() => {
       const param = lastParam();
       if (param === undefined) return false;

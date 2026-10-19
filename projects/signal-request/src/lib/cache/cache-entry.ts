@@ -1,7 +1,8 @@
 import type { HttpHeaders, HttpProgressEvent, HttpResourceRequest } from '@angular/common/http';
 import { type HttpClient, HttpEventType, type HttpEvent } from '@angular/common/http';
 import { computed, signal, untracked, type Signal, type WritableSignal } from '@angular/core';
-import { retry, throwError, timer, type Subscription } from 'rxjs';
+import { Observable, retry, throwError, timer, type Subscription } from 'rxjs';
+import { ALWAYS_ONLINE, type Connectivity, type NetworkMode } from '../connectivity';
 import { RequestCancelledError, toError } from '../errors';
 import { noop, nextRetryDelay, type NormalizedRetry } from '../utils';
 import type { NormalizedKey } from './key';
@@ -10,6 +11,12 @@ import type { StructuralSharingFn } from './structural-sharing';
 /** How a fetch ended, as reported to {@link CacheEntry.addSettleListener}. */
 export type SettleOutcome<T> =
   { readonly ok: true; readonly value: T } | { readonly ok: false; readonly error: Error };
+
+/** The two halves of a promise, kept apart so a held fetch can be settled by whoever releases it. */
+interface HeldSettle<T> {
+  readonly resolve: (value: T | undefined) => void;
+  readonly reject: (error: Error) => void;
+}
 
 /**
  * A value that did not come from the network — a persisted snapshot, or a server render's transfer
@@ -35,6 +42,15 @@ export interface FetchPlan<T> {
   readonly parse: ((raw: unknown) => T) | undefined;
   /** Which `HttpClient` body reader to use, from the verb variant that was called. */
   readonly responseType: 'json' | 'text' | 'blob' | 'arraybuffer';
+  /**
+   * How this fetch treats connectivity. Optional, and `undefined` means `'always'`.
+   *
+   * It travels in the plan rather than in the constructor because the mode is a property of the
+   * *request*, and the entry already stores the newest plan so a cache-driven refetch can rebuild
+   * it. Two handles on one key therefore share the newest plan's mode — the same rule they already
+   * follow for the request itself.
+   */
+  readonly networkMode?: NetworkMode;
 }
 
 /**
@@ -98,9 +114,20 @@ export class CacheEntry<T = unknown> {
   readonly statusCode: WritableSignal<number | undefined>;
   /** True once a value has arrived. Lets a handle tell `loading` from `reloading`. */
   readonly hasData: Signal<boolean>;
+  /**
+   * Set while the entry is waiting for a connection rather than for a response.
+   *
+   * Two situations set it: a `networkMode: 'online'` fetch that has not started, and a retry that is
+   * waiting to be let out. In both cases the entry is not failing and its `run()` promise is still
+   * pending, so `status` alone would look like an ordinary slow request — which is why this is a
+   * separate signal. It is deliberately **not** a `RequestStatus` member: a status is what the data
+   * is, and being paused is why nothing is happening.
+   */
+  readonly paused: WritableSignal<boolean>;
 
   private readonly http: HttpClient;
   private readonly isBrowser: boolean;
+  private readonly connectivity: Connectivity;
 
   private observers = 0;
   private inFlight: Promise<T | undefined> | undefined;
@@ -110,6 +137,19 @@ export class CacheEntry<T = unknown> {
   private gcTimer: ReturnType<typeof setTimeout> | undefined;
   private gcMs = 0;
   private destroyed = false;
+
+  /**
+   * The held fetch, when the entry is paused before its first attempt.
+   *
+   * Held as a promise rather than as a plan-and-a-flag so the existing dedup keeps working: `inFlight`
+   * points at this promise, so a second handle on the same key **joins** it instead of starting a
+   * request of its own. A paused entry and a fetching entry look identical to the dedup, which is
+   * exactly what "one request per key" needs.
+   */
+  private held:
+    { readonly promise: Promise<T | undefined>; readonly settle: HeldSettle<T> } | undefined;
+  private heldPlan: FetchPlan<T> | undefined;
+  private detachHold: (() => void) | undefined;
 
   /**
    * The last plan a subscriber registered.
@@ -149,6 +189,15 @@ export class CacheEntry<T = unknown> {
     isBrowser: boolean,
     onDestroy: () => void = () => {},
     seed?: SeedValue<T>,
+    /**
+     * Where connectivity is read from. Defaults to {@link ALWAYS_ONLINE}, so an entry built without
+     * one — every existing unit test, and any construction outside the cache — is never paused.
+     *
+     * Trailing and optional rather than required: the entry is constructed positionally by
+     * `QueryCache`, and a required parameter here would have been a change to a public constructor
+     * for a feature most applications never enable.
+     */
+    connectivity: Connectivity = ALWAYS_ONLINE,
   ) {
     this.hash = key.hash;
     this.segments = key.segments;
@@ -156,6 +205,7 @@ export class CacheEntry<T = unknown> {
     this.http = http;
     this.isBrowser = isBrowser;
     this.onDestroy = onDestroy;
+    this.connectivity = connectivity;
 
     // A seeded entry starts life already holding its value. Everything else stays at its empty
     // default, so a restored entry is an ordinary entry that happens to have old data: it is not
@@ -174,6 +224,7 @@ export class CacheEntry<T = unknown> {
     this.local = signal(false);
     this.headers = signal<HttpHeaders | undefined>(undefined);
     this.statusCode = signal<number | undefined>(undefined);
+    this.paused = signal(false);
     this.hasData = computed(() => this.data() !== undefined);
   }
 
@@ -338,18 +389,98 @@ export class CacheEntry<T = unknown> {
   /* --------------------------------------------------------------------- */
 
   /**
-   * Runs one fetch, or joins the one already running.
+   * Runs one fetch, joins the one already running, or **holds** until the browser is online.
    *
    * The early return **is** the dedup: two components mounting on the same key
    * call this microseconds apart and the second one joins the first's promise
-   * instead of opening a second connection.
+   * instead of opening a second connection. A held fetch participates in that — it puts its own
+   * promise in `inFlight` — so "paused" and "fetching" are one state to everyone outside the entry.
    */
   fetch(plan: FetchPlan<T>): Promise<T | undefined> {
     if (this.destroyed) {
       return rejected(new RequestCancelledError('The query was removed from the cache.'));
     }
     if (this.inFlight) return this.inFlight;
+    if (this.shouldHold(plan)) return this.hold(plan);
+    return this.start(plan);
+  }
 
+  /**
+   * Whether this fetch must wait for a connection.
+   *
+   * Connectivity is read through `untracked`: `fetch` runs from a handle's effect, and a tracked
+   * read would make every connectivity flip re-run that effect. The entry reacts to connectivity
+   * through its own `onReconnect` subscription instead, which is one notification rather than one
+   * per handle.
+   */
+  private shouldHold(plan: FetchPlan<T>): boolean {
+    return plan.networkMode === 'online' && !this.isOnline();
+  }
+
+  private isOnline(): boolean {
+    return untracked(this.connectivity.online);
+  }
+
+  /**
+   * Parks the fetch until the next reconnect, and returns the promise that will settle then.
+   *
+   * The held promise is stored as `inFlight`, so joining, `pending`, `cancel()` and the last-observer
+   * teardown all behave exactly as they do for a fetch in flight: losing the last observer cancels a
+   * paused request the same way it cancels a running one.
+   */
+  private hold(plan: FetchPlan<T>): Promise<T | undefined> {
+    this.paused.set(true);
+    this.heldPlan = plan;
+
+    let settle!: HeldSettle<T>;
+    const promise = new Promise<T | undefined>((resolve, reject) => {
+      settle = { resolve, reject };
+    });
+    this.held = { promise, settle };
+    this.detachHold = this.connectivity.onReconnect(() => this.resume());
+
+    this.inFlight = promise;
+    const clear = (): void => {
+      if (this.inFlight === promise) this.inFlight = undefined;
+    };
+    promise.then(clear, clear);
+    return promise;
+  }
+
+  /**
+   * Releases a held fetch: starts it, once.
+   *
+   * Synchronous up to the call to `start`, which puts its own promise in `inFlight` before returning
+   * — so if two things react to the same reconnect, the second one joins the request the first
+   * started rather than opening a connection of its own. That is what makes "one refetch per
+   * reconnect" fall out of the dedup instead of needing a guard.
+   */
+  private resume(): void {
+    const held = this.held;
+    if (held === undefined) return;
+
+    this.held = undefined;
+    this.detachHold?.();
+    this.detachHold = undefined;
+    this.paused.set(false);
+    if (this.inFlight === held.promise) this.inFlight = undefined;
+
+    const plan = this.heldPlan;
+    this.heldPlan = undefined;
+
+    if (this.destroyed) {
+      held.settle.reject(new RequestCancelledError('The query was removed from the cache.'));
+      return;
+    }
+    if (plan === undefined) {
+      held.settle.resolve(undefined);
+      return;
+    }
+
+    this.start(plan).then(held.settle.resolve, held.settle.reject);
+  }
+
+  private start(plan: FetchPlan<T>): Promise<T | undefined> {
     this.isFetching.set(true);
     this.error.set(undefined);
     this.errorTimeout.set(undefined);
@@ -385,11 +516,18 @@ export class CacheEntry<T = unknown> {
 
     if (plan.retry) {
       const policy = plan.retry;
+      // `'always'` never consults connectivity, so only the other two modes can pause a retry.
+      const pauseRetries = (plan.networkMode ?? 'always') !== 'always';
       stream = stream.pipe(
         retry({
           delay: (err: unknown, attemptNo: number) => {
             const delay = nextRetryDelay(policy, attemptNo, toError(err));
             if (delay === undefined) return throwError(() => err);
+            // The attempt is spent **only** on the branch that arms a timer. Offline, the retry waits
+            // for a connection instead of counting down a clock that is not running, and `paused`
+            // is what says so — `retryAttempt()` staying at 0 is the honest reading, because no
+            // retry is scheduled.
+            if (pauseRetries && !this.isOnline()) return this.waitForReconnect();
             // Reporting the attempt here is what keeps `retryAttempt()` honest
             // without a separate supervisor.
             this.retryAttempt.set(attemptNo);
@@ -491,13 +629,14 @@ export class CacheEntry<T = unknown> {
   }
 
   /**
-   * Aborts the in-flight request, if any.
+   * Aborts the in-flight request, if any, and releases a held fetch.
    *
    * Unsubscribing is what actually cancels the network call for Angular's fetch
    * backend, so the subscription *is* the abort handle — no `AbortController`
    * needed, and nothing leaks into the request context.
    */
   cancel(): void {
+    this.releaseHold(new RequestCancelledError());
     this.subscription?.unsubscribe();
     this.subscription = undefined;
     this.abortCurrent?.();
@@ -506,6 +645,49 @@ export class CacheEntry<T = unknown> {
     this.isFetching.set(false);
     this.retryAttempt.set(0);
     this.progress.set(undefined);
+  }
+
+  /**
+   * Lets go of a held fetch, rejecting it.
+   *
+   * Everything a hold allocated is released here — the reconnect listener and the promise — so a
+   * `cancel()` or a last-observer teardown while paused leaves no listener and no timer behind. The
+   * `paused` flag is cleared first, because the rejection is what a waiting `run()` sees and it
+   * should not be able to observe a paused entry with a settled promise.
+   */
+  private releaseHold(error: Error): void {
+    const held = this.held;
+    if (held === undefined) return;
+
+    this.held = undefined;
+    this.heldPlan = undefined;
+    this.detachHold?.();
+    this.detachHold = undefined;
+    this.paused.set(false);
+    if (this.inFlight === held.promise) this.inFlight = undefined;
+    held.settle.reject(error);
+  }
+
+  /**
+   * An observable that **emits** on the next reconnect, without arming a timer.
+   *
+   * `retry`'s `delay` callback is asked for a notifier: a `next` makes it resubscribe to the source,
+   * which is the retry. Completion is *not* the same thing — a notifier that completes without
+   * emitting ends the whole stream, so the call would never be retried at all.
+   *
+   * The teardown detaches the listener and clears `paused`, and `retry` unsubscribes the notifier as
+   * soon as it emits — so the flag never outlives the wait. That is also what makes cancelling
+   * mid-pause tidy: the subscription is the only thing holding the listener.
+   */
+  private waitForReconnect(): Observable<void> {
+    return new Observable<void>((subscriber) => {
+      this.paused.set(true);
+      const detach = this.connectivity.onReconnect(() => subscriber.next());
+      return () => {
+        detach();
+        this.paused.set(false);
+      };
+    });
   }
 
   /* --------------------------------------------------------------------- */

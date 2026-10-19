@@ -2,6 +2,7 @@ import { isPlatformBrowser } from '@angular/common';
 import { HttpClient } from '@angular/common/http';
 import { inject, Injectable, isDevMode, PLATFORM_ID, untracked } from '@angular/core';
 import { SIGNAL_REQUEST_CONFIG } from '../config';
+import { OnlineManager } from '../connectivity';
 import { CacheEntry, type SeedValue } from './cache-entry';
 import { matchesFilter, normalizeKey, type QueryKey, type QueryKeyFilter } from './key';
 
@@ -55,6 +56,14 @@ export class QueryCache {
   private readonly http = inject(HttpClient);
   private readonly isBrowser = isPlatformBrowser(inject(PLATFORM_ID));
   private readonly config = inject(SIGNAL_REQUEST_CONFIG);
+  /**
+   * The one connectivity source, read by every entry this cache creates.
+   *
+   * Injected here rather than inside the entry so the entry stays constructible as a plain object —
+   * its unit tests build it positionally — and so an application (or a test) that wants a different
+   * answer overrides one token rather than every request.
+   */
+  private readonly connectivity = inject(OnlineManager);
 
   /* --------------------------------------------------------------------- */
   /*  maxEntries                                                             */
@@ -132,7 +141,14 @@ export class QueryCache {
     return removed;
   }
 
-  /** Whether an entry may be taken: nobody is watching, and no request is waiting on an answer. */
+  /**
+   * Whether an entry may be taken: nobody is watching, and no request is waiting on an answer.
+   *
+   * A paused entry cannot reach the first half of that: the hold lives in `inFlight`, which makes it
+   * join-able rather than idle, and an entry loses its last observer only through `release()` — which
+   * cancels on the way out and so lets go of the hold first. Anything that ever changes that has to
+   * change this clause with it.
+   */
   private isEvictable(entry: CacheEntry): boolean {
     return entry.observerCount === 0 && !entry.isFetching();
   }
@@ -281,6 +297,8 @@ export class QueryCache {
       // handle's key `computed`, and a signal write there is `NG0600`. The signals are initialised
       // with the restored value instead, so a seeded entry is never briefly empty.
       seed,
+      // Trailing, so the positional construction the entry's own tests use keeps working unchanged.
+      this.connectivity,
     );
     this.entries.set(normalized.hash, entry as CacheEntry);
     this.recency.set(normalized.hash, ++this.useSeq);

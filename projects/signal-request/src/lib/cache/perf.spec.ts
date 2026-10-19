@@ -1,6 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { provideSignalRequest } from '../../public-api';
-import { cache, setup } from '../../../testing/testing';
+import { TestBed } from '@angular/core/testing';
+import {
+  createMutation,
+  createRequest,
+  OnlineManager,
+  provideSignalRequest,
+} from '../../public-api';
+import { cache, settle, setup } from '../../../testing/testing';
 
 /**
  * The one hot path `maxEntries` touches: `QueryCache.resolve`.
@@ -84,6 +90,16 @@ function report(label: string, ms: number): void {
   // their output, and the printed number is the entire deliverable of a bench run.
   process.stdout.write(
     `\n[bench] ${label}: ${ms.toFixed(1)} ms over ${N} → ${usPerOp(ms).toFixed(2)} µs/op\n`,
+  );
+}
+
+/** The same, for a case whose size is one per entry rather than `N`. */
+function reportEach(label: string, ms: number, count: number): void {
+  if (N !== LARGE) return;
+  process.stdout.write(
+    `\n[bench] ${label}: ${ms.toFixed(1)} ms over ${count} → ${((ms * 1000) / count).toFixed(
+      2,
+    )} µs/entry\n`,
   );
 }
 
@@ -178,6 +194,99 @@ describe('perf — resolve', () => {
       expect(ms - mid).toBeLessThan((mid - started) * SHAPE_LIMIT);
       expect(usPerOp(ms)).toBeLessThan(CEILING_PER_OP_US);
       c.clear();
+    },
+    TIMEOUT_MS,
+  );
+});
+
+/**
+ * The two paths Phase 2 added: releasing a paused entry on reconnect, and replaying a paused queue.
+ *
+ * Both are bulk operations triggered by one event, so the thing worth measuring is the **total**
+ * cost of the event rather than a per-op loop: a reconnect that wakes 1,000 entries at once is the
+ * case where a per-entry listener or a synchronous re-render would be felt as a frozen frame.
+ *
+ * The measurement stops after one microtask, because that is where the work is: `setOnline` stamps
+ * the state, and the announcement microtask runs every listener synchronously. `settle()` would add
+ * Angular's effect flushing, which belongs to the harness rather than to this code.
+ */
+describe('perf — reconnect', () => {
+  const STORM = BENCH ? 1_000 : 100;
+  const QUEUE = BENCH ? 1_000 : 100;
+
+  it(
+    'releases every paused entry on one reconnect',
+    async () => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      const { http, create } = setup([provideSignalRequest({ gcTime: GC })]);
+      const manager = TestBed.inject(OnlineManager);
+      manager.setOnline(false);
+
+      const handles = [];
+      for (let i = 0; i < STORM; i++) {
+        handles.push(
+          create(() =>
+            createRequest<number>(`/rows/${i}`, {
+              key: () => ['rows', i],
+              networkMode: 'online',
+            }),
+          ),
+        );
+      }
+      await settle();
+      expect(http.match(() => true)).toHaveLength(0);
+
+      const started = performance.now();
+      manager.setOnline(true);
+      await Promise.resolve();
+      const ms = performance.now() - started;
+      reportEach('reconnect, paused entries', ms, STORM);
+
+      const requests = http.match(() => true);
+      expect(requests).toHaveLength(STORM);
+      for (const request of requests) request.flush(1);
+      await settle();
+
+      expect((ms * 1000) / STORM).toBeLessThan(CEILING_PER_OP_US);
+      for (const handle of handles) handle.destroy();
+    },
+    TIMEOUT_MS,
+  );
+
+  it(
+    'replays a paused mutation queue on one reconnect',
+    async () => {
+      const { http, create } = setup();
+      const manager = TestBed.inject(OnlineManager);
+      manager.setOnline(false);
+      const save = create(() =>
+        createMutation<number, number>((n) => ({ url: '/save', body: { n } }), {
+          networkMode: 'online',
+          concurrency: 'parallel',
+        }),
+      );
+
+      // Every promise is kept and caught: a queued call settles only on replay, and cancelling one
+      // at teardown must not become an unhandled rejection in the middle of a benchmark.
+      const pending: Array<Promise<unknown>> = [];
+      for (let i = 0; i < QUEUE; i++) pending.push(save.run(i).catch(() => undefined));
+      await settle();
+      expect(http.match(() => true)).toHaveLength(0);
+
+      const started = performance.now();
+      manager.setOnline(true);
+      await Promise.resolve();
+      const ms = performance.now() - started;
+      reportEach('mutation replay, queued calls', ms, QUEUE);
+
+      const requests = http.match(() => true);
+      expect(requests).toHaveLength(QUEUE);
+      for (const request of requests) request.flush(1);
+      await settle();
+      await Promise.all(pending);
+
+      expect((ms * 1000) / QUEUE).toBeLessThan(CEILING_PER_OP_US);
+      save.destroy();
     },
     TIMEOUT_MS,
   );

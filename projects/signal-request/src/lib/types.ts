@@ -5,6 +5,7 @@ import type {
   HttpResourceRequest,
 } from '@angular/common/http';
 import type { RequestErrorView } from './errors';
+import type { NetworkMode } from './connectivity';
 import type { QueryKey, QueryKeyFactory } from './cache/key';
 import type { CacheEntry } from './cache/cache-entry';
 import type { StructuralSharingFn } from './cache/structural-sharing';
@@ -138,6 +139,22 @@ export interface SignalRequestConfig {
    */
   waitForRestore?: boolean;
   /**
+   * The default {@link NetworkMode} for every request and mutation. Default `'always'`.
+   *
+   * `'always'` is the default because it is what every version before 0.2.0 did — no code path
+   * consulted connectivity before opening a connection — and a release that silently stopped
+   * sending requests while offline would change what an unmodified application does. Opt in per
+   * request, per mutation, or here; the request's own value wins over this one, and this one wins
+   * over the `'always'` fallback.
+   *
+   * ```ts
+   * provideSignalRequest({ networkMode: 'online' });   // a strictly online application
+   * ```
+   *
+   * @see {@link NetworkMode} for what each value means, and the README's "Offline" section.
+   */
+  networkMode?: NetworkMode;
+  /**
    * Headers added to every request. A plain object is used as-is; a **function** is
    * re-evaluated inside each request's reactive chain, so signals it reads (a token, a locale)
    * make every live request refetch when they change.
@@ -250,6 +267,15 @@ interface RequestOptionsBase<T, TRaw> {
   pollInterval?: number | (() => number | false | null | undefined);
   /** Keep polling while the tab is hidden. Default `false`. */
   pollWhenHidden?: boolean;
+  /**
+   * How this request treats connectivity. Defaults to the global
+   * {@link SignalRequestConfig.networkMode}, and to `'always'` when that is unset.
+   *
+   * `'online'` holds the request (and its retries) until the browser reports a connection, and
+   * `paused()` is `true` while it waits. `'offlineFirst'` runs the first attempt anyway and only
+   * pauses **retries**.
+   */
+  networkMode?: NetworkMode;
   /**
    * Re-fetch when the document becomes visible again — a tab switch, or returning from the
    * background. Default `false`. Browser only, and SSR no-ops like `pollInterval` / `debounce`.
@@ -568,6 +594,19 @@ export interface RequestBase<T, R = T | undefined, TParams = void> {
   readonly loading: Signal<boolean>;
   /** `true` only for the very first load / a load caused by changed params (not for reload/refresh/retry). */
   readonly initialLoading: Signal<boolean>;
+  /**
+   * `true` while the request is waiting for a connection rather than for a response.
+   *
+   * Only ever `true` under `networkMode: 'online'` or `'offlineFirst'`, and it is a **separate**
+   * signal from `status` on purpose: a paused request is not failing, its `run()` promise is still
+   * pending, and `loading()` is already `true` for it. What `paused` adds is *why* nothing is
+   * happening — which is the one thing a spinner cannot say and a "you are offline" banner needs.
+   *
+   * ```html
+   * @if (list.paused()) { <app-offline-banner /> }
+   * ```
+   */
+  readonly paused: Signal<boolean>;
   readonly status: Signal<RequestStatus>;
   /** 0 when not retrying, otherwise the current retry number (1-based). */
   readonly retryAttempt: Signal<number>;
@@ -673,6 +712,8 @@ export interface InfiniteRequestOptions<TPage, TParam> {
   refetchOnWindowFocus?: boolean;
   /** Refetch when the browser reports it is back online. */
   refetchOnReconnect?: boolean;
+  /** See `createRequest`'s `networkMode`. Passing this to any page holds all of them. */
+  networkMode?: NetworkMode;
   /** See `createRequest`'s `equal` — composes with the default structural sharing. */
   equal?: ValueEqualityFn<NoInfer<TPage>>;
   /** See `createRequest`'s `structuralSharing`. */
@@ -724,6 +765,14 @@ export interface InfiniteRequest<TPage, TParam> {
   readonly requestError: Signal<RequestErrorView | undefined>;
   /** Whether any page is on the network. */
   readonly isFetching: Signal<boolean>;
+  /**
+   * `true` while the pagination is waiting for a connection rather than for a response.
+   *
+   * Pages are cached entries, so this is their `paused` state, read together: any page held under
+   * `networkMode: 'online'` or waiting out a paused retry makes this `true`. See
+   * `RequestBase.paused`.
+   */
+  readonly paused: Signal<boolean>;
   /** Whether the page being appended right now is still loading. */
   readonly isFetchingNextPage: Signal<boolean>;
   /** Whether a page is being prepended. Always `false` without `getPreviousPageParam`. */
@@ -885,6 +934,16 @@ export interface MutationOptions<T, TArgs = void, TContext = undefined> {
    */
   retryTimeouts?: boolean;
   /**
+   * How this call treats connectivity. Defaults to the global
+   * {@link SignalRequestConfig.networkMode}, and to `'always'` when that is unset.
+   *
+   * With `'online'`, `run()` while offline **queues** the call instead of sending it: `onMutate` and
+   * the optimistic write happen immediately, `paused()` is `true`, and the call is replayed in call
+   * order once the connection is back. The queue is in memory only — it does not survive a reload,
+   * because replaying a write needs the application's own idempotency story.
+   */
+  networkMode?: NetworkMode;
+  /**
    * Groups this mutation so it can be found without holding a reference to it.
    *
    * Read by `QueryClient.isMutating(mutationKey)`, which is how a global "saving…" indicator
@@ -1013,6 +1072,14 @@ export interface SignalMutation<T, TArgs = void, TContext = undefined> {
    * Needs `provideHttpClient(withXhr())`; see `SignalMutation.progress`.
    */
   readonly progress: Signal<HttpProgressEvent | undefined>;
+  /**
+   * `true` while a call is queued waiting for a connection rather than in flight.
+   *
+   * Only ever `true` under `networkMode: 'online'` on the mutation, on the request, or globally.
+   * The call has already run its `onMutate` and its optimistic write — it simply has not been sent.
+   * `loading()` is `true` for it too; see `RequestBase.paused`.
+   */
+  readonly paused: Signal<boolean>;
   run(...args: undefined extends TArgs ? [args?: TArgs] : [args: TArgs]): Promise<T>;
   tryRun(...args: undefined extends TArgs ? [args?: TArgs] : [args: TArgs]): Promise<RunResult<T>>;
   /** Abort all in-flight calls. */

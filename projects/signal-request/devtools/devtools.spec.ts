@@ -1,7 +1,7 @@
 import { type ComponentFixture, TestBed } from '@angular/core/testing';
 import { describe, expect, expectTypeOf, it, vi } from 'vitest';
 import { inject } from '@angular/core';
-import { createRequest, provideSignalRequest, QueryClient } from 'ng-signal-request';
+import { createRequest, OnlineManager, provideSignalRequest, QueryClient } from 'ng-signal-request';
 import {
   DevtoolsPanel,
   QueryDevtools,
@@ -280,6 +280,67 @@ describe('QueryDevtools — the live view', () => {
     } finally {
       log.mockRestore();
     }
+  });
+});
+
+describe('devtools — connectivity', () => {
+  it('marks a paused entry in the snapshot without changing its status', async () => {
+    const { create } = setup();
+    TestBed.inject(OnlineManager).setOnline(false);
+    const handle = create(() =>
+      createRequest<Row[]>(() => ({ url: '/rows' }), {
+        key: () => ['rows'],
+        networkMode: 'online',
+        debugName: 'rows',
+      }),
+    );
+    await settle();
+
+    const entry = snapshotEntries(cache(), { now: 0 })[0];
+    // `paused` is a column of its own: it says why the entry will not refresh, not what state it is
+    // in. A paused entry that never fetched is still `empty` — reporting `loading` would claim a
+    // request is on the wire when there is none.
+    expect(entry.paused).toBe(true);
+    expect(entry.status).toBe('empty');
+
+    handle.destroy();
+  });
+
+  it('exposes the same connectivity the library acts on', () => {
+    const { create } = setup();
+    const devtools = create(() => inject(QueryDevtools));
+    const manager = TestBed.inject(OnlineManager);
+
+    expect(devtools.online()).toBe(true);
+    manager.setOnline(false);
+    expect(devtools.online()).toBe(false);
+    manager.setOnline(true);
+    expect(devtools.online()).toBe(true);
+  });
+
+  it('shows the offline banner and the per-row paused marker', async () => {
+    const { create } = setup();
+    TestBed.inject(OnlineManager).setOnline(false);
+    const handle = create(() =>
+      createRequest<Row[]>(() => ({ url: '/rows' }), {
+        key: () => ['rows'],
+        networkMode: 'online',
+        debugName: 'rows',
+      }),
+    );
+    await settle();
+
+    const fixture = TestBed.createComponent(DevtoolsPanel);
+    fixture.detectChanges();
+    const button = fixture.nativeElement.querySelector('button') as HTMLButtonElement;
+    expect(button.textContent).toContain('(offline)');
+
+    button.click();
+    fixture.detectChanges();
+    const row = fixture.nativeElement.querySelector('tbody tr') as HTMLElement;
+    expect(row.textContent).toContain('paused');
+
+    handle.destroy();
   });
 });
 

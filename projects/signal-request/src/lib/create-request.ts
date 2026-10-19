@@ -22,6 +22,7 @@ import {
 } from '@angular/core';
 import { fromEvent, type Subscription } from 'rxjs';
 import { SIGNAL_REQUEST_CONFIG } from './config';
+import { OnlineManager } from './connectivity';
 import { RequestCancelledError, toError, toRequestError } from './errors';
 import type {
   CachedRequest,
@@ -33,6 +34,7 @@ import type {
   SelectOptions,
   SignalRequest,
 } from './types';
+import type { NetworkMode } from './connectivity';
 import { selectFrom } from './select';
 import { buildCachedRequest } from './create-cached-request';
 import {
@@ -105,9 +107,15 @@ function buildInContext<T, R, TParams>(
   const errorHandler = inject(ErrorHandler);
   const destroyRef = inject(DestroyRef);
   const isBrowser = isPlatformBrowser(inject(PLATFORM_ID));
+  const online = inject(OnlineManager);
 
   const lazy = options.lazy ?? false;
   const initial = options.initialValue as T | undefined;
+  /**
+   * The effective mode. `'always'` when neither the request nor the global config asked for
+   * anything else — see {@link NetworkMode} for why that is the default rather than `'online'`.
+   */
+  const networkMode: NetworkMode = options.networkMode ?? globalConfig.networkMode ?? 'always';
   const retryPolicy = normalizeRetry(options.retry ?? globalConfig.retry, {
     timeout: options.timeout,
     timeouts: options.retryTimeouts ?? globalConfig.retryTimeouts,
@@ -167,9 +175,39 @@ function buildInContext<T, R, TParams>(
 
   /** The request object that was cancelled on purpose. It stays suppressed until the source produces a new one. */
   const cancelledRequest = signal<HttpResourceRequest | undefined>(undefined);
+
+  /**
+   * `true` when this request must wait for a connection.
+   *
+   * The mode check comes **first** and that is load-bearing in the other direction too: a handle
+   * that did not opt in never reads `online()`, so it subscribes to nothing and a reconnect cannot
+   * re-evaluate its source. Short-circuiting is what keeps the default free.
+   *
+   * The request itself is read through a second, non-throwing computed because `status` reads it: a
+   * source that throws must not make `status()` throw as well. `requestKey` does the same, for the
+   * same reason.
+   */
+  const offline = computed(() => networkMode === 'online' && !online.online());
+  const pendingRequest = computed<HttpResourceRequest | typeof THROWN | undefined>(() => {
+    try {
+      return current();
+    } catch {
+      return THROWN;
+    }
+  });
+  const held = computed(() => {
+    if (!offline()) return false;
+    const request = pendingRequest();
+    return request !== undefined && request !== THROWN && request !== cancelledRequest();
+  });
+
   const gated = computed(() => {
     const request = current();
-    return request !== undefined && request === cancelledRequest() ? undefined : request;
+    if (request === undefined || request === cancelledRequest()) return undefined;
+    // Returning `undefined` puts the resource at `idle`, which is what "not started" means to
+    // Angular — and the only way back out is connectivity changing, which re-evaluates this and
+    // starts the request. Nothing polls and no timer is armed while it waits.
+    return held() ? undefined : request;
   });
 
   /**
@@ -206,8 +244,20 @@ function buildInContext<T, R, TParams>(
 
   const retrying = signal(false);
   const retryAttempt = signal(0);
+  /** A retry that is waiting for a connection instead of a clock. Also `paused()`. */
+  const retryHeld = signal(false);
 
-  const status = computed<RequestStatus>(() => (retrying() ? 'reloading' : resource.status()));
+  const paused = computed(() => held() || retryHeld());
+
+  const status = computed<RequestStatus>(() =>
+    paused()
+      ? resource.hasValue()
+        ? 'reloading'
+        : 'loading'
+      : retrying()
+        ? 'reloading'
+        : resource.status(),
+  );
   const error = computed<Error | undefined>(() => (retrying() ? undefined : resource.error()));
 
   /**
@@ -220,7 +270,10 @@ function buildInContext<T, R, TParams>(
     // The option overrides the source's `timeout` in `evaluate`, but a source may set one on its own.
     const key = untracked(requestKey);
     const effective = timeout ?? (key && key !== THROWN ? key.timeout : undefined);
-    return toRequestError(cause, effective === undefined ? {} : { timeout: effective });
+    return toRequestError(cause, {
+      ...(effective === undefined ? {} : { timeout: effective }),
+      offline: !online.online(),
+    });
   });
   const loading = computed(() => {
     const s = status();
@@ -260,6 +313,7 @@ function buildInContext<T, R, TParams>(
   let lastValue: unknown = THROWN;
   let attempt = 0;
   let retryTimer: ReturnType<typeof setTimeout> | undefined;
+  let retryDetach: (() => void) | undefined;
   let pollTimer: ReturnType<typeof setTimeout> | undefined;
 
   const safe = (fn: () => void): void => {
@@ -281,9 +335,36 @@ function buildInContext<T, R, TParams>(
     for (const d of all) d.reject(reason);
   };
 
+  /** Releases a retry that was waiting for a connection. Idempotent, and free when there is none. */
+  const clearRetryHold = (): void => {
+    retryDetach?.();
+    retryDetach = undefined;
+    if (untracked(retryHeld)) retryHeld.set(false);
+  };
+
+  /**
+   * Parks the retry until the next reconnect instead of arming a back-off timer.
+   *
+   * `lastError` is cleared so the failure the reload produces is treated as a **new** one: `step`
+   * ignores an error that is `Object.is`-equal to the previous one, and a re-issued request can
+   * fail with the very same `HttpErrorResponse` object shape, which would end the sequence
+   * silently. `attempt` is deliberately **not** advanced — waiting for a connection is not a retry,
+   * so the budget is untouched, `retryAttempt()` stays `0`, and a device that is offline for an
+   * hour does not exhaust a `count: 3` policy without ever sending anything.
+   */
+  const holdRetry = (): void => {
+    retryHeld.set(true);
+    retryDetach = online.onReconnect(() => {
+      clearRetryHold();
+      lastError = undefined;
+      resource.reload();
+    });
+  };
+
   const resetRetry = (): void => {
     clearTimeout(retryTimer);
     retryTimer = undefined;
+    clearRetryHold();
     attempt = 0;
     lastError = undefined;
     if (untracked(retrying)) retrying.set(false);
@@ -341,6 +422,10 @@ function buildInContext<T, R, TParams>(
 
       case 'idle':
         resetRetry();
+        // Held for connectivity, `idle` means "not started yet", not "disabled": the request exists
+        // and the source did not refuse it. The pending `run()` calls are exactly what the release
+        // answers, so they must survive the trip through `idle`.
+        if (untracked(held)) return;
         rejectPending(new RequestCancelledError('The request was cancelled or is disabled.'));
         return;
 
@@ -377,6 +462,14 @@ function buildInContext<T, R, TParams>(
         lastError = err;
         const delay = nextRetryDelay(retryPolicy, attempt + 1, err);
         if (delay !== undefined) {
+          if (networkMode !== 'always' && !online.online()) {
+            // Offline: wait for a connection rather than for a clock. `retrying()` is what keeps
+            // `status` from falling back to `error` while the hold is in place — which is what
+            // makes `loading()` true and `error()` undefined for a request that has not given up.
+            retrying.set(true);
+            holdRetry();
+            return;
+          }
           attempt += 1;
           retryAttempt.set(attempt);
           retrying.set(true);
@@ -407,6 +500,9 @@ function buildInContext<T, R, TParams>(
     destroyed = true;
     clearTimeout(retryTimer);
     clearTimeout(pollTimer);
+    // A hold owns no timer, so this is the only place that can leave one behind, and it is also
+    // what removes the reconnect listener: `onReconnect` is the hold's only allocation.
+    clearRetryHold();
     rejectPending(new RequestCancelledError('The request was destroyed.'));
   };
   destroyRef.onDestroy(teardown);
@@ -441,7 +537,16 @@ function buildInContext<T, R, TParams>(
       queued = true;
       queueMicrotask(() => {
         queued = false;
-        if (!destroyed && untracked(resource.status) !== 'idle') reloadNow();
+        if (destroyed) return;
+        const s = untracked(resource.status);
+        if (s === 'idle') return;
+        // Under a mode that consults connectivity, a request that is loading at this instant is the
+        // one this reconnect just released — the gate for `'online'`, the retry hold for
+        // `'offlineFirst'` — and reloading it would put the same request on the network twice for
+        // one reconnect. With the default `'always'` nothing is released, and the behaviour is
+        // exactly 0.1.x's.
+        if (networkMode !== 'always' && (s === 'loading' || s === 'reloading')) return;
+        reloadNow();
       });
     };
     const whenVisible = (): void => {
@@ -449,16 +554,21 @@ function buildInContext<T, R, TParams>(
     };
 
     const subs: Subscription[] = [];
+    const detaches: Array<() => void> = [];
     if (options.refetchOnWindowFocus) {
       subs.push(fromEvent(document, 'visibilitychange').subscribe(whenVisible));
       subs.push(fromEvent(window, 'focus').subscribe(whenVisible));
     }
     if (options.refetchOnReconnect) {
-      subs.push(fromEvent(window, 'online').subscribe(refetch));
+      // Through the manager rather than a `window` listener: it is the same reconnect everything
+      // else in this release reacts to, and it is the only one a test can drive without a global.
+      detaches.push(online.onReconnect(refetch));
     }
     destroyRef.onDestroy(() => {
       for (const sub of subs) sub.unsubscribe();
       subs.length = 0;
+      for (const detach of detaches) detach();
+      detaches.length = 0;
     });
   }
 
@@ -502,6 +612,10 @@ function buildInContext<T, R, TParams>(
       return promise;
     }
 
+    // Held for connectivity: the request exists and the source did not refuse it, so this is not
+    // "disabled" — it is waiting. The promise joins `pending` and the release resolves it.
+    if (untracked(held)) return enqueue();
+
     const raw = untracked(resource.status);
     if (raw === 'idle') return rejected(disabledError());
     const promise = enqueue();
@@ -519,6 +633,7 @@ function buildInContext<T, R, TParams>(
     success,
     loading,
     initialLoading,
+    paused,
     status,
     retryAttempt: retryAttempt.asReadonly(),
     headers: resource.headers,
@@ -537,11 +652,21 @@ function buildInContext<T, R, TParams>(
 
     cancel: (): void => {
       if (destroyed) return;
+      // Held before the first attempt: there is no request to abort and no status transition to
+      // observe, so the rejection has to be issued here, and the request has to be suppressed the
+      // same way a cancelled in-flight one is — otherwise `held()` would keep reporting `paused`
+      // and the handle would look busy until the next connectivity change.
+      if (untracked(held)) {
+        cancelledRequest.set(untracked(current));
+        rejectPending(new RequestCancelledError('The request was cancelled.'));
+        return;
+      }
       if (untracked(retrying)) {
         // waiting for the next retry: stop retrying and surface the last error
         const err = lastError;
         clearTimeout(retryTimer);
         retryTimer = undefined;
+        clearRetryHold();
         if (err) finalizeError(err, lastKey);
         return;
       }

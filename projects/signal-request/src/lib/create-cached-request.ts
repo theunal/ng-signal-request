@@ -21,6 +21,7 @@ import { normalizeKey } from './cache/key';
 import { QueryCache } from './cache/query-cache';
 import { resolveStructuralSharing } from './cache/structural-sharing';
 import { SIGNAL_REQUEST_CONFIG } from './config';
+import { OnlineManager, type NetworkMode } from './connectivity';
 import { RequestCancelledError, toError, toRequestError } from './errors';
 import { RESTORE_GATE } from './restore-gate';
 import type {
@@ -123,6 +124,7 @@ function buildCachedInContext<T, R, TParams>(
   // See `restore-gate.ts`. The default is idle, so a request in an application that never persists
   // reads one constant signal and does nothing else.
   const restoreGate = inject(RESTORE_GATE);
+  const online = inject(OnlineManager);
 
   const lazy = options.lazy ?? false;
   const initial = options.initialValue as T | undefined;
@@ -144,6 +146,7 @@ function buildCachedInContext<T, R, TParams>(
   const refetchOnWindowFocus =
     options.refetchOnWindowFocus ?? globalConfig.refetchOnWindowFocus ?? false;
   const refetchOnReconnect = options.refetchOnReconnect ?? globalConfig.refetchOnReconnect ?? false;
+  const networkMode: NetworkMode = options.networkMode ?? globalConfig.networkMode ?? 'always';
   const share = resolveStructuralSharing<T>(options.structuralSharing, options.equal);
   const waitForRestore = options.waitForRestore ?? globalConfig.waitForRestore ?? true;
 
@@ -212,6 +215,7 @@ function buildCachedInContext<T, R, TParams>(
     retry: retryPolicy,
     parse: options.parse,
     responseType: RESPONSE_TYPE[kind],
+    networkMode,
   });
 
   /**
@@ -347,10 +351,22 @@ function buildCachedInContext<T, R, TParams>(
 
   const entry = computed(() => plan()?.entry);
   const retrying = computed(() => (entry()?.retryAttempt() ?? 0) > 0);
+  /**
+   * The entry's own pause state, not the handle's.
+   *
+   * That is the whole point of putting it on the entry: two components on one key are two handles
+   * and one request, so one of them must not be able to report "waiting" while the other reports
+   * "fetching". `false` when there is no entry — a disabled request is idle, not paused.
+   */
+  const paused = computed(() => entry()?.paused() ?? false);
 
   const status = computed<RequestStatus>(() => {
     const e = entry();
     if (!e) return 'idle';
+    // A paused entry is not fetching, so without this clause it would fall through to `idle` (or
+    // to a stale `error`) while its `run()` promise is still pending. It is a wait, and the wait is
+    // what `status` has always reported for the other kinds of wait.
+    if (e.paused()) return e.hasData() ? 'reloading' : 'loading';
     // While a retry is scheduled the error is masked, so the handle has to report the wait
     // rather than the failure — the same rule the uncached path applies.
     if (retrying()) return e.hasData() ? 'reloading' : 'loading';
@@ -366,7 +382,10 @@ function buildCachedInContext<T, R, TParams>(
     const cause = error();
     if (cause === undefined) return undefined;
     const timeout = entry()?.errorTimeout();
-    return toRequestError(cause, timeout === undefined ? {} : { timeout });
+    return toRequestError(cause, {
+      ...(timeout === undefined ? {} : { timeout }),
+      offline: !online.online(),
+    });
   });
 
   const response = computed<R>(() => {
@@ -441,16 +460,22 @@ function buildCachedInContext<T, R, TParams>(
     };
 
     const subs: Subscription[] = [];
+    const detaches: Array<() => void> = [];
     if (refetchOnWindowFocus) {
       subs.push(fromEvent(document, 'visibilitychange').subscribe(whenVisible));
       subs.push(fromEvent(window, 'focus').subscribe(whenVisible));
     }
     if (refetchOnReconnect) {
-      subs.push(fromEvent(window, 'online').subscribe(refetch));
+      // The manager's reconnect, not a raw `window` listener: it is the same event a paused fetch is
+      // released by, so the dedupe below can tell "this reconnect released a request" from "this
+      // reconnect should start one".
+      detaches.push(online.onReconnect(refetch));
     }
     destroyRef.onDestroy(() => {
       for (const sub of subs) sub.unsubscribe();
       subs.length = 0;
+      for (const detach of detaches) detach();
+      detaches.length = 0;
     });
   }
 
@@ -478,6 +503,7 @@ function buildCachedInContext<T, R, TParams>(
       return s === 'loading' || s === 'reloading';
     }),
     initialLoading: computed(() => status() === 'loading'),
+    paused,
     status,
     retryAttempt: computed(() => entry()?.retryAttempt() ?? 0),
     headers: computed(() => entry()?.headers()),

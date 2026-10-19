@@ -23,6 +23,7 @@ import {
   type WritableSignal,
 } from '@angular/core';
 import { QueryCache, formatKey, type CacheEntry, type QueryKeyFilter } from 'ng-signal-request';
+import { OnlineManager } from 'ng-signal-request';
 
 /**
  * What the panel shows for one entry.
@@ -69,6 +70,14 @@ export interface DevtoolsEntry {
   readonly statusCode: number | undefined;
   /** `error().message`, if the last attempt failed. */
   readonly error: string | undefined;
+  /**
+   * Whether this entry is waiting for a connection.
+   *
+   * Its own column rather than a {@link DevtoolsStatus}: `paused` is orthogonal to the set of states
+   * the panel colours by — a paused entry with data is still `ready`, it is just not going to refresh
+   * until the connection comes back.
+   */
+  readonly paused: boolean;
 }
 
 /**
@@ -150,6 +159,7 @@ function describe(entry: CacheEntry, now: number): DevtoolsEntry {
     hasPlan: entry.hasPlan,
     statusCode: entry.statusCode(),
     error: error?.message,
+    paused: entry.paused(),
   };
 }
 
@@ -173,6 +183,15 @@ function describe(entry: CacheEntry, now: number): DevtoolsEntry {
 export class QueryDevtools {
   private readonly cache = inject(QueryCache);
   private readonly injector = inject(Injector);
+
+  /**
+   * The library's view of connectivity.
+   *
+   * Read through the same `OnlineManager` every request uses, so the panel cannot disagree with the
+   * library about whether a request would be started — the whole point of routing them both through
+   * one source. Present on the server too, where it is always `true`.
+   */
+  readonly online: Signal<boolean> = inject(OnlineManager).online;
 
   /** Bumped when the *set* of entries changes, which no entry signal can report. */
   private readonly version = signal(0);
@@ -338,6 +357,9 @@ export class QueryDevtools {
         @if (devtools.overCap > 0) {
           <span class="over-cap" title="every dropable entry is in use">(over cap)</span>
         }
+        @if (!devtools.online()) {
+          <span class="offline" title="the browser reports no connection">(offline)</span>
+        }
       </button>
 
       @if (devtools.isOpen()) {
@@ -358,7 +380,12 @@ export class QueryDevtools {
                 [class.loading]="entry.status === 'loading'"
               >
                 <td [title]="entry.name ?? ''">{{ entry.label }}</td>
-                <td>{{ entry.status }}</td>
+                <td>
+                  {{ entry.status }}
+                  @if (entry.paused) {
+                    <span class="paused" title="waiting for a connection">paused</span>
+                  }
+                </td>
                 <td>{{ entry.observers }}</td>
                 <td>{{ entry.fetchCount }}</td>
                 <td>{{ formatAge(entry.ageMs) }}</td>
@@ -395,6 +422,13 @@ export class QueryDevtools {
     }
     .ngsr-devtools .over-cap {
       color: #b00020;
+    }
+    .ngsr-devtools .offline {
+      color: #b00020;
+    }
+    .ngsr-devtools .paused {
+      margin-left: 0.35rem;
+      color: #0b5fa5;
     }
     .ngsr-devtools table {
       border-collapse: collapse;

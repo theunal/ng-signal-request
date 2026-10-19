@@ -956,6 +956,113 @@ need it: destroying the owning injector does the same thing. It exists for a
 mutation built with an explicit `{ injector }` outside an injection context,
 where the handle is the only thing you are holding.
 
+## Offline
+
+Connectivity is **opt-in**, and opting in is one option. The default,
+`networkMode: 'always'`, is what every version before 0.2.0 did: send the request,
+and let it fail loudly if there is no network.
+
+```ts
+const todos = createRequest<Todo[]>('/todos', {
+  key: () => ['todos'],
+  networkMode: 'online',
+});
+
+const add = createMutation<Todo, string>((title) => ({ url: '/todos', body: { title } }), {
+  networkMode: 'online',
+});
+
+// or for the whole application
+provideSignalRequest({ networkMode: 'online' });
+```
+
+| Mode                   | First attempt                                                                      | Retries while offline                                         | Mutations                                                                             |
+| ---------------------- | ---------------------------------------------------------------------------------- | ------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| `'always'` _(default)_ | sent                                                                               | sent, after the usual back-off                                | sent                                                                                  |
+| `'online'`             | held; starts once on reconnect                                                     | wait for a connection — no timer, and **no attempt is spent** | queued, replayed in call order on reconnect                                           |
+| `'offlineFirst'`       | sent, because a service worker, the HTTP cache or a proxy may be able to answer it | wait for a connection                                         | sent — a mutation has no first-attempt/retry distinction, so it behaves as `'always'` |
+
+A held request is **paused, not failed**: nothing throws, `status()` is `'loading'`
+before it has ever loaded and `'reloading'` when there is a value to keep showing,
+and the promise returned by `run()` stays pending until the request starts or
+`cancel()` rejects it with `RequestCancelledError`. Every handle exposes it:
+
+```ts
+todos.paused(); // Signal<boolean>
+client.isPaused(); // any cached entry
+client.isPaused(['todos']); // entries matching the filter
+```
+
+`QueryClient.isPaused` covers **queries** only — a queued mutation reports its own
+`paused()` — and is the counterpart of `isFetching`, so a banner can read the bare
+call and a per-screen banner the filtered one.
+
+### `OnlineManager` — one source of truth
+
+`OnlineManager` is the injectable the library reads. Its `online()` is a **signal**
+(the state) and its `onReconnect(listener)` is an **event** (the edge); a reconnect
+must refetch once, while an offline mount must not refetch on every read of the
+state. The state starts from `navigator.onLine`, follows the window's `online` /
+`offline` events, coalesces a burst within one tick into one announcement, and
+removes its listeners when the injector is destroyed. On the server it is always
+online, with no listener and no timer, so a render cannot be held.
+
+```ts
+const online = inject(OnlineManager).online; // Signal<boolean>
+```
+
+`Connectivity` is the interface behind it (`online` + `onReconnect`), and
+`ALWAYS_ONLINE` is the idle implementation used when nothing else is provided — a
+handle on `'always'` reads neither, so the default costs nothing.
+
+```ts
+// A banner driven by the same state the library acts on.
+@Component({
+  template: `@if (!online()) {
+    <p>Offline — changes will be sent when you reconnect.</p>
+  }`,
+})
+export class OfflineBanner {
+  readonly online = inject(OnlineManager).online;
+}
+```
+
+The state means **an interface is up**, which is not the same claim as "a request
+will be routed": DNS, a captive portal, a VPN or the route to your API can all fail
+with an interface present. Treat `'online'` as permission to stop holding, not as a
+guarantee — the request that starts on reconnect can still fail, and `RequestError`
+still says how.
+
+### Mutations queued offline
+
+With `networkMode: 'online'`, `run()` while offline does not send and does not
+reject: the call is queued, `paused()` is `true`, `status()` is `'loading'`, the
+promise stays pending, and the call counts as in flight (`isMutating()` is `true`).
+On the next reconnect the queue is replayed **in the order the calls were made**,
+honouring the same `concurrency` mode as an online call:
+
+- `parallel` (the default) replays every queued call.
+- `exhaust` returns the promise of the call already queued instead of adding one.
+- `switch` cancels the previously queued call with `RequestCancelledError`.
+
+`onMutate` and the optimistic write run at `run()`, so the UI updates immediately;
+`onSuccess` and `invalidates` run after the replayed call actually succeeds. The
+optimistic write is rolled back only on a final failure or a cancellation. A replay
+that fails because the connection dropped again goes **back into the queue** rather
+than reporting an error — the next reconnect is the retry.
+
+```ts
+const add = createMutation<Todo, string>((title) => ({ url: '/todos', body: { title } }), {
+  networkMode: 'online',
+  optimistic: (list, title) => [{ title }, ...(list ?? [])],
+});
+
+add.run('Buy milk'); // offline: queued, list already shows it, promise pending
+add.cancel(); // rejects with RequestCancelledError, list rolls back
+```
+
+The queue lives in memory and **does not survive a reload** — see Known limitations.
+
 ## Auth: reactive headers + a refresh interceptor
 
 `baseUrl` is merged into the url _before_ `HttpClient`, so interceptors see the
@@ -1400,26 +1507,30 @@ and Angular. Adopting it is never a mistake, and if you need what is in the list
 below, it is the one to use. The question this table answers is narrower — what
 you give up when you stay inside Angular.
 
-| Concern              | Here                                                                                                                                                         | TanStack Query (Angular)                                            |
-| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------- |
-| Runtime dependencies | `tslib` and the Angular peers only                                                                                                                           | `@tanstack/query-core` plus the adapter                             |
-| Describing a request | The request _is_ the options — `url`, `params`, `path`, `headers`, `reportProgress` are routed for you                                                       | A `queryFn` you write, plus a `queryKey`                            |
-| Uncached requests    | First class: no `key` means Angular's `httpResource`, its own lifetime, no cache entry                                                                       | Not a concept — every query has a key and a cache entry             |
-| Infinite queries     | `createInfiniteRequest`, **one entry per page**, so prefix invalidation and cross-component sharing work on a feed                                           | `injectInfiniteQuery`, one entry per list                           |
-| `select`             | A **method**: `.select(fn, { equal })`, so the handle's own `response()` is untouched                                                                        | An option on the query observer                                     |
-| Persistence          | `/persist`: sync or async storage, a codec, `maxAge`, key filters, `buster`/`migrate`, and a `TransferState` path for SSR                                    | `persistQueryClient`: async storages, `maxAge`, busters, migrations |
-| Devtools             | `/devtools`, 2.5 KB gzip, entry list and a few actions, imported in dev only                                                                                 | A mature panel with a query explorer and timings                    |
-| Bounding the cache   | `maxEntries`, LRU over idle entries only, with a per-request value that can tighten it                                                                       | `gcTime` per query, plus explicit removal                           |
-| Invalidating by key  | `invalidates: [['users']]` refreshes every open `['users', …]` query                                                                                         | `invalidateQueries({ queryKey })`                                   |
-| SSR                  | `providedIn: 'root'` already means one cache per render, with `TransferState` hydration                                                                      | A `QueryClient` you create per request in the server handler        |
-| Errors               | A normalized `RequestError` view with per-kind predicates (`http()`, `timeout()`, `network()`, …) and a `message` getter, so templates do not need `@switch` | `Error`, narrowed by hand                                           |
-| Timeouts             | `timeout` per request, classified as its own kind, and `retryTimeouts: false` to stop a timeout from being retried as a `status: 0` failure                  | No built-in timeout; abandoned by composing an `AbortSignal`        |
-| Framework scope      | Angular 22                                                                                                                                                   | React, Vue, Svelte, Solid, Angular                                  |
+| Concern              | Here                                                                                                                                                         | TanStack Query (Angular)                                                             |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------ |
+| Runtime dependencies | `tslib` and the Angular peers only                                                                                                                           | `@tanstack/query-core` plus the adapter                                              |
+| Describing a request | The request _is_ the options — `url`, `params`, `path`, `headers`, `reportProgress` are routed for you                                                       | A `queryFn` you write, plus a `queryKey`                                             |
+| Uncached requests    | First class: no `key` means Angular's `httpResource`, its own lifetime, no cache entry                                                                       | Not a concept — every query has a key and a cache entry                              |
+| Infinite queries     | `createInfiniteRequest`, **one entry per page**, so prefix invalidation and cross-component sharing work on a feed                                           | `injectInfiniteQuery`, one entry per list                                            |
+| `select`             | A **method**: `.select(fn, { equal })`, so the handle's own `response()` is untouched                                                                        | An option on the query observer                                                      |
+| Persistence          | `/persist`: sync or async storage, a codec, `maxAge`, key filters, `buster`/`migrate`, and a `TransferState` path for SSR                                    | `persistQueryClient`: async storages, `maxAge`, busters, migrations                  |
+| Devtools             | `/devtools`, 2.5 KB gzip, entry list and a few actions, imported in dev only                                                                                 | A mature panel with a query explorer and timings                                     |
+| Bounding the cache   | `maxEntries`, LRU over idle entries only, with a per-request value that can tighten it                                                                       | `gcTime` per query, plus explicit removal                                            |
+| Invalidating by key  | `invalidates: [['users']]` refreshes every open `['users', …]` query                                                                                         | `invalidateQueries({ queryKey })`                                                    |
+| SSR                  | `providedIn: 'root'` already means one cache per render, with `TransferState` hydration                                                                      | A `QueryClient` you create per request in the server handler                         |
+| Errors               | A normalized `RequestError` view with per-kind predicates (`http()`, `timeout()`, `network()`, …) and a `message` getter, so templates do not need `@switch` | `Error`, narrowed by hand                                                            |
+| Timeouts             | `timeout` per request, classified as its own kind, and `retryTimeouts: false` to stop a timeout from being retried as a `status: 0` failure                  | No built-in timeout; abandoned by composing an `AbortSignal`                         |
+| Offline              | `networkMode` on queries and mutations, a paused state, and an in-memory mutation queue replayed in call order on reconnect                                  | `onlineManager` + `networkMode`, paused mutations, and persisted mutation resumption |
+| Framework scope      | Angular 22                                                                                                                                                   | React, Vue, Svelte, Solid, Angular                                                   |
 
 Where TanStack Query is simply ahead, with no clever reframing:
 
-- **Offline.** `onlineManager`, `networkMode` and mutation resumption are real
-  features with no equivalent here. `refetchOnReconnect` is the extent of it.
+- **Offline mutations that survive a reload.** Both libraries queue a mutation made
+  offline and replay it on reconnect. TanStack's persistence plugins can also write
+  that queue to storage, so the write survives a page close; here the queue is
+  in-memory by design (see Known limitations), and an application that needs more
+  keeps its own outbox.
 - **Persistence breadth.** `/persist` has `localStorage`-shaped storages plus
   `indexedDbStorage()`, with `maxAge`, `buster`, `migrate` and key/state filters.
   `persistQueryClient` still has more storage adapters, and a broader
@@ -1447,19 +1558,22 @@ Where this library is ahead, in an Angular-only codebase:
 
 Vocabularies, so the two do not fight in your head:
 
-| TanStack Query                                                                        | Here                                                          |
-| ------------------------------------------------------------------------------------- | ------------------------------------------------------------- |
-| `queryKey`                                                                            | `key`                                                         |
-| `queryFn`                                                                             | the source: a `url`, or `(params, ctx) => url`                |
-| `staleTime`, `gcTime`, `refetchOnMount`, `refetchOnWindowFocus`, `refetchOnReconnect` | the same names, the same meanings                             |
-| `enabled: false`                                                                      | `params` set to `undefined` — `status() === 'idle'`           |
-| `placeholderData` / `keepPreviousData`                                                | `keepPreviousValue`                                           |
-| `initialData`, `initialDataUpdatedAt`                                                 | `initialValue`, and `cache().seed(key, value, dataUpdatedAt)` |
-| `queryClient.setQueryData` / `getQueryData`                                           | `client.setData` / `client.getData`, `cache().peek`           |
-| `useIsMutating` / `mutationKey`                                                       | `client.isMutating(filter)` / `mutationKey`                   |
-| `onMutate` + manual rollback                                                          | `optimistic` + automatic rollback                             |
-| `hydrate` / `dehydrate`                                                               | `hydrate` / `dehydrate` in `/persist`                         |
-| `queryClient.invalidateQueries`                                                       | `client.invalidate`, `invalidates` on a mutation              |
+| TanStack Query                                                                        | Here                                                                         |
+| ------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| `queryKey`                                                                            | `key`                                                                        |
+| `queryFn`                                                                             | the source: a `url`, or `(params, ctx) => url`                               |
+| `staleTime`, `gcTime`, `refetchOnMount`, `refetchOnWindowFocus`, `refetchOnReconnect` | the same names, the same meanings                                            |
+| `enabled: false`                                                                      | `params` set to `undefined` — `status() === 'idle'`                          |
+| `placeholderData` / `keepPreviousData`                                                | `keepPreviousValue`                                                          |
+| `initialData`, `initialDataUpdatedAt`                                                 | `initialValue`, and `cache().seed(key, value, dataUpdatedAt)`                |
+| `queryClient.setQueryData` / `getQueryData`                                           | `client.setData` / `client.getData`, `cache().peek`                          |
+| `useIsMutating` / `mutationKey`                                                       | `client.isMutating(filter)` / `mutationKey`                                  |
+| `onMutate` + manual rollback                                                          | `optimistic` + automatic rollback                                            |
+| `onlineManager.setEventListener` / `onlineManager.setOnline`                          | `OnlineManager.setOnline` (a test seam; the window events are wired already) |
+| `networkMode: 'online' / 'offlineFirst' / 'always'`                                   | the same names, the same meanings                                            |
+| `useIsFetching`                                                                       | `client.isFetching`, and `client.isPaused` for the offline case              |
+| `hydrate` / `dehydrate`                                                               | `hydrate` / `dehydrate` in `/persist`                                        |
+| `queryClient.invalidateQueries`                                                       | `client.invalidate`, `invalidates` on a mutation                             |
 
 ## Upgrading from 0.0.x
 
@@ -1521,8 +1635,9 @@ enough that the translation is mechanical.
   is reactive like every other query, so `createRequest.post(...)` re-fires
   whenever a signal its source reads changes — for a write, use `createMutation`
   or `lazy: true`.
-- SSR: `pollInterval` and `debounce` are ignored on the server so timers do not
-  hold stability. Retry delays and `timeout` do apply.
+- SSR: `pollInterval`, `debounce` and `networkMode` are ignored on the server so
+  timers do not hold stability and a render is never paused. Retry delays and
+  `timeout` do apply.
 - SSR + `transferCache`: Angular's transfer cache only replays `GET`. A
   non-`GET` `createRequest` variant therefore does **not** get its response
   carried over from the server — the client re-fetches. If you use a non-`GET`
@@ -1551,11 +1666,20 @@ enough that the translation is mechanical.
 Stated plainly, because a limitation you find out about in production is a bug
 report and one you read here is a design decision.
 
-- **Offline is not supported.** There is no `networkMode`, no `onlineManager` and
-  no mutation replay. A query that fails while the network is down fails;
-  `refetchOnReconnect` refetches what is on screen once the browser reports it is
-  back. `RequestError` reports `offline: true` on the `network` kind **only** when
-  the browser itself says there is no connection, so a UI can say why.
+- **The offline mutation queue does not survive a reload.** With
+  `networkMode: 'online'`, calls made while offline are replayed on reconnect —
+  but they live in the handle's memory. A user who closes the tab (or reloads) with
+  writes queued loses them, while the optimistic writes they saw are gone with the
+  page. Persisting the queue would need a stable identity for every mutation
+  (`mutationKey` is optional and not unique), a write format the library can migrate,
+  and a decision about replaying a write whose optimistic state no longer exists;
+  those are a storage feature, not a connectivity one, and 0.2.0 does not pretend to
+  have them. If losing a write is unacceptable, disable the form while offline,
+  keep your own outbox in IndexedDB, or use a service worker's background sync.
+- **`online` means an interface appeared, not that a request will be routed.** A
+  captive portal, a VPN that is down, a DNS failure or an unreachable API all look
+  online. `'online'` is permission to stop holding; the request that starts can
+  still fail, and `RequestError` classifies it.
 - **`onMutate`'s context type is not inferred once you write type arguments.**
   `createMutation` infers `TContext` from `onMutate`, but TypeScript fills any
   type argument you skip with its **default**, so `createMutation<Todo, Draft>(…)`
@@ -1604,22 +1728,24 @@ report and one you read here is a design decision.
 
 ### `ng-signal-request`
 
-| Export                                                        | Description                                                                                                                                          |
-| ------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `createRequest(source, options?)`                             | Reactive `GET` query on top of `httpResource`                                                                                                        |
-| `createRequest.get` / `.post` / `.put` / `.patch` / `.delete` | Verb variants (`.get` is the bare call)                                                                                                              |
-| `createRequest.<verb>.text` / `.blob` / `.arrayBuffer`        | Non-JSON body variants                                                                                                                               |
-| `createMutation(builder, options?)`                           | Imperative `POST` write with its own lifecycle                                                                                                       |
-| `createMutation.post` / `.put` / `.patch` / `.delete`         | Verb variants (`.post` is the bare call)                                                                                                             |
-| `createInfiniteRequest(source, options?)`                     | Paginated query; one cache entry per page, with `createInfiniteRequest.<verb>` and `.<verb>.text` / `.blob` / `.arrayBuffer` variants                |
-| `combine(sources)`                                            | Aggregates handles: `response` · `loading` · `status` · `error` · `reload` · `cancel`                                                                |
-| `createRequests(items, build, options?)`                      | One handle per list item, reconciled by identity                                                                                                     |
-| `provideSignalRequest(config \| () => config)`                | Global `baseUrl`, `retry`, `retryTimeouts`, `headers`, `onError`, `onSuccess`, and the cache defaults. The factory form runs in an injection context |
-| `SIGNAL_REQUEST_CONFIG`                                       | The `InjectionToken` behind it                                                                                                                       |
-| `RequestCancelledError`                                       | Thrown by `run()` on cancel / disable / destroy                                                                                                      |
-| `toError(value)`                                              | Normalizes an `unknown` into an `Error` without wrapping an `HttpErrorResponse`                                                                      |
-| `toRequestError(cause, context?)`                             | Normalizes an `unknown` into a `RequestError`                                                                                                        |
-| `requestErrorOf(error, context)`                              | Builds a `requestError`-style accessor for your own `error` signal                                                                                   |
+| Export                                                        | Description                                                                                                                                                         |
+| ------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `createRequest(source, options?)`                             | Reactive `GET` query on top of `httpResource`                                                                                                                       |
+| `createRequest.get` / `.post` / `.put` / `.patch` / `.delete` | Verb variants (`.get` is the bare call)                                                                                                                             |
+| `createRequest.<verb>.text` / `.blob` / `.arrayBuffer`        | Non-JSON body variants                                                                                                                                              |
+| `createMutation(builder, options?)`                           | Imperative `POST` write with its own lifecycle                                                                                                                      |
+| `createMutation.post` / `.put` / `.patch` / `.delete`         | Verb variants (`.post` is the bare call)                                                                                                                            |
+| `createInfiniteRequest(source, options?)`                     | Paginated query; one cache entry per page, with `createInfiniteRequest.<verb>` and `.<verb>.text` / `.blob` / `.arrayBuffer` variants                               |
+| `combine(sources)`                                            | Aggregates handles: `response` · `loading` · `status` · `error` · `reload` · `cancel`                                                                               |
+| `createRequests(items, build, options?)`                      | One handle per list item, reconciled by identity                                                                                                                    |
+| `provideSignalRequest(config \| () => config)`                | Global `baseUrl`, `retry`, `retryTimeouts`, `networkMode`, `headers`, `onError`, `onSuccess`, and the cache defaults. The factory form runs in an injection context |
+| `OnlineManager`                                               | The injectable connectivity source: `online` (signal) · `onReconnect(listener)` · `setOnline(value)` for tests                                                      |
+| `ALWAYS_ONLINE`                                               | A `Connectivity` that is always online and has nobody to notify — the default when nothing is provided                                                              |
+| `SIGNAL_REQUEST_CONFIG`                                       | The `InjectionToken` behind it                                                                                                                                      |
+| `RequestCancelledError`                                       | Thrown by `run()` on cancel / disable / destroy                                                                                                                     |
+| `toError(value)`                                              | Normalizes an `unknown` into an `Error` without wrapping an `HttpErrorResponse`                                                                                     |
+| `toRequestError(cause, context?)`                             | Normalizes an `unknown` into a `RequestError`                                                                                                                       |
+| `requestErrorOf(error, context)`                              | Builds a `requestError`-style accessor for your own `error` signal                                                                                                  |
 
 ### Types
 
@@ -1646,21 +1772,23 @@ report and one you read here is a design decision.
 | `RequestStatus` / `MutationStatus` / `RunResult<T>`                 | Status and result types                                            |
 | `Reloadable` / `OptimisticTarget<T>` / `InvalidationTarget`         | Invalidation, optimistic-update and key shapes                     |
 | `SignalRequestConfig`                                               | Global config shape                                                |
+| `NetworkMode`                                                       | `'online'` · `'always'` · `'offlineFirst'`                         |
+| `Connectivity`                                                      | `{ online: Signal<boolean>; onReconnect(listener): () => void }`   |
 
 ### Cache
 
-| Export                                                                  | Description                                                                                                                                                                  |
-| ----------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `QueryClient`                                                           | Injectable: `invalidate` · `refetch` · `cancel` · `getData` · `setData` · `remove` · `evict` · `size` · `isFetching` · `count` · `clear` · `isMutating` · `mutatingCount`    |
-| `MutationRegistry`                                                      | In-flight mutation counts, globally and per `mutationKey`                                                                                                                    |
-| `QueryCache`                                                            | The store: `resolve` · `peek` · `matching` · `markInvalidated` · `remove` · `evictIdle` · `size` · `maxEntries` · `tightenMaxEntries` · `all` · `subscribeChanges` · `clear` |
-| `CacheEntry`                                                            | One cached resource: `data` · `status` signals, `refetch()` · `subscribe()` · `setData()` · `evict()` · `isStale()`                                                          |
-| `QueryKey` / `QueryKeyFactory` / `QueryKeyFilter` / `QueryKeyPredicate` | Key shapes and the matching filter                                                                                                                                           |
-| `normalizeKey` · `matchesFilter` · `startsWith` · `formatKey`           | Key helpers, exported for devtools and custom stores                                                                                                                         |
-| `defaultStructuralSharing` · `StructuralSharingFn`                      | The default sharing walk, and its type                                                                                                                                       |
-| `CachedRequest` / `CachedRequestOptions` / `CacheOptions`               | The cached handle and its options                                                                                                                                            |
-| `RefetchOnMount`                                                        | `'stale'` · `'always'` · `false`                                                                                                                                             |
-| `RESTORE_GATE` / `RestoreGate` / `IDLE_RESTORE_GATE`                    | How a cached request learns that a restore is in flight, without the core knowing about storage                                                                              |
+| Export                                                                  | Description                                                                                                                                                                            |
+| ----------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `QueryClient`                                                           | Injectable: `invalidate` · `refetch` · `cancel` · `getData` · `setData` · `remove` · `evict` · `size` · `isFetching` · `isPaused` · `count` · `clear` · `isMutating` · `mutatingCount` |
+| `MutationRegistry`                                                      | In-flight mutation counts, globally and per `mutationKey`                                                                                                                              |
+| `QueryCache`                                                            | The store: `resolve` · `peek` · `matching` · `markInvalidated` · `remove` · `evictIdle` · `size` · `maxEntries` · `tightenMaxEntries` · `all` · `subscribeChanges` · `clear`           |
+| `CacheEntry`                                                            | One cached resource: `data` · `status` signals, `refetch()` · `subscribe()` · `setData()` · `evict()` · `isStale()`                                                                    |
+| `QueryKey` / `QueryKeyFactory` / `QueryKeyFilter` / `QueryKeyPredicate` | Key shapes and the matching filter                                                                                                                                                     |
+| `normalizeKey` · `matchesFilter` · `startsWith` · `formatKey`           | Key helpers, exported for devtools and custom stores                                                                                                                                   |
+| `defaultStructuralSharing` · `StructuralSharingFn`                      | The default sharing walk, and its type                                                                                                                                                 |
+| `CachedRequest` / `CachedRequestOptions` / `CacheOptions`               | The cached handle and its options                                                                                                                                                      |
+| `RefetchOnMount`                                                        | `'stale'` · `'always'` · `false`                                                                                                                                                       |
+| `RESTORE_GATE` / `RestoreGate` / `IDLE_RESTORE_GATE`                    | How a cached request learns that a restore is in flight, without the core knowing about storage                                                                                        |
 
 ### `ng-signal-request/testing`
 
@@ -1692,7 +1820,8 @@ headless part:
 
 | Member                                         |                                                                                                             |
 | ---------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
-| `entries()`                                    | live snapshot of every entry: key, status, observers, fetch count, age, retry, error                        |
+| `entries()`                                    | live snapshot of every entry: key, status, observers, fetch count, age, retry, error, paused                |
+| `online()`                                     | the library's own connectivity state, so the panel cannot disagree with it                                  |
 | `count()` / `fetching()`                       | totals, without building the full snapshot                                                                  |
 | `isOpen()` · `open()` · `close()` · `toggle()` | panel state                                                                                                 |
 | `log()`                                        | `console.table` of the current snapshot                                                                     |

@@ -162,6 +162,66 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   load-bearing `// @ts-expect-error` that names the accepted break — so if a later
   change quietly restores it, the unused directive fails the check and the exception
   gets deleted with it.
+- **Offline mode — `networkMode`, and one `OnlineManager` behind it.** `'online'`
+  pauses a request instead of failing it while the browser reports no connection, and
+  releases it once on reconnect. `'offlineFirst'` lets the first attempt run — a
+  service worker, an HTTP cache or a proxy may answer it — and pauses only the
+  retries. `'always'` is the **default**, and it is exactly what 0.1.x did on every
+  path: connectivity is never read, so an application that does not opt in pays one
+  boolean on the cache entry and registers no listener.
+  - Per request (`createRequest`), per infinite request, per mutation
+    (`createMutation`), and globally through `provideSignalRequest({ networkMode })`.
+    The request wins over the global value.
+  - **`OnlineManager`** is the single source of truth, and it separates two things:
+    `online` is a **signal** (the state), `onReconnect(listener)` is an **event** (the
+    edge). A reconnect must refetch once; an offline mount must not refetch on every
+    read of the state — one primitive cannot do both. The state starts from
+    `navigator.onLine`, follows the window's `online`/`offline` events, coalesces a
+    burst within one tick into a single announcement, and removes its listeners on
+    injector destruction. On the server it is always online and registers neither a
+    listener nor a timer, so a render cannot be held. `setOnline(value)` is the test
+    seam; `setOnline(true)` announces the same way an `online` event does.
+  - The state means **an interface appeared**, not that a request will be routed. A
+    captive portal, a VPN that is down and an unreachable API all look online;
+    `'online'` is permission to stop holding, and the request that starts can still
+    fail.
+  - **`paused` on every handle** (`SignalRequest`, `CachedRequest`,
+    `InfiniteRequest`, `SignalMutation`) and **`QueryClient.isPaused(filter?)`** — the
+    counterpart of `isFetching`, for a "waiting for a connection" banner. Queries
+    only: a queued mutation reports its own `paused()`. A paused request is not an
+    error and does not settle; its `run()` promise stays pending, `status()` is
+    `'loading'` before it has ever loaded and `'reloading'` when there is a value to
+    keep showing.
+  - **A paused retry burns no attempt and arms no back-off timer.** The retry waits
+    for a reconnect through one listener, so a `retry: { count: 3 }` policy cannot be
+    spent while offline and a request that reconnects starts with its budget intact.
+  - **The pause belongs to the entry, not to the handle.** Two handles on one key
+    share one hold and one resumed request; a paused entry that loses its last
+    observer is cancelled like any other in-flight request, so `cancel()`,
+    `destroy()` and eviction leave no timer or listener behind. With an asynchronous
+    restore the order is fixed: the first fetch waits for the snapshot **first**, and
+    then for connectivity.
+  - **`RequestError.offline`** is now read from the same manager, so the error and
+    the pause cannot disagree. `networkFailure()` keeps the `navigator` fallback for a
+    failure observed outside an injection context.
+  - Devtools show the state on the button and mark a paused row. The panel's own
+    reads are unchanged.
+- **An offline mutation queue.** A `createMutation` with `networkMode: 'online'`
+  accepts a call while offline, reports `paused: true`, keeps the promise pending and
+  replays the call **in call order** on the next reconnect. The mode you already
+  chose still decides what happens: `parallel` replays every queued call, `exhaust`
+  returns the promise of the one already queued, and `switch` cancels the previous
+  queued call with `RequestCancelledError` — the same rules as an online call, just
+  deferred.
+  - `onMutate` and the optimistic write run at `run()`; `onSuccess` and `invalidates`
+    run after the replayed call actually succeeds. A queued call counts as in flight,
+    so `isMutating()` is `true` while it waits.
+  - `cancel()` (or `destroy()`) rejects a queued call with `RequestCancelledError` and
+    rolls its optimistic write back. A replay that fails because the connection
+    dropped again goes **back to the queue** rather than reporting a failure: the
+    user cannot act on it, and the next reconnect is the retry.
+  - **The queue is in memory and does not survive a reload** — stated under Known
+    limitations in the README, with the reasons.
 
 ### Fixed
 
@@ -219,6 +279,10 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   read finishes during injector creation, so nothing is ever held. The opt-outs are
   `waitForRestore: false` on the request, `restoreTimeout: 0` globally, or simply not
   using an asynchronous storage.
+- **Connectivity is opt-in: `networkMode` defaults to `'always'`.** No request or
+  mutation starts reading connectivity on upgrade, so one that used to fire and fail
+  loudly still fires and fails loudly. `'online'` is a choice you make per request,
+  per mutation, or globally.
 - **`QueryCache.seed` no longer overwrites an entry whose data is newer than the
   value being staged** (see Added for the rule and why). A seed is a _restore_, and a
   restore means "this is what the last session had"; use `CacheEntry.setData` to
@@ -233,6 +297,10 @@ Nothing here needs a code change to keep working, and the two entries that can c
 behaviour need a storage that cannot answer synchronously — which 0.1.0 had no way to
 configure, so no existing application is in that position.
 
+- **Nothing about connectivity changes on upgrade.** `networkMode` defaults to
+  `'always'`, which never reads `navigator.onLine`, so every existing request and
+  mutation fires exactly when it did. Adopting `'online'` is a separate decision, and
+  one you make per request, per mutation, or globally.
 - **Persistence is synchronous only if you make it so.** `providePersistedCache()`
   with no `storage` still uses `localStorage`, and a `localStorage` read still
   finishes during injector creation: `isRestoring()` is `false` before any handle

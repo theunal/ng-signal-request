@@ -797,9 +797,13 @@ delay: (err, attemptNo) => {
 The attempt counter is set **only** on the branch that actually arms a timer, so
 the retry budget is untouched while offline and the retry happens once the
 connection is back — with no additional back-off, because the offline wait _is_
-the spacing. `waitForReconnect` is one shared helper in `connectivity.ts`; it
-completes on the next reconnect and unsubscribes its listener on teardown, so
-cancelling while a retry is paused leaves nothing behind.
+the spacing. `waitForReconnect` is one observable, built per pause; it emits on the
+next reconnect and unsubscribes its listener on teardown, so cancelling while a
+retry is paused leaves nothing behind. **It must emit, not complete**: rxjs's
+`retry` treats a notifier `next` as "resubscribe" and a notifier `complete` as "end
+the stream", and an earlier draft's `subscriber.complete()` made the retried request
+vanish instead of retry — the test for this is the reason the distinction is written
+down.
 
 `retryAttempt()` is deliberately left at `0` while held: it means "a retry is
 scheduled", and nothing is. `paused` is what says the entry is waiting.
@@ -871,9 +875,10 @@ entry shows its real status with the marker beside it.
 
 ### Tests
 
-`OnlineManager` is overridden in the specs that need to drive connectivity
-(`{ provide: OnlineManager, useValue: fake }`), so nothing in the suite depends on
-a browser's `navigator`. The fake is the test seam `setOnline` exists for.
+`OnlineManager` is the seam the specs drive, and `setOnline` is why it exists: no
+test depends on a browser's `navigator`, and `src/lib/connectivity.spec.ts` is the
+only file that touches the global at all (to prove the initial state and the
+server's no-op).
 
 Covered: offline at mount; going offline mid-request; ordered replay for all three
 `concurrency` modes; flapping producing no duplicate; the retry interaction (no
@@ -882,13 +887,58 @@ while paused; the restore-gate + offline order; SSR no-op (`vi.getTimerCount() =
 0`, no listeners); one keyed entry shared by two handles while paused; and the
 races — reconnect during an invalidation, reconnect during `destroy()`, a replay
 while a new `run()` arrives, `switch` superseding a queued call. Every new public
-signature has an `expectTypeOf` test.
+signature has an `expectTypeOf` test. The 10,000-paused-handle destruction test is
+in `offline.spec.ts`, and the two new benchmark cases are in `cache/perf.spec.ts`.
+
+### As built — results and deviations
+
+Everything below is a difference between this document and the code, recorded
+because the code won.
+
+1. **`networkMode` defaults to `'always'`, not `'online'`.** The preamble at the top
+   of this phase is the correction; it is repeated here so a reader who lands on the
+   semantics table sees it. No existing handle reads connectivity.
+2. **`waitForReconnect` is a private method on `CacheEntry`, not a free helper in
+   `connectivity.ts`.** It needs `this.connectivity` and `this.paused`, and a free
+   function would have taken both as arguments to do the same thing. The uncached
+   path needs no notifier at all: it calls `resource.reload()` from its own
+   `onReconnect` listener.
+3. **The notifier emits.** See above — `complete` ends the retry instead of firing it.
+4. **`setOnline` is a no-op on the server.** The manager is always online there, and
+   the test seam must not be able to create a state the environment cannot reach. A
+   half-life of this decision: on the server, `networkMode: 'online'` is inert because
+   the manager never reports `false`, not because the handles check the platform.
+5. **The mutation queue drains before a new call is accepted.** `online` flips
+   synchronously, but the announcement is a microtask; a `run()` in that window would
+   otherwise be sent before an older queued call. `prepare()` drains the queue first,
+   and `offline.spec.ts` pins the order (`a` then `b`).
+6. **The mutation queue's `replay()` has no empty-batch guard.** A `splice(0)` of an
+   empty queue is a no-op, and the guard was an unreachable branch.
+7. **A paused entry that never fetched is `'empty'` in the devtools snapshot, not
+   `'loading'`.** `paused` is a separate column; `DevtoolsEntry.status` stays the
+   entry's real status. The devtools test asserts the marker, not a claimed fetch.
+8. **`QueryClient.isPaused()` reads only queries.** Mutations are not owned by the
+   cache, and `isMutating()` is a different question; a queued mutation reports its
+   own `paused()`.
+9. **`RequestErrorContext` gained `offline?: boolean`,** so `networkFailure` can be
+   told about the manager's state by the handle that has it, with the `navigator`
+   fallback kept for failures observed elsewhere.
+10. **Coverage.** 541 tests, 23 files; statements 97.16%, branches 92.73%, functions
+    98.02%, lines 98.52% — above the previous report on all four. The 12 uncovered
+    functions are the same 12 as before this phase (defensive paths and the two
+    probe-only helpers), and no new function is covered only by accident. The
+    statements this phase added and still does not reach are the unreachable entry
+    guards listed in `docs/verification.md` §9.
 
 ### Rejected alternatives
 
 - **`'online'` as the default.** Rejected above; it is a silent behaviour change.
-- **A connectivity parameter on `CacheEntry`'s constructor.** Positional, public,
-  and redundant with the plan the entry already stores.
+- **A connectivity parameter on `CacheEntry`'s constructor — accepted, as a trailing
+  optional one.** The first draft rejected it as positional and redundant with the
+  plan; the code needs it there because `QueryCache` is the only thing that can
+  inject the manager, and the entry is built in a `computed` where a call to
+  `inject()` is not available. It is optional and defaults to `ALWAYS_ONLINE`, so
+  existing construction sites (and tests) are unchanged.
 - **A global pause gate in `QueryClient`.** The cache would then own per-entry
   fetch policy, which it deliberately does not: `QueryClient` knows _what a user
   means by a key_, `CacheEntry` knows _whether to fetch_.

@@ -291,3 +291,63 @@ these changes touches, so its movement in a run is the machine's movement. If a
 case moves less than the control did, the change did not cause it. If the control
 moves by more than the case does in the other direction, there is nothing to
 report either — which is the honest answer for most of the numbers in this file.
+
+## Phase 2 — two new cases, and the control again
+
+Phase 2 (offline / `networkMode`) adds almost nothing to the loops above: one
+boolean field on a `CacheEntry`, one `shouldHold` check inside `fetch()` (a branch
+that is **false** for every mode but `'online'`, and shorter than the request it
+guards), and, on `'always'` handles, no connectivity read at all. The four `resolve`
+cases and the three `seed` cases are therefore the control for the phase, not
+evidence about it.
+
+What the phase does add is two **bulk** events, and they get their own cases:
+
+- **The reconnect storm.** 1,000 keyed entries are held by `networkMode: 'online'`,
+  then one reconnect releases all of them. This is the case where a per-entry
+  listener, a per-entry timer or a re-render per wake would be felt as a frozen
+  frame.
+- **The paused mutation queue.** 1,000 calls are queued by a `'online'` mutation,
+  then replayed in one announcement. The queue has to stay ordered while it drains,
+  and this measures the drain rather than asserting its shape.
+
+Both measurements stop after one microtask, because that is where the work is:
+`setOnline` stamps the state and the announcement microtask runs every listener
+synchronously. `settle()` would add Angular's effect flushing, which belongs to the
+harness rather than to this code.
+
+Two runs of the **same Phase 2 tree**, minutes apart, 200,000 iterations, all nine
+cases from the `[bench]` output:
+
+| Case                                          | Run 1          | Run 2          | Δ (run 1 → 2) |
+| --------------------------------------------- | -------------- | -------------- | ------------- |
+| `resolve`, warm key — **the control**         | 0.60 µs/op     | 0.50 µs/op     | −17%          |
+| `resolve` + `subscribe` + release, no cap     | 24.81 µs/op    | 25.04 µs/op    | +1%           |
+| `resolve` + `subscribe` + release, cap 100    | 23.62 µs/op    | 23.64 µs/op    | 0%            |
+| At-cap inserts, cap 100 pre-warmed            | 20.55 µs/op    | 16.98 µs/op    | −17%          |
+| **`reconnect`, 1,000 paused entries** (new)   | 17.86 µs/entry | 17.50 µs/entry | −2%           |
+| **mutation replay, 1,000 queued calls** (new) | 32.61 µs/entry | 22.47 µs/entry | −31%          |
+| `seed`, no cap                                | 0.63 µs/op     | 0.67 µs/op     | +6%           |
+| `seed`, cap 100                               | 1.44 µs/op     | 1.40 µs/op     | −3%           |
+| `seed` into an existing entry                 | 0.45 µs/op     | 0.48 µs/op     | +7%           |
+
+Read it the way the rule above says to. The **control moved −17%**, and the
+at-cap row moved by exactly the same factor in the same direction — that is the
+machine, not the change. The mutation-replay row moved **−31% between two runs of
+identical code**, which is a stronger version of the same lesson: a 1,000-item
+bulk case is not a stable measurement on this machine either, so its absolute
+number should be read as "tens of microseconds per queued call, an order of
+magnitude below a network round-trip". The reconnect row moved 2%, which is the
+only number in the table worth quoting with a straight face.
+
+**Nothing is flagged.** No case moved against the control by more than the control
+itself moved, and a re-run of the same code disagrees with the first run by more
+than the 10% threshold — which is the demonstration, again, that a cross-run
+comparison here proves nothing. The meaningful statement about Phase 2 is
+structural: an `'always'` handle never reads connectivity, and a paused entry holds
+one promise and one listener instead of a timer, so a 1,000-entry storm is one
+microtask of bookkeeping rather than a thousand wake-ups.
+
+The core bundle cost of the offline code is reported separately, in the release
+report and the README's bundle note: it lives in the core entry point, so
+`pnpm check:dist` cannot prove it absent.

@@ -277,3 +277,47 @@ Two things are worth recording rather than leaving in the diff:
    totals above are the result. The only function left uncovered is
    `createPersister`'s `caller`, which exists to carry a name for
    `assertInInjectionContext` and is never invoked.
+
+## 9. Phase 2 record (2026-10-19)
+
+Measured on the Phase 2 tree (the offline work), after `pnpm verify` exited 0 by
+itself. Same commands as section 8.
+
+| Check                                                | Result                                                                                                   |
+| ---------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| `pnpm verify`                                        | **exit 0** — typecheck, lint, format:check, 541 tests, build, check:types-compat, build:demo, check:dist |
+| Coverage (statements / branches / functions / lines) | 97.16 / 92.73 / 98.02 / 98.52                                                                            |
+| `pnpm check:api v0.1.0`                              | **0 removed**, 14 added names (core 7, `/persist` 7)                                                     |
+| Core bundle                                          | 89.5 KB raw, **19.2 KB gzip** (17.6 after Phase 3)                                                       |
+| `/persist` bundle                                    | 12.6 KB raw, **3.7 KB gzip** (unchanged)                                                                 |
+| Devtools bundle                                      | 10.3 KB raw, **2.7 KB gzip** (unchanged)                                                                 |
+| `pnpm bench`                                         | exit 0, nine lines; no case moved against a control that moved                                           |
+
+The four figures are above the previous report on every axis (96.95 / 92.19 /
+97.86 / 98.48), with 541 tests in 23 files.
+
+1. **The added surface on 0.1.0 is 14 names, not 10.** Four are this phase's
+   (`ALWAYS_ONLINE`, `Connectivity`, `NetworkMode`, `OnlineManager`), three are
+   Phase 3's (`RESTORE_GATE`, `IDLE_RESTORE_GATE`, `RestoreGate`) and seven are
+   Step A's `Persister` work in `/persist`. Section 8 measured a tree that did not
+   have this phase; that row is left as it was measured.
+2. **The gzip delta is Step A + Phase 2 together: 17.6 → 19.2 KB.** Step A added
+   one runtime value (`anyDataDehydrateFilter`); the rest is the manager, the
+   paused-entry state and the mutation queue. The offline code lives in **core**,
+   not a lazily loaded entry point, because `createRequest` itself injects the
+   manager — so `check:dist` cannot prove it absent for consumers who never opt in,
+   and the number above is the honest cost. It is inside the 20 KB ceiling, with
+   about 0.8 KB of headroom.
+3. **What is still uncovered in the files this phase touched** (found with the same
+   probe as section 8): `CacheEntry.resume`'s `held === undefined`, `destroyed` and
+   `plan === undefined` guards, the `inFlight` identity check in `hold`'s `clear`,
+   and `createMutation`'s `if (settled) subscription.unsubscribe()` — the last one
+   is only reachable with a custom **synchronous** `HttpBackend`, and the rest are
+   guards the design makes unreachable (the reconnect listener is detached by both
+   `resume` and `destroy`, and `hold` always stores a plan). They are kept as
+   defensive code and reported rather than deleted to move a number; none is a
+   function that is covered only by accident.
+4. **The suite proves the two bugs the tests were written to catch.** The
+   `waitForReconnect` notifier emitted `complete` instead of `next`, which silently
+   ended the retried request, and `setOnline(false)` was writable on the server.
+   Both are recorded in `docs/design-0.2.md` under "As built".

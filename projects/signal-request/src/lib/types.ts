@@ -120,6 +120,24 @@ export interface SignalRequestConfig {
    */
   retryTimeouts?: boolean;
   /**
+   * Whether a cached request waits for a restore in flight before its **first** fetch. Default
+   * `true`.
+   *
+   * Only relevant next to `/persist`, and only when the storage it could not answer
+   * synchronously, which is what IndexedDB does: the snapshot arrives some time after the first
+   * mount, and a fetch that started in the meantime would race it. Waiting means the restored
+   * value is what the first render shows, and the fetch is then skipped when the seed made the
+   * entry fresh.
+   *
+   * The wait is bounded by `PersistOptions.restoreTimeout` (2000 ms) and only applies to the
+   * mount-time fetch and `run()`. `false` is for screens where a paint matters more than a
+   * possible double fetch; `refetchOnMount: false` (and `lazy`) already skip the mount fetch, so
+   * they do not wait either.
+   *
+   * @see {@link RestoreGate}
+   */
+  waitForRestore?: boolean;
+  /**
    * Headers added to every request. A plain object is used as-is; a **function** is
    * re-evaluated inside each request's reactive chain, so signals it reads (a token, a locale)
    * make every live request refetch when they change.
@@ -370,6 +388,14 @@ export interface CacheOptions<T> {
    * `false` is for data something else owns.
    */
   readonly refetchOnMount?: RefetchOnMount;
+  /**
+   * Whether this handle waits for a restore in flight before its **first** fetch. Default `true`.
+   *
+   * The per-request form of {@link SignalRequestConfig.waitForRestore}. Set it to `false` on a
+   * screen that must paint immediately and can accept a possible double fetch — the restored
+   * value still lands (a late seed wins only over an empty entry), it just arrives second.
+   */
+  readonly waitForRestore?: boolean;
   /**
    * Decide what to store for a new response, reusing the previous value where nothing changed.
    *

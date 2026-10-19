@@ -13,8 +13,9 @@ pnpm bench
 ```
 
 `pnpm bench` runs the benchmark bodies in the ordinary spec suite at 200,000
-iterations instead of the 20,000 `pnpm test` uses, and prints six lines (the last
-two were added in Step 0.1; the sample below is one real run, not a target):
+iterations instead of the 20,000 `pnpm test` uses, and prints seven lines (the last
+two were added in Step 0.1 and the seventh in Phase 3; the sample below is one real
+run, not a target, and it predates the seventh):
 
 ```
 [bench] resolve, warm key: 76.3 ms over 200000 → 0.38 µs/op
@@ -225,6 +226,57 @@ above, where a _smaller_ change produced an 11% "regression". The ±11% floor th
 paragraph used to cite was itself optimistic; Step 0.3 re-measured the harness with
 a control loop in the same run and found ±20–40%, which is why the rule below now
 asks for that control rather than a threshold alone.
+
+## Phase 3 gets one row, and it is a new one
+
+Phase 3 (asynchronous persistence) touches four paths, and three of them are
+nowhere near a hot one:
+
+- **`createRequest` on the cached path** gained one `inject(RESTORE_GATE)` when the
+  handle is built, and one tracked signal read (`restoreGate.isRestoring()`) per
+  **evaluation of the subscription effect** — not per render, and not per read.
+  Handles are built once per component instance and the effect runs on mount plus
+  on a key or params change. Nothing in the four `resolve` cases builds a handle, so
+  none of them measures it; a case that did would be measuring DI, not this change.
+- **`run()` / `tryRun()`** gained one condition. `run` is a user-initiated call, not
+  a loop.
+- **`QueryCache.seed` into an entry that already exists** gained one untracked
+  `dataUpdatedAt` read, and this is the one path the change makes _more_ common: an
+  asynchronous restore that outlived its bound, or a second `hydrate()` over the
+  same keys, arrives at an entry that is already there. Hence the new row.
+- **`dehydrate`** now asks the filter per entry, and the new default reads three
+  signals per entry instead of one. It runs once per debounce window (1000 ms,
+  over at most `maxEntries` entries) and at the flush points — off the render path
+  and off the request path, at a scale where the whole pass is microseconds. It
+  does not get a row either: measuring it would say more about the debounce than
+  about the change.
+
+The `resolve` cases and the two `seed` cases are unchanged by this phase, which is
+exactly why they are the control for it. `pnpm bench` on the Phase 3 tree:
+
+| Case                                       | Run C       | Phase 3     | Δ             |
+| ------------------------------------------ | ----------- | ----------- | ------------- |
+| `resolve`, warm key — **the control**      | 0.38 µs/op  | 0.46 µs/op  | +21%          |
+| `resolve` + `subscribe` + release, no cap  | 18.44 µs/op | 17.35 µs/op | faster by 6%  |
+| `resolve` + `subscribe` + release, cap 100 | 14.22 µs/op | 12.61 µs/op | faster by 11% |
+| At-cap inserts, cap 100 pre-warmed         | 7.12 µs/op  | 7.04 µs/op  | faster by 1%  |
+| `seed`, no cap                             | 0.69 µs/op  | 0.70 µs/op  | +1%           |
+| `seed`, cap 100                            | 1.83 µs/op  | 1.54 µs/op  | faster by 16% |
+| **`seed` into an existing entry** (new)    | —           | 0.30 µs/op  | —             |
+
+Read that table the way the rule below says to: the **control moved +21%**, so the
+"faster by 11%" and "faster by 16%" entries are the machine, not the change, and the
+one number to trust is that no case moved _against_ a control that moved the other
+way. Nothing is flagged. The new row is the fastest of the seven because a late seed
+against an existing, unwatched entry is one map lookup, one signal read and three
+signal writes — the same work as `seed, no cap`, minus the staging map.
+
+A second run of the **same tree**, minutes later and with nothing changed, gave
+`0.40 / 16.42 / 12.69 / 7.15 / 0.62 / 1.52 / 0.32` µs/op — the control down 13% and
+the "faster by 16%" seed row down 15%. That is the whole argument for the rule below:
+run-to-run spread on this machine is larger than the threshold, so a comparison
+across two runs (or against the table above) proves nothing, and a regression is only
+credible when it shows up against a control measured in the same run.
 
 ## The regression flag
 

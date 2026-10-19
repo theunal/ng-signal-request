@@ -16,29 +16,40 @@
  * is the only outcome here that is a breaking change. Added names are reported and are fine — an
  * additive release is the normal case.
  *
- * Resolution is textual, not a TypeScript program. The file being compared is a list of
- * re-export blocks and nothing else, so the only thing that can go wrong is a shape this regex
- * does not know; that is what the "0 exports found" guard is for, so a parser that silently
- * matches nothing cannot report a clean diff.
+ * **All four entry points are compared, not only the core.** "No name was removed" is a claim about
+ * the published package, and 0.2.0 changed signatures inside `/persist` as well as adding to the
+ * core: a diff that only read `src/public-api.ts` would have reported a clean run while quietly not
+ * looking at the half of the surface that moved.
+ *
+ * Resolution is textual, not a TypeScript program. Each file is a list of re-export blocks and
+ * declarations and nothing else, so the only thing that can go wrong is a shape this regex does not
+ * know; that is what the "0 exports found" guard is for, so a parser that silently matches nothing
+ * cannot report a clean diff.
  */
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 
-const API_PATH = 'projects/signal-request/src/public-api.ts';
+/** The four entry points, in the order the README lists them. */
+const API_PATHS = [
+  'projects/signal-request/src/public-api.ts',
+  'projects/signal-request/devtools/devtools.ts',
+  'projects/signal-request/persist/persist.ts',
+  'projects/signal-request/testing/testing.ts',
+];
 
-/** Reads `public-api.ts` at a ref, or from disk with `--worktree` / no ref. */
-function readApi(ref) {
+/** Reads an entry point at a ref, or from disk with `--worktree` / no ref. */
+function readApi(ref, path) {
   if (ref === undefined || ref === '--worktree') {
-    return { label: 'working tree', text: readFileSync(API_PATH, 'utf8') };
+    return { label: 'working tree', text: readFileSync(path, 'utf8') };
   }
   try {
-    const text = execFileSync('git', ['show', `${ref}:${API_PATH}`], { encoding: 'utf8' });
+    const text = execFileSync('git', ['show', `${ref}:${path}`], { encoding: 'utf8' });
     return { label: ref, text };
   } catch {
     // A typo in a ref, or a tag that a shallow clone never fetched. Say which, rather than letting
     // git's stderr surface as an unhandled exception — the fix is usually `git fetch --tags`.
     console.error(
-      `FAIL  cannot read ${API_PATH} at "${ref}". Check the ref exists (git tag --list) and that ` +
+      `FAIL  cannot read ${path} at "${ref}". Check the ref exists (git tag --list) and that ` +
         'tags have been fetched (git fetch --tags).',
     );
     process.exit(1);
@@ -46,7 +57,7 @@ function readApi(ref) {
 }
 
 /**
- * Every name the file exports.
+ * Every name a file exports.
  *
  * Handles the three shapes that appear, plus the direct declarations, because the point is to keep
  * working when someone adds a fourth:
@@ -86,36 +97,43 @@ function exportedNames(text) {
 }
 
 const [oldRef, newRef] = process.argv.slice(2);
-const oldApi = readApi(oldRef);
-const newApi = readApi(newRef);
+const removedAll = [];
 
-const before = exportedNames(oldApi.text);
-const after = exportedNames(newApi.text);
+for (const path of API_PATHS) {
+  const oldApi = readApi(oldRef, path);
+  const newApi = readApi(newRef, path);
 
-if (before.size === 0 || after.size === 0) {
+  const before = exportedNames(oldApi.text);
+  const after = exportedNames(newApi.text);
+
+  if (before.size === 0 || after.size === 0) {
+    console.error(
+      `FAIL  found ${before.size} exports in ${path} at ${oldApi.label} and ${after.size} at ` +
+        `${newApi.label}. At least one side matched nothing, which means the parser no longer ` +
+        'understands the file rather than that the API is empty.',
+    );
+    process.exit(1);
+  }
+
+  const removed = [...before].filter((name) => !after.has(name)).sort();
+  const added = [...after].filter((name) => !before.has(name)).sort();
+  removedAll.push(...removed.map((name) => `${name} (${path})`));
+
+  console.log(`${path}  ${before.size} -> ${after.size} exports`);
+  console.log(`  added   ${added.length}: ${added.join(', ') || '(none)'}`);
+  console.log(`  removed ${removed.length}: ${removed.join(', ') || '(none)'}`);
+}
+
+if (removedAll.length > 0) {
   console.error(
-    `FAIL  found ${before.size} exports in ${oldApi.label} and ${after.size} in ${newApi.label}. ` +
-      'At least one side matched nothing, which means the parser no longer understands the file ' +
-      'rather than that the API is empty.',
+    `\nFAIL  ${removedAll.length} name(s) exported by ${oldRef ?? 'the older ref'} are missing ` +
+      `from ${newRef ?? 'the working tree'}: ${removedAll.join(', ')}. That is a breaking change ` +
+      'to a published API.',
   );
   process.exit(1);
 }
-
-const removed = [...before].filter((name) => !after.has(name)).sort();
-const added = [...after].filter((name) => !before.has(name)).sort();
 
 console.log(
-  `comparing ${oldApi.label} (${before.size} exports) -> ${newApi.label} (${after.size} exports)`,
+  `\nNo breaking changes: every name in the older surface still exists, in all ${API_PATHS.length} ` +
+    'entry points.',
 );
-console.log(`added   ${added.length}: ${added.join(', ') || '(none)'}`);
-console.log(`removed ${removed.length}: ${removed.join(', ') || '(none)'}`);
-
-if (removed.length > 0) {
-  console.error(
-    `\nFAIL  ${removed.length} name(s) exported by ${oldApi.label} are missing from ${newApi.label}. ` +
-      'That is a breaking change to a published API.',
-  );
-  process.exit(1);
-}
-
-console.log('\nNo breaking changes: every name in the older surface still exists.');

@@ -605,8 +605,6 @@ handles are reading.
 export interface RestoreGate {
   /** `true` while a restore is in flight. Read reactively: it releases held fetches. */
   readonly isRestoring: Signal<boolean>;
-  /** Whether the incoming snapshot carries, or may carry, this key. */
-  restorable(key: readonly unknown[]): boolean;
   /** Settles when the restore does, or when its bound elapses. Never rejects. */
   restored(): Promise<void>;
 }
@@ -615,6 +613,27 @@ export const RESTORE_GATE = new InjectionToken<RestoreGate>('ng-signal-request: 
   factory: () => IDLE_RESTORE_GATE,
 });
 ```
+
+**`restorable(key)`, which this document sketched, is not in the interface as built.** The
+sketch assumed the gate could answer "does the snapshot carry this key?" before the fetch is
+held. It cannot, for a reason that is structural rather than an implementation limit: a snapshot
+is **one blob**. `getItem(key)` returns the whole thing, so the set of keys it carries is
+unknown until it has been read and parsed — and by the time that has happened, the persister is
+seeding, which is the same instant `isRestoring` flips. A per-key predicate would therefore
+change the outcome only in the window between "read resolved" and "parse finished", which is
+microseconds, while costing a public way to hash a query key (the equality the predicate needs is
+`hashKey`'s, and that is internal to the cache — a second, structural implementation of the same
+rule would be a place for the two to disagree).
+
+What is left is honest and easy to state: **while a restore is in flight, the first fetch of
+every key waits, not only the keys the snapshot turns out to carry.** The keys that are not
+restorable still do not fetch against the restored value — `maybeFetchOnMount` runs after the
+hold and finds no data — so the outcome is the one the sketch wanted; what differs is that their
+first fetch is _delayed_ by one storage read, which is the price of not being able to ask the
+question earlier. It is bounded by `restoreTimeout`, it does not apply to `waitForRestore: false`
+or to a synchronous storage, and it is written down in the README's known limitations rather
+than left for someone to discover. Recorded here because `docs/plan.md` says the code wins and
+the disagreement gets recorded.
 
 This lives in the **core** entry point, not in `/persist`, because the party that
 has to wait is the cached request. The alternative — teaching core about
@@ -717,8 +736,10 @@ double for `indexedDbStorage` itself.
 Known risks, stated rather than mitigated away:
 
 - **The gate can delay a first paint** by up to `restoreTimeout` for a slow
-  storage. That is the trade the feature is: a bound, an option to turn it off, and
-  a default that only engages when a read is genuinely outstanding.
+  storage, and it delays the first fetch of _every_ key rather than only of
+  restorable ones — see the note in §3 for why the key set cannot be known
+  earlier. That is the trade the feature is: a bound, an option to turn it off,
+  and a default that only engages when a read is genuinely outstanding.
 - **Two writes can interleave at the storage layer** if an application hands over a
   storage whose `setItem` resolves out of order. This library serializes its own
   calls; it cannot serialize the storage's.

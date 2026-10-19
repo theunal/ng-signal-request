@@ -22,6 +22,7 @@ import { QueryCache } from './cache/query-cache';
 import { resolveStructuralSharing } from './cache/structural-sharing';
 import { SIGNAL_REQUEST_CONFIG } from './config';
 import { RequestCancelledError, toError, toRequestError } from './errors';
+import { RESTORE_GATE } from './restore-gate';
 import type {
   CachedRequest,
   CachedRequestOptions,
@@ -119,6 +120,9 @@ function buildCachedInContext<T, R, TParams>(
   const errorHandler = inject(ErrorHandler);
   const destroyRef = inject(DestroyRef);
   const isBrowser = isPlatformBrowser(inject(PLATFORM_ID));
+  // See `restore-gate.ts`. The default is idle, so a request in an application that never persists
+  // reads one constant signal and does nothing else.
+  const restoreGate = inject(RESTORE_GATE);
 
   const lazy = options.lazy ?? false;
   const initial = options.initialValue as T | undefined;
@@ -141,6 +145,7 @@ function buildCachedInContext<T, R, TParams>(
     options.refetchOnWindowFocus ?? globalConfig.refetchOnWindowFocus ?? false;
   const refetchOnReconnect = options.refetchOnReconnect ?? globalConfig.refetchOnReconnect ?? false;
   const share = resolveStructuralSharing<T>(options.structuralSharing, options.equal);
+  const waitForRestore = options.waitForRestore ?? globalConfig.waitForRestore ?? true;
 
   /* ------------------------------ request building ----------------------------- */
 
@@ -196,6 +201,8 @@ function buildCachedInContext<T, R, TParams>(
   let removeSettleListener: (() => void) | undefined;
   let subscribed: CacheEntry<T> | undefined;
   let destroyed = false;
+  /** Set when a restore held this handle's mount fetch — see the subscription effect. */
+  let heldFirstFetch = false;
   /** Last value seen on any entry, so `keepPreviousValue` survives a key change. */
   const lastGood = signal<T | undefined>(initial);
 
@@ -231,6 +238,20 @@ function buildCachedInContext<T, R, TParams>(
 
   const startFetch = (p: Plan<T>): Promise<T | undefined> => p.entry.fetch(buildFetchPlan(p));
 
+  /**
+   * What `run()` does, once the request to run is settled.
+   *
+   * Split out because `run()` may have to wait for a restore first, and the plan has to be read
+   * *after* that wait: `params` can change while a slow snapshot is being read, and running the
+   * request this handle was pointed at when the call was made would fetch a URL nobody asked for.
+   */
+  const runNow = (): Promise<T> => {
+    if (destroyed) return rejected(new RequestCancelledError('The request was destroyed.'));
+    const current = plan();
+    if (!current) return rejected(disabledError());
+    return startFetch(current) as Promise<T>;
+  };
+
   /** What a *first* subscriber should do about this entry. */
   const maybeFetchOnMount = (p: Plan<T>): void => {
     // Someone is already on the wire: joining beats starting a second identical request, and it
@@ -253,9 +274,14 @@ function buildCachedInContext<T, R, TParams>(
    * `onCleanup` is deliberately **not** used for the release. It fires before *every* re-run,
    * and a re-run also happens when only the request changed — same entry, new params — which must
    * not drop the refcount to zero and abort a request the handle is still waiting for.
+   *
+   * The **restore hold** rides on the same mechanism: `isRestoring` is read *tracked*, above the
+   * `untracked` block, so the restore settling re-runs this effect and the held fetch starts
+   * there. Nothing else would restart it, which is why the read cannot be untracked.
    */
   effect(() => {
     const current = plan();
+    const waiting = waitForRestore && restoreGate.isRestoring();
     untracked(() => {
       if (destroyed) return;
       if (!current) {
@@ -275,13 +301,29 @@ function buildCachedInContext<T, R, TParams>(
         // from this handle's latest params rather than a snapshot from its first render.
         current.entry.registerPlan(buildFetchPlan(current));
         subscribed = current.entry;
-        if (!lazy) maybeFetchOnMount(current);
+        // A hold belongs to the entry it was taken on. This is a different entry now, and its own
+        // mount decision is made below rather than inherited from the one it replaced.
+        heldFirstFetch = false;
+        if (lazy) return;
+        if (waiting) {
+          // Held, not skipped: the flag makes the re-run that follows the restore treat this as
+          // the mount fetch, so `refetchOnMount` and staleness still decide whether it happens.
+          heldFirstFetch = true;
+          return;
+        }
+        maybeFetchOnMount(current);
         return;
       }
       // Same entry, different request — `params` changed, or a reactive global header did.
       // Refetch, but never duplicate an in-flight one.
       current.entry.registerPlan(buildFetchPlan(current));
-      if (!lazy && current.entry.pending === undefined) void startFetch(current);
+      if (lazy || waiting) return;
+      if (heldFirstFetch) {
+        heldFirstFetch = false;
+        maybeFetchOnMount(current);
+        return;
+      }
+      if (current.entry.pending === undefined) void startFetch(current);
     });
   });
 
@@ -446,22 +488,23 @@ function buildCachedInContext<T, R, TParams>(
     fetchCount: computed(() => entry()?.fetchCount() ?? 0),
     isStale: () => entry()?.isStale(staleTime) ?? true,
 
-    run: (): Promise<T> => {
-      if (destroyed) return rejected(new RequestCancelledError('The request was destroyed.'));
-      const current = plan();
-      if (!current) return rejected(disabledError());
-      return startFetch(current) as Promise<T>;
-    },
+    run: (): Promise<T> =>
+      // A restore in flight means the snapshot is about to fill this entry. Waiting for it is not
+      // politeness: the stored value is *older* than the network answer by definition, so racing it
+      // buys a double fetch, and the loser is whichever write lands second.
+      waitForRestore && restoreGate.isRestoring() ? restoreGate.restored().then(runNow) : runNow(),
     tryRun: (): Promise<RunResult<T>> => {
       if (destroyed)
         return Promise.resolve({
           ok: false,
           error: new RequestCancelledError('The request was destroyed.'),
         });
-      const current = plan();
-      const promise = current ? startFetch(current) : rejected<T | undefined>(disabledError());
-      return promise.then(
-        (value): RunResult<T> => ({ ok: true, response: value as T }),
+      const attempt =
+        waitForRestore && restoreGate.isRestoring()
+          ? restoreGate.restored().then(runNow)
+          : runNow();
+      return attempt.then(
+        (value): RunResult<T> => ({ ok: true, response: value }),
         (e: unknown): RunResult<T> => ({ ok: false, error: toError(e) }),
       );
     },

@@ -1,6 +1,6 @@
 import { isPlatformBrowser } from '@angular/common';
 import { HttpClient } from '@angular/common/http';
-import { inject, Injectable, isDevMode, PLATFORM_ID } from '@angular/core';
+import { inject, Injectable, isDevMode, PLATFORM_ID, untracked } from '@angular/core';
 import { SIGNAL_REQUEST_CONFIG } from '../config';
 import { CacheEntry, type SeedValue } from './cache-entry';
 import { matchesFilter, normalizeKey, type QueryKey, type QueryKeyFilter } from './key';
@@ -323,12 +323,31 @@ export class QueryCache {
    * `hydrate`ing a snapshot larger than the cap keeps the most recently fetched entries and forgets
    * the rest, rather than parking the whole file in memory. A value that is dropped is not refused —
    * it is simply not there, and its key fetches normally.
+   *
+   * ### A seed never clobbers newer data
+   *
+   * When the key **already has an entry**, the value is applied to it directly — but only when that
+   * entry has nothing yet, or when the staged value is **strictly newer** than what it holds. A
+   * snapshot read asynchronously arrives after the mount fetch it was racing (the hold was turned
+   * off, or it timed out), and the stored value is what the *last* session fetched: by definition
+   * older than an answer that is on the way back right now. Overwriting would replace fresh data
+   * with stale and report it as a restore.
+   *
+   * The rule is on `dataUpdatedAt` rather than on "is it fetching", because a fetch that already
+   * landed leaves no other trace. It also gets a user edit right for free: `setData` stamps the
+   * current time, so a snapshot from before it never wins. A tie keeps the entry's value, because at
+   * equal timestamps the entry is what handles are reading.
    */
   seed(key: QueryKey, value: unknown, dataUpdatedAt: number): void {
     const normalized = normalizeKey(key);
     const existing = this.entries.get(normalized.hash);
     if (existing && !existing.isDestroyed) {
-      existing.restore(value, dataUpdatedAt);
+      // `untracked`: a seed is a write, and reading a signal here would quietly subscribe whoever
+      // called `hydrate` to an entry they never asked for.
+      const settledAt = untracked(existing.dataUpdatedAt);
+      // `0` is "nothing has been written yet" here, the same reading `isStale` gives it. A tie keeps
+      // the entry's value: at equal timestamps it is already the one handles are reading.
+      if (settledAt === 0 || dataUpdatedAt > settledAt) existing.restore(value, dataUpdatedAt);
       return;
     }
     this.seeds.set(normalized.hash, { value, dataUpdatedAt });

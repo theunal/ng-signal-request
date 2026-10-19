@@ -739,15 +739,62 @@ describe('cached request — the rest of the surface', () => {
     http.expectOne('/users').flush([{ id: 1, name: 'Ada' }]);
     await settle();
 
-    cache().seed(['users'], [{ id: 2, name: 'Grace' }], 1234);
+    // A snapshot at least as new as the fetch, which is the only case a seed is allowed to win. The
+    // entry exists already, so this exercises the write-into-it path rather than staging.
+    const fetchedAt = cache().peek(['users'])?.dataUpdatedAt() ?? 0;
+    cache().seed(['users'], [{ id: 2, name: 'Grace' }], fetchedAt + 1);
 
     expect(users.response()).toEqual([{ id: 2, name: 'Grace' }]);
     // The original fetch time comes with the value, so `staleTime` measures real age rather than
     // treating a restore as a fresh response.
-    expect(cache().peek(['users'])?.dataUpdatedAt()).toBe(1234);
+    expect(cache().peek(['users'])?.dataUpdatedAt()).toBe(fetchedAt + 1);
     // And it is not a *local* write: nothing calls this a user edit.
     expect(cache().peek(['users'])?.local()).toBe(false);
     http.expectNone(() => true);
+    users.destroy();
+  });
+
+  it('seed() leaves an entry whose data is newer than the snapshot alone', async () => {
+    const { http, create } = setup();
+    const users = create(() =>
+      createRequest<User[]>('/users', {
+        key: () => ['users'],
+        staleTime: Number.POSITIVE_INFINITY,
+      }),
+    );
+    await settle();
+    http.expectOne('/users').flush([{ id: 1, name: 'Ada' }]);
+    await settle();
+    const fetchedAt = cache().peek(['users'])?.dataUpdatedAt() ?? 0;
+
+    // What a restore that outlived its bound looks like: the answer is already here and it is
+    // newer than the snapshot, which is what the *last* session fetched. Restoring over it would
+    // swap fresh data for stale and call it a restore.
+    cache().seed(['users'], [{ id: 2, name: 'Grace' }], 1234);
+
+    expect(users.response()).toEqual([{ id: 1, name: 'Ada' }]);
+    expect(cache().peek(['users'])?.dataUpdatedAt()).toBe(fetchedAt);
+    users.destroy();
+  });
+
+  it('seed() still fills an entry that exists but has nothing yet', async () => {
+    const { create } = setup();
+    const users = create(() =>
+      createRequest<User[]>('/users', {
+        key: () => ['users'],
+        lazy: true,
+        staleTime: Number.POSITIVE_INFINITY,
+      }),
+    );
+    await settle();
+    // The entry is real — the handle resolved it — and empty; a snapshot landing now is the only
+    // thing that can fill it.
+    expect(cache().peek(['users'])?.dataUpdatedAt()).toBe(0);
+
+    cache().seed(['users'], [{ id: 2, name: 'Grace' }], 1234);
+
+    expect(users.response()).toEqual([{ id: 2, name: 'Grace' }]);
+    expect(cache().peek(['users'])?.dataUpdatedAt()).toBe(1234);
     users.destroy();
   });
 

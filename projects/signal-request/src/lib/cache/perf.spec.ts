@@ -233,3 +233,40 @@ describe('perf — staged seeds', () => {
     TIMEOUT_MS,
   );
 });
+
+/**
+ * The third path a restore reaches, and the only new one in Phase 3: a seed whose entry **already
+ * exists**.
+ *
+ * A synchronous storage never gets here — hydration finishes before any handle can resolve a key. An
+ * asynchronous read that outlived its bound, or an application that turned the hold off, does: the
+ * entry has data from the network and the snapshot is older. Deciding what to do about it is a map
+ * lookup plus one untracked signal read, and this measures that the decision stays O(1) per seed
+ * rather than growing with the snapshot the way a scan of every key would.
+ */
+describe('perf — late seeds', () => {
+  it(
+    'applying a seed to an entry that already exists is a read and a write, not a scan',
+    () => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      setup([provideSignalRequest({ gcTime: GC })]);
+      const c = cache();
+      c.resolve(['late']).subscribe(GC)();
+
+      const started = performance.now();
+      for (let i = 0; i < N / 2; i++) c.seed(['late'], i, i * 2 + 1);
+      const mid = performance.now();
+      for (let i = N / 2; i < N; i++) c.seed(['late'], i, i * 2 + 1);
+      const ms = performance.now() - started;
+      report('seed into an existing entry', ms);
+
+      expect(c.size).toBe(1);
+      expect(c.pendingSeeds).toBe(0);
+      // Every one of them was newer than the one before it, so every one was applied.
+      expect(c.peek(['late'])?.dataUpdatedAt()).toBe((N - 1) * 2 + 1);
+      expect(ms - mid).toBeLessThan((mid - started) * SHAPE_LIMIT);
+      expect(usPerOp(ms)).toBeLessThan(CEILING_PER_OP_US);
+    },
+    TIMEOUT_MS,
+  );
+});

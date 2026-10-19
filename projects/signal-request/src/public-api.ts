@@ -64,6 +64,7 @@ export type {
 export { QueryCache, type CacheChangeListener } from './lib/cache/query-cache';
 export { QueryClient, type Updater } from './lib/cache/query-client';
 export { MutationRegistry } from './lib/cache/mutation-registry';
+export { IDLE_RESTORE_GATE, RESTORE_GATE, type RestoreGate } from './lib/restore-gate';
 export {
   CacheEntry,
   type FetchPlan,

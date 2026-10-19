@@ -8,17 +8,25 @@
  * pnpm build:demo && pnpm check:dist
  * ```
  *
- * Two things are checked here, and both have been wrong before.
+ * Three things are checked here, and each has been wrong before.
  *
- * 1. **The `/devtools` entry point does not reach a production bundle that does not import it.**
- *    `tsconfig`-level "separate entry point" is a claim; this is the measurement. The demo is
- *    built for production and the resulting bundle is searched for devtools-only strings — while
- *    also asserting that core strings *are* present, because "not found" is otherwise
+ * 1. **The `/devtools` and `/persist` entry points do not reach a production bundle that does not
+ *    import them.** `tsconfig`-level "separate entry point" is a claim; this is the measurement. The
+ *    demo is built for production and the resulting bundle is searched for entry-point-only strings
+ *    — while also asserting that core strings *are* present, because "not found" is otherwise
  *    indistinguishable from "the app does not use the library at all".
  *
- * 2. **The root `README.md` matches the one that ships.** npm publishes
+ * 2. **No entry point's own bundle contains another one's strings.** The demo measures the boundary
+ *    the way an application experiences it; this measures it one level up, in the FESM files, so a
+ *    cross-entry `import` is caught even when nothing in the demo exercises the pair.
+ *
+ * 3. **The root `README.md` matches the one that ships.** npm publishes
  *    `projects/signal-request/README.md`; the root copy is the one people read on GitHub. They are
  *    kept byte-identical by convention, and a convention that is only enforced by memory drifts.
+ *
+ * Gzip budgets per entry point live here too, and are stated in the README: the two copies are kept
+ * in step by hand, deliberately, because a budget that only exists in a script is a budget nobody
+ * reading the README knows about.
  */
 import { createHash } from 'node:crypto';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
@@ -32,10 +40,36 @@ const notes = [];
 const DEVTOOLS_MARKERS = ['ngsr-devtools', 'no cached queries', '[ngsr] +', 'snapshotEntries'];
 
 /** Strings that only exist inside `projects/signal-request/persist/`. */
-const PERSIST_MARKERS = ['providePersistedCache', 'provideCacheTransfer', 'dateRevivingCodec'];
+const PERSIST_MARKERS = [
+  'providePersistedCache',
+  'provideCacheTransfer',
+  'dateRevivingCodec',
+  'indexedDbStorage',
+];
 
 /** Strings that only exist inside `projects/signal-request/src/`. */
-const CORE_MARKERS = ['RequestCancelled', 'httpResource', 'createInfiniteRequest'];
+const CORE_MARKERS = [
+  'RequestCancelled',
+  'httpResource',
+  'createInfiniteRequest',
+  // The core seam `/persist` plugs into. If this one goes missing, the gate has been re-exported
+  // from somewhere else and the entry-point boundary has moved.
+  'ng-signal-request: restore gate',
+];
+
+/**
+ * What each entry point's own bundle must not contain.
+ *
+ * The demo bundle below measures the boundary the way an application experiences it — tree-shaking
+ * of a production build. This measures it one level up, in the FESM files themselves, so a
+ * cross-entry `import` is caught even when nothing in the demo exercises the pair.
+ */
+const FORBIDDEN_IN = new Map([
+  ['ng-signal-request.mjs', [...DEVTOOLS_MARKERS, ...PERSIST_MARKERS]],
+  ['ng-signal-request-persist.mjs', DEVTOOLS_MARKERS],
+  ['ng-signal-request-devtools.mjs', PERSIST_MARKERS],
+  ['ng-signal-request-testing.mjs', [...DEVTOOLS_MARKERS, ...PERSIST_MARKERS]],
+]);
 
 /** Gzip budgets per entry point, in KB. Stated in the README, enforced here. */
 const BUDGETS = new Map([
@@ -106,6 +140,16 @@ function checkBundleBoundaries(demoDir, distDir) {
       failures.push(
         `${name} is ${gzipped.toFixed(1)} KB gzip, over its ${budget} KB budget. Either shrink it ` +
           'or raise the budget deliberately in scripts/check-dist.mjs and the README.',
+      );
+    }
+
+    const forbidden = (FORBIDDEN_IN.get(name) ?? []).filter((marker) =>
+      bytes.includes(marker, 0, 'utf8'),
+    );
+    if (forbidden.length > 0) {
+      failures.push(
+        `${name} contains ${forbidden.join(', ')}, which belongs to another entry point — a ` +
+          'cross-entry import has pulled it in.',
       );
     }
   }

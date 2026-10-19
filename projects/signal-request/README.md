@@ -518,14 +518,15 @@ Two components with that key now cost **one** request, and both see the same
 value. Object segments compare by value, so `{ page: 1 }` from two places is one
 entry.
 
-| Option              | Default        | Meaning                                                     |
-| ------------------- | -------------- | ----------------------------------------------------------- |
-| `key`               | —              | **The opt-in.** Must be sufficient to determine the request |
-| `staleTime`         | `0`            | How long a value counts as fresh. `0` = always stale        |
-| `gcTime`            | `5 min`        | How long an entry with no subscribers is kept               |
-| `maxEntries`        | unlimited      | A cap for the whole cache. See below                        |
-| `refetchOnMount`    | `'stale'`      | `'stale'` · `'always'` · `false`                            |
-| `structuralSharing` | walk-and-reuse | What to store when nothing changed                          |
+| Option              | Default        | Meaning                                                            |
+| ------------------- | -------------- | ------------------------------------------------------------------ |
+| `key`               | —              | **The opt-in.** Must be sufficient to determine the request        |
+| `staleTime`         | `0`            | How long a value counts as fresh. `0` = always stale               |
+| `gcTime`            | `5 min`        | How long an entry with no subscribers is kept                      |
+| `maxEntries`        | unlimited      | A cap for the whole cache. See below                               |
+| `refetchOnMount`    | `'stale'`      | `'stale'` · `'always'` · `false`                                   |
+| `waitForRestore`    | `true`         | Hold the first fetch while a restore is in flight. See Persistence |
+| `structuralSharing` | walk-and-reuse | What to store when nothing changed                                 |
 
 A key is always a **function**, so it is read inside the handle's reactive
 chain: a filter signal in the key re-points the handle at another entry. A
@@ -1237,14 +1238,18 @@ creation — before any component exists, and therefore before any request can
 resolve — so the first render reads restored data. There is no ordering rule to
 get right and nothing to remember in `main.ts`.
 
-| Option                |                                                                                                                                             |
-| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
-| `storage`             | Defaults to `localStorage` where it is reachable, `null` (disabled) everywhere else. Pass `sessionStorage`, an in-memory object, or `null`. |
-| `key`                 | Storage key. Default `'ng-signal-request'`.                                                                                                 |
-| `include` / `exclude` | Which keys are written — the same filter vocabulary `QueryClient.invalidate` takes. `exclude` wins.                                         |
-| `codec`               | `{ serialize, deserialize }`, for values JSON cannot carry.                                                                                 |
-| `maxAge`              | Entries older than this are not restored.                                                                                                   |
-| `debounce`            | Write coalescing, default `1000` ms.                                                                                                        |
+| Option                |                                                                                                                                                                   |
+| --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `storage`             | Defaults to `localStorage` where it is reachable, `null` (disabled) everywhere else. Pass `sessionStorage`, `indexedDbStorage()`, an in-memory object, or `null`. |
+| `key`                 | Storage key. Default `'ng-signal-request'`.                                                                                                                       |
+| `include` / `exclude` | Which keys are written — the same filter vocabulary `QueryClient.invalidate` takes. `exclude` wins.                                                               |
+| `dehydrateFilter`     | Which entries are written, by state. Default: has data, is not fetching, is not in an error state.                                                                |
+| `codec`               | `{ serialize, deserialize }`, for values JSON cannot carry.                                                                                                       |
+| `maxAge`              | Entries older than this are not restored.                                                                                                                         |
+| `buster`              | An application-defined stamp for the shape _inside_ the entries. A mismatch drops the snapshot.                                                                   |
+| `migrate`             | `(snapshot, fromVersion) => snapshot \| null`, for a snapshot from an older shape.                                                                                |
+| `debounce`            | Write coalescing, default `1000` ms.                                                                                                                              |
+| `restoreTimeout`      | How long a restore may hold the first fetch, default `2000` ms. `0` never holds it.                                                                               |
 
 Three details are worth knowing, because each is a bug that is easy to ship:
 
@@ -1267,9 +1272,80 @@ inject(CACHE_PERSISTER).clear();
 ```
 
 `createPersister(options)` is the manual form, with `hydrate()` · `persist()` ·
-`clear()` · `destroy()` and a `enabled` signal that goes `false` — and every
-method a no-op — when there is no usable storage, or when storage starts
-refusing writes (`QuotaExceededError`, Safari private mode).
+`clear()` · `destroy()`, an `enabled` signal that goes `false` — and every method
+a no-op — when there is no usable storage, or when storage starts refusing writes
+(`QuotaExceededError`, Safari private mode), and `isRestoring` / `restored()` for
+the ordering rule below.
+
+### Asynchronous storage, and the restore gate
+
+`localStorage` answers immediately, which is why restored data is in place before
+anything can look. A storage that cannot — IndexedDB, a `fetch` from a service
+worker, anything promise-shaped — answers _after_ the first mount, and the mount has
+already started a request of its own by then. Two answers for one key, and nothing
+deciding which is the truth.
+
+`indexedDbStorage()` is the ready-made asynchronous storage, for the case
+`localStorage` cannot serve: it is capped at a few megabytes, it blocks the main
+thread on every write, and it has no notion of size.
+
+```ts
+providePersistedCache({
+  storage: indexedDbStorage(), // { database, store, version, factory }
+  maxAge: 24 * 60 * 60_000,
+});
+```
+
+The ordering rule is `waitForRestore`, on by default: **while a restore is in
+flight, the first fetch of a key waits for it and then decides again.** A seed that
+arrived fresh means no fetch at all; a seed that arrived stale means the fetch
+happens as usual. `run()` waits too, and re-reads its own plan afterwards, so it
+fetches the params as they are when the restore lands rather than the ones it was
+called with. Nothing else is held — `reload()`, `invalidate()`, polling and refocus
+refetches are explicit instructions that happen after mount.
+
+```ts
+// a screen where a paint matters more than the stored value
+createRequest<User[]>('/users', { key: () => ['users'], waitForRestore: false });
+```
+
+Three things follow from that, and all three are deliberate:
+
+- **The wait is bounded**, by `restoreTimeout` (2000 ms). A storage that never
+  answers must not hold a first paint. Reaching the bound opens the gate and applies
+  nothing; a read that lands later still seeds, under the rule below.
+- **A late seed never clobbers newer data.** A snapshot is what the _last_ session
+  fetched, so it is older than an answer already on the wire by construction.
+  `cache.seed()` applies a value to an existing entry only when that entry has no
+  data yet or the value is strictly newer, so a slow restore can fill a gap but
+  cannot undo a response. (`CacheEntry.setData()` remains the way to force a value
+  in — it says so, by stamping `Date.now()` and marking the write local.)
+- **Writes are serialized.** A promise-returning `setItem` is chained behind the
+  previous one, so two writes are never outstanding together; a rejected write
+  disables the persister through the same path as a throwing one.
+
+### Snapshot versioning: `buster` and `migrate`
+
+`SNAPSHOT_VERSION` is this library's envelope, and it has not moved: the 0.2.0
+additions are optional fields, so a snapshot written by 0.1.0 is still a valid one
+to read. The shape _inside_ the entries is yours, and it changes more often than
+this library's does.
+
+```ts
+providePersistedCache({
+  buster: 'posts-v2', // change the string, and every older payload is dropped
+  migrate: (snapshot, fromVersion) => (fromVersion === 0 ? upgradeV0(snapshot) : null),
+});
+```
+
+`buster` is the cheap one: raise it and every snapshot from before it is discarded
+on the next load — which is the correct answer when a response's _meaning_ changed
+and no migration could know. `migrate` is for a snapshot whose _shape_ changed; it
+runs only when the version differs, and a throw or a `null` return discards the
+snapshot rather than failing bootstrap. The application that would report such an
+error has not started yet, so a bad migration is a cold first paint, not a broken
+app. A `buster` mismatch drops a migrated snapshot too: a shape migration knows
+nothing about what you put in the responses.
 
 ## SSR
 
@@ -1321,7 +1397,7 @@ you give up when you stay inside Angular.
 | Uncached requests    | First class: no `key` means Angular's `httpResource`, its own lifetime, no cache entry                                                                       | Not a concept — every query has a key and a cache entry             |
 | Infinite queries     | `createInfiniteRequest`, **one entry per page**, so prefix invalidation and cross-component sharing work on a feed                                           | `injectInfiniteQuery`, one entry per list                           |
 | `select`             | A **method**: `.select(fn, { equal })`, so the handle's own `response()` is untouched                                                                        | An option on the query observer                                     |
-| Persistence          | `/persist`: synchronous storage, a codec, a version, key filters, and a `TransferState` path for SSR                                                         | `persistQueryClient`: async storages, `maxAge`, busters, migrations |
+| Persistence          | `/persist`: sync or async storage, a codec, `maxAge`, key filters, `buster`/`migrate`, and a `TransferState` path for SSR                                    | `persistQueryClient`: async storages, `maxAge`, busters, migrations |
 | Devtools             | `/devtools`, 2.5 KB gzip, entry list and a few actions, imported in dev only                                                                                 | A mature panel with a query explorer and timings                    |
 | Bounding the cache   | `maxEntries`, LRU over idle entries only, with a per-request value that can tighten it                                                                       | `gcTime` per query, plus explicit removal                           |
 | Invalidating by key  | `invalidates: [['users']]` refreshes every open `['users', …]` query                                                                                         | `invalidateQueries({ queryKey })`                                   |
@@ -1334,8 +1410,10 @@ Where TanStack Query is simply ahead, with no clever reframing:
 
 - **Offline.** `onlineManager`, `networkMode` and mutation resumption are real
   features with no equivalent here. `refetchOnReconnect` is the extent of it.
-- **Async persistence.** `/persist` storage is synchronous, `localStorage`-shaped.
-  If you need IndexedDB, that is TanStack.
+- **Persistence breadth.** `/persist` has `localStorage`-shaped storages plus
+  `indexedDbStorage()`, with `maxAge`, `buster`, `migrate` and key/state filters.
+  `persistQueryClient` still has more storage adapters, and a broader
+  subscribe-and-write model, and it is the mature one of the two.
 - **A `queryFn` is more general.** Anything that returns a promise — GraphQL,
   IndexedDB, a WASM call — is a query there. This library is HTTP only, which is
   exactly what lets the request stay declarative, but it is a real limit.
@@ -1477,18 +1555,38 @@ report and one you read here is a design decision.
   form is a compile error rather than a silently-`unknown` context; capturing the
   options object in a type parameter would do the latter, which is why it is not
   done. (`select()` is a method for the same underlying reason.)
-- **Persistence is synchronous only.** `/persist` storage is `localStorage`-shaped.
-  There is no IndexedDB storage, so a very large snapshot will block the main
-  thread on write. A ready-made async storage is the next step for `/persist`.
+- **An asynchronous restore delays the first fetch of _every_ key, not only of the
+  keys the snapshot turns out to carry.** A snapshot is one blob — the set of keys
+  inside it is unknown until it has been read and parsed, which is the same instant
+  the persister starts seeding — so the gate cannot be asked "does this key have
+  stored data?" before the fetch is held. The outcome for a key that has nothing
+  stored is unchanged (it still fetches, and still does not fetch _against_ restored
+  data); what differs is that its first fetch is delayed by one storage read. The
+  delay is bounded by `restoreTimeout`, does not apply to `waitForRestore: false` or
+  to a synchronous storage, and is the price of not being able to ask earlier.
+- **An asynchronous write is not awaited on teardown.** A promise-returning
+  `setItem` is fired when the page is hidden and when the injector is destroyed, but
+  nothing blocks on it: a page teardown gives no second chance either way, and
+  blocking it would be worse than racing it. `localStorage` writes synchronously
+  there, so this only concerns storages that answer with a promise.
+- **Two writes can still interleave inside your storage** if its `setItem` resolves
+  out of order. `ng-signal-request` serializes its own calls; it cannot serialize
+  yours.
+- **`indexedDbStorage()` keeps its connection open for the life of the page.** There
+  is no owner to hang a `close()` on, and another tab's upgrade closes it anyway —
+  noticed, forgotten and reopened on the next call.
 - **Errors are HTTP-shaped.** A `queryFn`-style source — GraphQL, IndexedDB, a
   WASM call — is not a query here. Everything goes through `HttpClient`.
 - **`status: 0` stays ambiguous.** A CORS block, an extension, offline and a
   transport failure the browser will not name all arrive as `status: 0`. What can
   be distinguished is distinguished (`aborted`, `timeout`, `offline`); nothing is
   invented, and `offline` is present only when the browser is certain.
-- **No ESLint or Prettier config.** The project's style rules live in review and
-  in the type checker, not in a linter. Adding one to an existing codebase is a
-  large diff that would drown the changes it accompanies.
+- **The lint config is strict, and three of its rules are narrowed.** `typescript-eslint`'s
+  `strictTypeChecked` plus type-aware linting plus `angular-eslint`, with a written
+  reason next to every rule that is not on: `restrict-template-expressions` allows
+  numbers and booleans, `no-confusing-void-expression` ignores arrow shorthands, and
+  test files turn off the rules that exist to catch test-idiom noise (non-null
+  assertions, `unnecessary-*`). Nothing is off globally without one.
 - **Coverage is a floor, not a grade.** The thresholds guard against silent
   regression. They say nothing about whether the assertions meant anything.
 
@@ -1552,6 +1650,7 @@ report and one you read here is a design decision.
 | `defaultStructuralSharing` · `StructuralSharingFn`                      | The default sharing walk, and its type                                                                                                                                       |
 | `CachedRequest` / `CachedRequestOptions` / `CacheOptions`               | The cached handle and its options                                                                                                                                            |
 | `RefetchOnMount`                                                        | `'stale'` · `'always'` · `false`                                                                                                                                             |
+| `RESTORE_GATE` / `RestoreGate` / `IDLE_RESTORE_GATE`                    | How a cached request learns that a restore is in flight, without the core knowing about storage                                                                              |
 
 ### `ng-signal-request/testing`
 
@@ -1563,7 +1662,7 @@ report and one you read here is a design decision.
 
 ### `ng-signal-request/persist`
 
-`providePersistedCache` · `createPersister` · `CACHE_PERSISTER` · `Persister` · `PersistOptions` · `CacheStorage` · `dehydrate` · `hydrate` · `CacheSnapshot` · `CacheSnapshotEntry` · `SNAPSHOT_VERSION` · `SnapshotCodec` · `dateRevivingCodec` · `provideCacheTransfer` · `CACHE_TRANSFER_KEY` · `CacheTransferOptions` · `prefetch` · `Prefetchable` · `PrefetchReport`
+`providePersistedCache` · `createPersister` · `CACHE_PERSISTER` · `Persister` · `PersistOptions` · `CacheStorage` · `indexedDbStorage` · `IndexedDbStorageOptions` · `dehydrate` · `defaultDehydrateFilter` · `DehydratePredicate` · `DehydrateOptions` · `hydrate` · `HydrateOptions` · `CacheSnapshot` · `CacheSnapshotEntry` · `SNAPSHOT_VERSION` · `SnapshotCodec` · `dateRevivingCodec` · `provideCacheTransfer` · `CACHE_TRANSFER_KEY` · `CacheTransferOptions` · `prefetch` · `Prefetchable` · `PrefetchReport`
 
 ## Devtools
 
@@ -1640,15 +1739,23 @@ Requires Node 22+ and pnpm 12 (see `packageManager`).
 
 ```bash
 pnpm install
-pnpm build       # build the library into dist/signal-request
-pnpm test        # unit tests (vitest, headless)
-pnpm typecheck   # tsc --noEmit over the lib, spec, devtools and demo projects
-pnpm watch       # rebuild on change (development configuration)
-pnpm verify      # typecheck + test + build + build:demo + check:dist
-pnpm check:dist  # post-build assertions (see "Bundle" below)
-pnpm check:api   # export diff against a git ref: `pnpm check:api v0.1.0`
-pnpm bench       # the resolve() benchmark at 200k iterations (see docs/perf.md)
+pnpm build         # build the library into dist/signal-request
+pnpm test          # unit tests (vitest, headless, coverage thresholds)
+pnpm typecheck     # tsc --noEmit over the lib, spec, devtools and demo projects
+pnpm lint          # eslint, type-aware, over every file
+pnpm format        # prettier --write
+pnpm watch         # rebuild on change (development configuration)
+pnpm verify        # typecheck + lint + format:check + test + build + build:demo + check:dist
+pnpm check:dist    # post-build assertions (see "Bundle" below)
+pnpm check:api     # export diff against a git ref: `pnpm check:api v0.1.0`
+pnpm bench         # the resolve() benchmark at 200k iterations (see docs/perf.md)
 ```
+
+`pnpm lint` and `pnpm format:check` are part of `pnpm verify` and of CI, so a pull
+request cannot land a lint error or a formatting difference. The config is
+`eslint.config.mjs`: `typescript-eslint`'s `strictTypeChecked` with type-aware
+linting, `angular-eslint` for templates, and `eslint-config-prettier` last so the
+two never disagree. Every rule that is not on has a written reason next to it.
 
 `pnpm check:api` fails only when a name that existed before is gone, so it is the
 command behind every "no breaking change" claim in this repository. Its output is
@@ -1666,17 +1773,19 @@ than cosmetic. Sizes are the gzipped ESM bundles from a production build:
 
 | Entry point                  | Size        | When it is in an application |
 | ---------------------------- | ----------- | ---------------------------- |
-| `ng-signal-request`          | **16.7 KB** | always                       |
+| `ng-signal-request`          | **17.6 KB** | always                       |
 | `ng-signal-request/devtools` | 2.5 KB      | only if imported             |
-| `ng-signal-request/persist`  | 2.3 KB      | only if imported             |
+| `ng-signal-request/persist`  | 3.7 KB      | only if imported             |
 | `ng-signal-request/testing`  | 0.8 KB      | only in tests                |
 
 The primary entry point has no imports from the other three and `sideEffects` is
 `false`, so an application that never writes those imports never links the code.
 `pnpm check:dist` asserts this against a real production build: the demo is
 compiled, and the output is required to contain core strings and none of the
-`/devtools` or `/persist` ones. The reason to test it rather than trust it is
-that "separate entry point" is an intention and a bundle scan is a fact.
+`/devtools` or `/persist` ones. It also scans each entry point's own bundle for the
+other three's strings, so a cross-entry `import` is caught even when nothing in the
+demo exercises the pair. The reason to test it rather than trust it is that
+"separate entry point" is an intention and a bundle scan is a fact.
 
 Budgets, so growth is a decision rather than a surprise: the primary entry point
 is not allowed past **20 KB gzip**, and any new secondary entry point past

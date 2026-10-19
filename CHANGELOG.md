@@ -75,6 +75,73 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   handle and put its value in the key, and return `undefined` from the source while
   there is nothing to ask for. `projects/signal-request/src/lib/cache/dependent-queries.spec.ts`
   pins both halves.
+- **Asynchronous persistence, and the ordering rule that makes it safe.** A
+  `localStorage` read finishes during injector creation, so restored data is in place
+  before anything can look. A read that cannot answer synchronously — IndexedDB, a
+  `fetch` from a service worker, anything promise-shaped — finishes _after_ the first
+  mount, and the mount has already started a request of its own by then: two answers
+  for one key, with nothing deciding which is the truth. Phase 3 is the fix, in two
+  halves.
+  - **`indexedDbStorage({ database, store, version, factory })`** — a `CacheStorage`
+    over IndexedDB, for the case `localStorage` cannot serve: it is capped at a few
+    megabytes, it blocks the main thread on every write, and it has no notion of size.
+    One connection is opened lazily and reused, the object store is created on
+    `upgradeneeded`, another tab's upgrade closes and forgets the connection, and
+    every failure — no `indexedDB` at all, a blocked upgrade, a quota refusal —
+    **rejects**, which the persister turns into a disabled persister rather than an
+    exception inside a settle path.
+  - **`CacheStorage`'s three methods may return promises.** Additive in the strict
+    sense: a storage written against 0.1.0 satisfies the widened interface with no
+    edit and no cast, and a sync storage is still called on the same stack, so its
+    timing is unchanged.
+  - **`waitForRestore` (default `true`), on `SignalRequestConfig` and on the cached
+    request options.** While a restore is in flight, the **first** fetch of a key
+    waits for it and then decides again — a seed that arrived fresh means no fetch at
+    all, a seed that arrived stale means the fetch happens as usual. `run()` waits
+    too, and re-reads its plan afterwards, so it fetches the params as they are when
+    the restore lands rather than the ones it was called with. Nothing else is held:
+    `reload()`, `invalidate()`, polling and refocus refetches are explicit
+    instructions that happen after mount, and `reload()` returns synchronously.
+  - **`PersistOptions.restoreTimeout` (default 2000 ms)** bounds the wait, because a
+    storage that never answers must not hold a first paint, and `restoreTimeout: 0`
+    turns the hold off globally. Reaching the bound opens the gate and applies
+    nothing; a read that lands afterwards still seeds, under the reconciliation rule
+    below.
+  - **A late seed never clobbers newer data.** `QueryCache.seed` on a key whose entry
+    already exists now applies the value only when the entry has no data yet, or when
+    the value is **strictly newer** than the entry's `dataUpdatedAt`. A snapshot is
+    what the _last_ session fetched; it is older than an answer already on the wire
+    by construction, and writing it would be the cache going back in time. See the
+    migration note.
+  - **`RESTORE_GATE` / `RestoreGate` / `IDLE_RESTORE_GATE` in the core**, and
+    `Persister.isRestoring` / `Persister.restored()`. The gate is a token the core
+    reads and `/persist` implements, which is why an application that never persists
+    pays nothing: the token's default is an idle constant, and an application that
+    does not call `providePersistedCache` neither provides nor allocates anything.
+    `providePersistedCache` now also registers itself as the gate, so the two cannot
+    disagree about whether a restore is in flight.
+  - **`CacheSnapshot.buster` and `HydrateOptions.migrate`** — two version bumps of
+    different weight. `SNAPSHOT_VERSION` stays `1`: the new field is optional, so a
+    snapshot written by 0.1.0 is still a valid one to read, and bumping the number
+    would throw away every stored snapshot on upgrade for nothing. `buster` is the
+    cheap one — change the string, and every payload from before it is dropped —
+    while `migrate(snapshot, fromVersion)` turns an older _shape_ into a current one.
+    A `migrate` that throws or returns `null` discards the snapshot and leaves a cold
+    first paint, never a bootstrapping failure: the application that would report the
+    error has not started yet. Neither runs when the version already matches, and the
+    `buster` check runs **after** `migrate`, because a shape migration knows nothing
+    about what the application put in the responses.
+  - **`dehydrateFilter`**, a `(entry) => boolean` predicate over entry _state_ —
+    `include` / `exclude` select by key, and the two questions are unrelated. See
+    Changed for the new default.
+  - Writes go through **one in-flight chain**, so two writes are never outstanding
+    together; the debounce stays trailing, the flush points (`pagehide`, visibility,
+    injector teardown) are unchanged, and a rejected write disables the persister
+    through the same path as a throwing one.
+  - `pnpm check:dist` now also asserts that each entry point's own bundle contains no
+    string belonging to another one — the same boundary the demo-bundle check
+    measures, one level up, so a cross-entry import is caught even when nothing in
+    the demo exercises the pair.
 
 ### Fixed
 
@@ -97,7 +164,50 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   time the combination is built, which is what this entry is for.
 - A non-`lazy`, non-`GET` `createRequest` also warns in dev mode, once per verb.
   Behaviour is unchanged; use `createMutation` or `lazy: true`.
+- **The default dehydrate filter is narrower: has data, is not fetching, is not in an
+  error state.** An entry that is mid-refetch is a half-state whose stored shape
+  depends on whether the response or the snapshot ran first, and an entry that
+  **failed** its refetch while still holding yesterday's value is stale truth: the
+  server just declined to confirm it, and restoring it on the next load would show
+  data this session already knows to be suspect with no error to go with it, while
+  overwriting the previous _good_ write. Excluding both cannot lose data — the
+  previous value of the same key was written by the previous write — and it applies
+  to `provideCacheTransfer` too, since the SSR snapshot goes through the same
+  `dehydrate`. `dehydrateFilter` replaces the whole predicate when you want the old
+  behaviour (`(entry) => entry.hasData()`).
+- **`Persister.hydrate()` returns `number | Promise<number>`.** A storage that cannot
+  answer synchronously cannot be counted synchronously. `await persister.hydrate()`
+  compiles and behaves exactly as before; a caller that used the returned number
+  directly now gets a compile error instead of a wrong answer, which is the failure
+  worth having. The free `hydrate(cache, snapshot, options)` function is unchanged —
+  it is handed an already-parsed snapshot and stays synchronous.
+- **`QueryCache.seed` no longer overwrites an entry whose data is newer than the
+  value being staged** (see Added for the rule and why). A seed is a _restore_, and a
+  restore means "this is what the last session had"; use `CacheEntry.setData` to
+  force a value in, which is the method that says so. The one visible consequence: an
+  application that called `seed` a second time expecting an older payload to win over
+  a fetch that happened in between will see the fetch's value kept instead.
 - No export was removed: `pnpm check:api v0.1.0` reports 0 removed.
+
+### Migration from 0.1.x
+
+Nothing here needs a code change to keep working, and the two entries that can change
+behaviour need a storage that cannot answer synchronously — which 0.1.0 had no way to
+configure, so no existing application is in that position.
+
+- **Persistence is synchronous only if you make it so.** `providePersistedCache()`
+  with no `storage` still uses `localStorage`, and a `localStorage` read still
+  finishes during injector creation: `isRestoring()` is `false` before any handle
+  exists, nothing is held, and the first fetch happens exactly when it used to. The
+  gate only engages when you hand over something promise-shaped.
+- **If you wire up an asynchronous storage**, the first fetch of every key waits for
+  the restore (up to `restoreTimeout`, 2000 ms by default, off with `restoreTimeout:
+0` or `waitForRestore: false`). That is the point of the feature. Its known cost:
+  keys the snapshot does not even carry are delayed by one storage read, because the
+  set of keys inside the blob is unknown until it has been read — see the README's
+  known limitations.
+- **If you called `seed()` expecting it to win over newer data**, that is the one
+  behaviour that changed. `CacheEntry.setData` is the method for a forced write.
 
 ### Deprecated
 

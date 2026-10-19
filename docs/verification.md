@@ -128,6 +128,13 @@ if it matches fewer than one export on either side it fails loudly rather than
 reporting a clean empty diff. Passing a ref that does not exist exits 1 with an
 instruction to `git fetch --tags`, instead of a raw git stack trace.
 
+The output above is the 0.1.0-era shape, from when the script read one file. It now
+walks all four entry points (`src/public-api.ts`, `devtools/devtools.ts`,
+`persist/persist.ts`, `testing/testing.ts`) and prints one added/removed pair per
+entry, because Phase 3 changed signatures inside `/persist` and "0 removed" is a
+claim about the published package rather than about its core. The 0.2.0 run, and the
+bug that motivated the change, are in section 8.
+
 ## 5. Claims that were false, and were fixed
 
 The README was audited against the code, not skimmed. Three statements did not
@@ -227,3 +234,34 @@ devtools label counting staged values — which is what moved branches from 90.2
 91.02. The rest are defensive paths (a callback reassigned twice, a plan that was
 never built) and are listed here rather than tested so that nobody mistakes them
 for coverage.
+
+## 8. Phase 3 record (2026-10-19)
+
+Measured on the Phase 3 tree, after the asynchronous-persistence work, by the same
+commands the acceptance criteria name. Nothing here is inherited from a previous
+run.
+
+| Check                                                | Result                                                                   |
+| ---------------------------------------------------- | ------------------------------------------------------------------------ |
+| `pnpm verify`                                        | **exit 0** — typecheck, lint, format:check, 479 tests, build, check:dist |
+| Coverage (statements / branches / functions / lines) | 96.49 / 91.56 / 96.61 / 98.02                                            |
+| `pnpm check:api v0.1.0`                              | **0 removed**, 7 added names (core 3, `/persist` 4)                      |
+| Core bundle                                          | 80.8 KB raw, **17.6 KB gzip** (was 17.4 before this phase)               |
+| `/persist` bundle                                    | 12.5 KB raw, **3.7 KB gzip** (was 2.3)                                   |
+| `pnpm bench`                                         | exit 0, seven lines; no case moved against a control that moved          |
+
+Two things are worth recording rather than leaving in the diff:
+
+1. **`check:api` now compares all four entry points.** It read only
+   `src/public-api.ts` before, so "0 removed" was a claim about a quarter of the
+   published surface — and Phase 3 changed signatures inside `/persist`. The added
+   names are the ones the CHANGELOG lists; the removed set is empty in every entry.
+2. **One bug was found while writing the tests for it.** `runRestore` released the
+   gate from two places — the `restoreTimeout` timer and the settling read — and a
+   restore that timed out and _then_ completed decremented the in-flight count
+   twice. The count going negative is invisible (`isRestoring()` still reads
+   `false`), and the effect is that every _later_ restore starts without opening the
+   gate: a hold that quietly stops holding, in exactly the async-storage
+   configuration the feature exists for. Fixed with a once-only release, and pinned
+   by "still holds a later restore after one timed out" in
+   `persist/persist.spec.ts`.

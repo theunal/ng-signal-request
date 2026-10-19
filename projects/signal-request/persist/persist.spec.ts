@@ -28,6 +28,7 @@ import {
   SNAPSHOT_VERSION,
   type CacheSnapshot,
   type CacheStorage,
+  type SnapshotCodec,
 } from './persist';
 import { cache, settle, setup } from '../testing/testing';
 
@@ -374,6 +375,26 @@ describe('dateRevivingCodec', () => {
     expect(dateRevivingCodec.deserialize(true)).toBe(true);
     expect(dateRevivingCodec.deserialize(undefined)).toBeUndefined();
   });
+
+  it('is what an actual write goes through, to the default storage', async () => {
+    const { http, create } = setup([
+      providePersistedCache({ codec: dateRevivingCodec, debounce: 0 }),
+    ]);
+    const handle = keyed<{ at: string }>(create, ['dated'], Number.POSITIVE_INFINITY, '/dated');
+    await settle();
+    http.expectOne('/dated').flush({ at: '2026-01-02T03:04:05.000Z' });
+    await settle();
+
+    // Two things only this test reaches: omitting `options.storage`, which is the documented
+    // `localStorage` default, and `serialize` — the half of the codec that a `deserialize`-only test
+    // never touches.
+    const raw = localStorage.getItem('ng-signal-request');
+    expect(raw).toContain('2026-01-02T03:04:05.000Z');
+    expect((JSON.parse(raw ?? 'null') as CacheSnapshot).version).toBe(SNAPSHOT_VERSION);
+
+    localStorage.removeItem('ng-signal-request');
+    handle.destroy();
+  });
 });
 
 describe('createPersister()', () => {
@@ -557,6 +578,32 @@ describe('createPersister()', () => {
     persister.destroy();
   });
 
+  it('flushes the open window when the tab is hidden, and only then', async () => {
+    const storage = memoryStorage();
+    const { http, create } = setup();
+    const persister = create(() => createPersister({ storage, debounce: 10_000 }));
+
+    const handle = keyed<Row[]>(create, ['rows']);
+    await settle();
+    http.expectOne('/rows').flush(rows([1]));
+    await settle();
+    expect(storage.writes).toBe(0);
+
+    // `visibilitychange` fires for both directions, and flushing when a tab comes *back* would
+    // write a window the debounce is still coalescing.
+    const state = vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
+    document.dispatchEvent(new Event('visibilitychange'));
+    expect(storage.writes).toBe(0);
+
+    state.mockReturnValue('hidden');
+    document.dispatchEvent(new Event('visibilitychange'));
+    state.mockRestore();
+    expect(storage.writes).toBe(1);
+
+    handle.destroy();
+    persister.destroy();
+  });
+
   it('honours include', async () => {
     const storage = memoryStorage();
     const { http, create } = setup();
@@ -617,6 +664,35 @@ describe('providePersistedCache()', () => {
     expect(lastSnapshot(storage).entries).toHaveLength(1);
 
     handle.destroy();
+  });
+
+  it('reports a throwing deserialize from an asynchronous read, where nothing else can', async () => {
+    const storage = asyncStorage(
+      stored(snapshotOf([{ key: ['rows'], data: rows([1]), dataUpdatedAt: Date.now() }])),
+    );
+    const codec: SnapshotCodec = {
+      serialize: (value) => value,
+      deserialize: () => {
+        throw new Error('this codec is broken');
+      },
+    };
+    const reported = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    try {
+      const { create } = setup([providePersistedCache({ storage, codec })]);
+      create(() => inject(CACHE_PERSISTER));
+      await settle();
+
+      // Unlike a storage failure — which the `enabled` signal reports — a `deserialize` that throws
+      // is a bug in the application's own code, and on the async path it lands after the factory has
+      // returned, so there is no caller left to reject to. It is reported rather than swallowed.
+      expect(reported).toHaveBeenCalledWith(
+        '[ng-signal-request/persist] A restored snapshot could not be read.',
+        expect.any(Error),
+      );
+    } finally {
+      reported.mockRestore();
+    }
   });
 });
 
@@ -722,6 +798,8 @@ interface AsyncStorage extends CacheStorage {
   /** Stops every `getItem` from answering until `releaseReads()`. */
   holdReads(): void;
   releaseReads(): void;
+  /** Delivers the oldest held read only, so a test can land restores one at a time. */
+  releaseOne(): void;
 }
 
 /**
@@ -749,6 +827,9 @@ function asyncStorage(initial: Record<string, string> = {}): AsyncStorage {
     releaseReads: () => {
       held = false;
       for (const deliver of waiting.splice(0)) deliver();
+    },
+    releaseOne: () => {
+      waiting.shift()?.();
     },
     async getItem(key: string): Promise<string | null> {
       // A promise that is genuinely outstanding, not one that resolved before anyone looked.
@@ -1023,6 +1104,30 @@ describe('an asynchronous storage', () => {
     }
   });
 
+  it('keeps the gate closed until the last of two restores has landed', async () => {
+    const storage = asyncStorage();
+    storage.holdReads();
+    const { create } = setup();
+    const persister = create(() => createPersister({ storage }));
+
+    // Two restores at once is not a hypothetical: `hydrate()` is public API and a caller is free to
+    // ask again. The gate has to stay closed until the *last* of them lands, which is why the count
+    // is a count and not a flag — a flag opens on the first, and a fetch races the second read.
+    const first = persister.hydrate();
+    const second = persister.hydrate();
+    expect(persister.isRestoring()).toBe(true);
+
+    storage.releaseOne();
+    await settle();
+    expect(persister.isRestoring()).toBe(true);
+
+    storage.releaseOne();
+    await Promise.all([first, second]);
+    expect(persister.isRestoring()).toBe(false);
+
+    persister.destroy();
+  });
+
   it('arms no timer on the server, because a pending one holds stability', async () => {
     vi.useFakeTimers();
     try {
@@ -1110,9 +1215,20 @@ interface FakeIdb {
   refuseWrites: boolean;
   /** Hands back no `error` object at all, which a browser is allowed to do. */
   errorless: boolean;
+  /** The most recently opened database, so a test can fire the handlers a browser would. */
+  current: FakeDatabase | null;
+  /** How many times a connection was closed. */
+  closed: number;
   /** Stops delivering results until `resume()`. */
   pause(): void;
   resume(): void;
+}
+
+/** The two lifecycle handlers a browser fires on a connection, and the close it performs. */
+interface FakeDatabase {
+  close(): void;
+  onclose: FakeHandler;
+  onversionchange: FakeHandler;
 }
 
 /**
@@ -1137,6 +1253,8 @@ function fakeIdb(): FakeIdb {
     abortWrites: false,
     refuseWrites: false,
     errorless: false,
+    current: null as FakeDatabase | null,
+    closed: 0,
     /**
      * Built here, in the same object the test flips flags on. A spread copy would leave the factory
      * reading the original — a double that ignores its own controls looks exactly like a passing
@@ -1233,8 +1351,8 @@ function fakeIdb(): FakeIdb {
       },
     }) as unknown as IDBObjectStore;
 
-  const database = (): IDBDatabase =>
-    ({
+  const database = (): IDBDatabase => {
+    const db = {
       objectStoreNames: { contains: (name: string) => stores.has(name) },
       createObjectStore: (name: string) => {
         stores.add(name);
@@ -1252,10 +1370,18 @@ function fakeIdb(): FakeIdb {
         };
         return transaction as unknown as IDBTransaction;
       },
-      close: () => {},
-      onclose: null,
-      onversionchange: null,
-    }) as unknown as IDBDatabase;
+      close: () => {
+        fake.closed++;
+      },
+      onclose: null as FakeHandler,
+      onversionchange: null as FakeHandler,
+    };
+
+    // Kept so a test can fire the handlers a browser would fire on the connection the library holds:
+    // a shared object, not a copy, because the library assigns to these two properties.
+    fake.current = db;
+    return db as unknown as IDBDatabase;
+  };
 
   return fake;
 }
@@ -1393,6 +1519,33 @@ describe('indexedDbStorage()', () => {
     http.expectNone(() => true);
 
     handle.destroy();
+  });
+
+  it('forgets a connection another tab upgraded, and reopens on the next call', async () => {
+    const idb = fakeIdb();
+    const storage = indexedDbStorage({ factory: idb.factory });
+    await storage.setItem('ng-signal-request', 'a');
+    expect(idb.opens).toBe(1);
+
+    // A browser fires this after it has already closed the connection. Writing through the dead
+    // handle would reject for the rest of the session, so the library forgets it instead — the cost
+    // is one reopen, and the alternative is persistence that stops working without saying so.
+    idb.current?.onversionchange?.();
+    expect(idb.closed).toBe(1);
+
+    await expect(storage.getItem('ng-signal-request')).resolves.toBe('a');
+    expect(idb.opens).toBe(2);
+  });
+
+  it('forgets a connection the browser closed underneath it', async () => {
+    const idb = fakeIdb();
+    const storage = indexedDbStorage({ factory: idb.factory });
+    await storage.setItem('ng-signal-request', 'a');
+
+    idb.current?.onclose?.();
+
+    await expect(storage.getItem('ng-signal-request')).resolves.toBe('a');
+    expect(idb.opens).toBe(2);
   });
 });
 

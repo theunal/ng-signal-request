@@ -243,8 +243,8 @@ run.
 
 | Check                                                | Result                                                                   |
 | ---------------------------------------------------- | ------------------------------------------------------------------------ |
-| `pnpm verify`                                        | **exit 0** — typecheck, lint, format:check, 479 tests, build, check:dist |
-| Coverage (statements / branches / functions / lines) | 96.49 / 91.56 / 96.61 / 98.02                                            |
+| `pnpm verify`                                        | **exit 0** — typecheck, lint, format:check, 485 tests, build, check:dist |
+| Coverage (statements / branches / functions / lines) | 96.95 / 92.19 / 97.86 / 98.48                                            |
 | `pnpm check:api v0.1.0`                              | **0 removed**, 7 added names (core 3, `/persist` 4)                      |
 | Core bundle                                          | 80.8 KB raw, **17.6 KB gzip** (was 17.4 before this phase)               |
 | `/persist` bundle                                    | 12.5 KB raw, **3.7 KB gzip** (was 2.3)                                   |
@@ -265,3 +265,14 @@ Two things are worth recording rather than leaving in the diff:
    configuration the feature exists for. Fixed with a once-only release, and pinned
    by "still holds a later restore after one timed out" in
    `persist/persist.spec.ts`.
+3. **A second coverage pass closed what the first left open.** The first Phase 3 run
+   measured 96.49 / 91.56 / 96.61 / 98.02 — functions marginally _below_ the 96.65%
+   the plan names as the floor — so the uncovered functions were listed instead of
+   inherited. Five were reachable and became tests: two of them Phase 3's own (the
+   counter increment for a _second_ restore in flight, and the `.catch` that reports
+   a throwing `deserialize` on the asynchronous path, where no caller is left to
+   reject to) and three older ones (`dateRevivingCodec.serialize`, `defaultStorage`,
+   and the `visibilitychange` flush, none of which any test had ever reached). The
+   totals above are the result. The only function left uncovered is
+   `createPersister`'s `caller`, which exists to carry a name for
+   `assertInInjectionContext` and is never invoked.

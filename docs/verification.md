@@ -268,9 +268,10 @@ Two things are worth recording rather than leaving in the diff:
 3. **A second coverage pass closed what the first left open.** The first Phase 3 run
    measured 96.49 / 91.56 / 96.61 / 98.02 — functions marginally _below_ the 96.65%
    the plan names as the floor — so the uncovered functions were listed instead of
-   inherited. Five were reachable and became tests: two of them Phase 3's own (the
-   counter increment for a _second_ restore in flight, and the `.catch` that reports
-   a throwing `deserialize` on the asynchronous path, where no caller is left to
+   inherited, with `node scripts/uncovered-functions.mjs` (the sibling of the branch
+   probe in section 7). Five were reachable and became tests: two of them Phase 3's
+   own (the counter increment for a _second_ restore in flight, and the `.catch` that
+   reports a throwing `deserialize` on the asynchronous path, where no caller is left to
    reject to) and three older ones (`dateRevivingCodec.serialize`, `defaultStorage`,
    and the `visibilitychange` flush, none of which any test had ever reached). The
    totals above are the result. The only function left uncovered is

@@ -9,7 +9,7 @@
     "typecheck": "tsc -p projects/signal-request/tsconfig.lib.json --noEmit && tsc -p projects/signal-request/tsconfig.spec.json --noEmit && tsc -p projects/demo/tsconfig.json --noEmit && tsc -p e2e/tsconfig.json --noEmit",
     "start": "ng serve demo",
     "build:demo": "ng build demo",
-    "build:probes": "ng build probe --configuration=none && ng build probe --configuration=request && ng build probe --configuration=keyed && ng build probe --configuration=full",
+    "build:probes": "ng build probe --configuration=none && ng build probe --configuration=request && ng build probe --configuration=keyed && ng build probe --configuration=full && ng build probe --configuration=devtools",
     "check:dist": "pnpm run build:probes && node scripts/check-dist.mjs",
     "check:api": "node scripts/api-diff.mjs",
     "check:types-compat": "tsc -p compat/v0.1.0/tsconfig.json",

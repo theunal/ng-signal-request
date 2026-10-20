@@ -1,7 +1,13 @@
 import { type ComponentFixture, TestBed } from '@angular/core/testing';
 import { describe, expect, expectTypeOf, it, vi } from 'vitest';
-import { inject } from '@angular/core';
-import { createRequest, OnlineManager, provideSignalRequest, QueryClient } from 'ng-signal-request';
+import { inject, signal } from '@angular/core';
+import {
+  createRequest,
+  OnlineManager,
+  provideSignalRequest,
+  QueryClient,
+  RESTORE_GATE,
+} from 'ng-signal-request';
 import {
   DevtoolsPanel,
   QueryDevtools,
@@ -440,5 +446,315 @@ describe('DevtoolsPanel — the table', () => {
     expect(panel.formatAge(999)).toBe('999ms');
     expect(panel.formatAge(2000)).toBe('2s');
     expect(panel.formatAge(120_000)).toBe('2m');
+  });
+});
+
+describe('devtools — depth', () => {
+  it('reports plan kind, seed origin, observer names and newest-first attempts', async () => {
+    const { http, create } = setup();
+    const handle = keyed<Row[]>(create, ['rows']);
+    await settle();
+
+    advanceClock(10);
+    http.expectOne('/rows').flush([{ id: 1 }]);
+    await settle();
+
+    advanceClock(20);
+    handle.reload();
+    await settle();
+    advanceClock(30);
+    http.expectOne('/rows').flush([{ id: 2 }]);
+    await settle();
+
+    const entry = snapshotEntries(cache()).at(-1)!;
+    expect(entry.kind).toBe('http');
+    expect(entry.seeded).toBe(false);
+    expect(entry.observerNames).toEqual(['rows']);
+    expect(entry.attempts).toHaveLength(2);
+    expect(entry.attempts[0].startedAt).toBeGreaterThan(entry.attempts[1].startedAt);
+    expect(entry.attempts[0].outcome).toBe('success');
+    expect(entry.retries).toEqual([]);
+
+    handle.destroy();
+  });
+
+  it('serializes a preview only when asked, and caps it', async () => {
+    const { create } = setup();
+    const handle = create(() =>
+      createRequest<{ body: string }>(() => ({ url: '/rows' }), {
+        key: () => ['rows'],
+        refetchOnMount: false,
+      }),
+    );
+    await settle();
+    handle.set({ body: 'x'.repeat(400) });
+
+    const closed = snapshotEntries(cache())[0];
+    expect(closed.preview).toBeUndefined();
+    expect(closed.size).toBeUndefined();
+
+    const open = snapshotEntries(cache(), { preview: true })[0];
+    expect(open.preview).toHaveLength(201);
+    expect(open.preview?.endsWith('…')).toBe(true);
+    expect(open.size).toBeGreaterThan(200);
+    expect(open.data).toEqual({ body: 'x'.repeat(400) });
+
+    handle.destroy();
+  });
+
+  it('turns an unserializable value into a label instead of throwing', async () => {
+    const { create } = setup();
+    const handle = create(() =>
+      createRequest<unknown>(() => ({ url: '/rows' }), {
+        key: () => ['rows'],
+        refetchOnMount: false,
+      }),
+    );
+    await settle();
+    const circular: Record<string, unknown> = {};
+    circular['self'] = circular;
+    handle.set(circular);
+
+    const entry = snapshotEntries(cache(), { preview: true })[0];
+    expect(entry.preview).toBe('[unserializable]');
+    expect(entry.size).toBeUndefined();
+
+    // `JSON.stringify` returns `undefined` for a symbol rather than throwing; it is just as
+    // unserializable from the panel's point of view.
+    const symbol = create(() =>
+      createRequest<unknown>(() => ({ url: '/symbol' }), {
+        key: () => ['symbol'],
+        refetchOnMount: false,
+      }),
+    );
+    await settle();
+    symbol.set(Symbol('x'));
+    expect(snapshotEntries(cache(), { preview: true, filter: ['symbol'] })[0].preview).toBe(
+      '[unserializable]',
+    );
+
+    symbol.destroy();
+    handle.destroy();
+  });
+
+  it('isRestoring() follows the restore gate', () => {
+    const restoring = signal(true);
+    const { create } = setup([
+      {
+        provide: RESTORE_GATE,
+        useValue: { isRestoring: restoring.asReadonly(), restored: () => Promise.resolve() },
+      },
+    ]);
+    const devtools = create(() => inject(QueryDevtools));
+
+    expect(devtools.isRestoring()).toBe(true);
+    restoring.set(false);
+    expect(devtools.isRestoring()).toBe(false);
+  });
+
+  it('runs the invalidation, refetch and stale actions against the service', async () => {
+    const { http, create } = setup();
+    const devtools = create(() => inject(QueryDevtools));
+    const handle = keyed<Row[]>(create, ['rows']);
+    await settle();
+    http.expectOne('/rows').flush([{ id: 1 }]);
+    await settle();
+
+    devtools.invalidate(devtools.entries()[0]);
+    await settle();
+    expect(devtools.entries()[0].invalidated).toBe(true);
+    expect(devtools.entries()[0].status).toBe('loading');
+    http.expectOne('/rows').flush([{ id: 1 }]);
+    await settle();
+
+    devtools.refetch(devtools.entries()[0]);
+    await settle();
+    expect(devtools.entries()[0].fetchCount).toBe(3);
+    http.expectOne('/rows').flush([{ id: 1 }]);
+    await settle();
+
+    // Stale is deliberately not a refetch: it changes the answer to the next mount's question.
+    devtools.markStale(devtools.entries()[0]);
+    await settle();
+    expect(devtools.entries()[0].invalidated).toBe(true);
+    expect(devtools.entries()[0].fetchCount).toBe(3);
+
+    handle.destroy();
+  });
+
+  it('cancels the in-flight request and removes exactly one row', async () => {
+    const { http, create } = setup();
+    const devtools = create(() => inject(QueryDevtools));
+    const parent = create(() =>
+      createRequest<Row[]>(() => ({ url: '/rows' }), {
+        key: () => ['rows'],
+        refetchOnMount: false,
+      }),
+    );
+    const child = create(() =>
+      createRequest<Row[]>(() => ({ url: '/rows/1' }), {
+        key: () => ['rows', 1],
+        refetchOnMount: false,
+      }),
+    );
+    await settle();
+
+    parent.reload();
+    await settle();
+    const request = http.expectOne('/rows');
+    devtools.cancel(devtools.entries().find((entry) => entry.label === '["rows"]')!);
+    expect(request.cancelled).toBe(true);
+    await settle();
+
+    const parentEntry = devtools.entries().find((entry) => entry.label === '["rows"]')!;
+    expect(devtools.remove(parentEntry)).toBe(true);
+    await settle();
+    expect(devtools.entries().some((entry) => entry.label === '["rows"]')).toBe(false);
+    expect(devtools.entries().some((entry) => entry.label.includes('"rows", 1'))).toBe(true);
+
+    child.destroy();
+    parent.destroy();
+  });
+
+  it('shows the restoring marker, actions and expandable details', async () => {
+    const restoring = signal(true);
+    const { http, create } = setup([
+      {
+        provide: RESTORE_GATE,
+        useValue: { isRestoring: restoring.asReadonly(), restored: () => Promise.resolve() },
+      },
+    ]);
+    const handle = keyed<Row[]>(create, ['rows']);
+    await settle();
+    // The gate is busy, so the first fetch is held. Release it, let the request settle, then make
+    // the gate busy again before mounting: the marker is what this test is about.
+    restoring.set(false);
+    await settle();
+    http.expectOne('/rows').flush([{ id: 1 }]);
+    await settle();
+    restoring.set(true);
+
+    const fixture = TestBed.createComponent(DevtoolsPanel);
+    TestBed.inject(QueryDevtools).open();
+    fixture.detectChanges();
+
+    const header = fixture.nativeElement.querySelector('button') as HTMLButtonElement;
+    expect(header.textContent).toContain('(restoring)');
+
+    const buttons = [
+      ...fixture.nativeElement.querySelectorAll('tbody button'),
+    ] as HTMLButtonElement[];
+    const labels = buttons.map((button) => button.textContent.trim());
+    expect(labels).toEqual(
+      expect.arrayContaining(['details', 'invalidate', 'refetch', 'cancel', 'stale', 'remove']),
+    );
+
+    buttons.find((button) => button.textContent.trim() === 'details')!.click();
+    fixture.detectChanges();
+
+    const details = fixture.nativeElement.querySelector('tr.details') as HTMLElement;
+    expect(details.textContent).toContain('plan http');
+    expect(details.textContent).toMatch(/observers\s+rows/);
+    expect(details.textContent).toContain('attempts');
+    expect(details.textContent).toContain('success');
+    expect(details.querySelector('.preview')?.textContent).toContain('"id":1');
+
+    // Closing is the other branch of the same toggle.
+    ([...fixture.nativeElement.querySelectorAll('tbody button')] as HTMLButtonElement[])
+      .find((button) => button.textContent.trim() === 'hide')!
+      .click();
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('tr.details')).toBeNull();
+
+    const click = (label: string): void => {
+      const button = (
+        [...fixture.nativeElement.querySelectorAll('tbody button')] as HTMLButtonElement[]
+      ).find((candidate) => candidate.textContent.trim() === label);
+      expect(button, label).toBeDefined();
+      button!.click();
+    };
+
+    click('invalidate');
+    await settle();
+    fixture.detectChanges();
+    const invalidatedRequest = http.expectOne('/rows');
+    click('cancel');
+    fixture.detectChanges();
+    expect(invalidatedRequest.cancelled).toBe(true);
+    await settle();
+    fixture.detectChanges();
+
+    click('refetch');
+    await settle();
+    fixture.detectChanges();
+    http.expectOne('/rows').flush([{ id: 2 }]);
+    await settle();
+    fixture.detectChanges();
+
+    click('stale');
+    fixture.detectChanges();
+    click('remove');
+    await settle();
+    fixture.detectChanges();
+    expect(TestBed.inject(QueryDevtools).count()).toBe(0);
+
+    handle.destroy();
+  });
+
+  it('expands an empty row to say there is no value', async () => {
+    const { create } = setup();
+    const handle = create(() =>
+      createRequest<Row[]>(() => ({ url: '/rows' }), {
+        key: () => ['rows'],
+        refetchOnMount: false,
+      }),
+    );
+    await settle();
+
+    const fixture = TestBed.createComponent(DevtoolsPanel);
+    TestBed.inject(QueryDevtools).open();
+    fixture.detectChanges();
+
+    const details = (
+      [...fixture.nativeElement.querySelectorAll('tbody button')] as HTMLButtonElement[]
+    ).find((button) => button.textContent.trim() === 'details')!;
+    details.click();
+    fixture.detectChanges();
+
+    expect(fixture.nativeElement.querySelector('tr.details')?.textContent).toContain('no value');
+
+    handle.destroy();
+  });
+
+  it('renders retry history in the details row', async () => {
+    vi.useFakeTimers({
+      toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'],
+    });
+    const { http, create } = setup();
+    const handle = create(() =>
+      createRequest<Row[]>(() => ({ url: '/rows' }), {
+        key: () => ['rows'],
+        retry: { count: 1, delay: 100 },
+      }),
+    );
+    await settle();
+    http.expectOne('/rows').flush({}, { status: 503, statusText: 'Unavailable' });
+    await settle();
+
+    const fixture = TestBed.createComponent(DevtoolsPanel);
+    TestBed.inject(QueryDevtools).open();
+    fixture.detectChanges();
+    ([...fixture.nativeElement.querySelectorAll('tbody button')] as HTMLButtonElement[])
+      .find((button) => button.textContent.trim() === 'details')!
+      .click();
+    fixture.detectChanges();
+
+    const details = fixture.nativeElement.querySelector('tr.details') as HTMLElement;
+    expect(details.textContent).toContain('retries');
+    expect(details.textContent).toContain('attempt 1');
+
+    handle.destroy();
+    cache().remove(['rows']);
+    vi.useRealTimers();
   });
 });

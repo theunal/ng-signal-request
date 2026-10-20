@@ -1594,7 +1594,7 @@ you give up when you stay inside Angular.
 | Infinite queries     | `createInfiniteRequest`, **one entry per page**, so prefix invalidation and cross-component sharing work on a feed                                           | `injectInfiniteQuery`, one entry per list                                            |
 | `select`             | A **method**: `.select(fn, { equal })`, so the handle's own `response()` is untouched                                                                        | An option on the query observer                                                      |
 | Persistence          | `/persist`: sync or async storage, a codec, `maxAge`, key filters, `buster`/`migrate`, and a `TransferState` path for SSR                                    | `persistQueryClient`: async storages, `maxAge`, busters, migrations                  |
-| Devtools             | `/devtools`, 2.5 KB gzip, entry list and a few actions, imported in dev only                                                                                 | A mature panel with a query explorer and timings                                     |
+| Devtools             | `/devtools`, 4.0 KB gzip, per-entry preview, timings, observers, retries and actions, imported in dev only                                                   | A mature panel with a query explorer, timeline and plugins                           |
 | Bounding the cache   | `maxEntries`, LRU over idle entries only, with a per-request value that can tighten it                                                                       | `gcTime` per query, plus explicit removal                                            |
 | Invalidating by key  | `invalidates: [['users']]` refreshes every open `['users', …]` query                                                                                         | `invalidateQueries({ queryKey })`                                                    |
 | SSR                  | `providedIn: 'root'` already means one cache per render, with `TransferState` hydration                                                                      | A `QueryClient` you create per request in the server handler                         |
@@ -1621,7 +1621,10 @@ Where TanStack Query is simply ahead, with no clever reframing:
   declarative HTTP request is still the primary path and `createQuery` is the way
   out when your data is not behind `HttpClient`. Observable sources are also
   first-emission-only here; neither library streams into one cached value.
-- **Devtools depth**, and an ecosystem: plugins, years of answered questions.
+- **Devtools polish and ecosystem.** The panel now answers value, timings,
+  observers, retries and seed origin, and has the cache actions a debugging
+  session needs. TanStack's explorer, timeline, persisted settings and plugin
+  ecosystem are still deeper, and it has years of answered questions behind it.
 
 Where this library is ahead, in an Angular-only codebase:
 
@@ -1762,8 +1765,8 @@ report and one you read here is a design decision.
 - **Importing one factory keeps the whole primary entry point in your bundle.** The
   factories live in one module with module-level tables, so an app that only calls
   `createRequest` still retains the cached path, the infinite path and the mutation
-  queue: measured at about **+21.2 KB gzip** over an app without the library, against
-  about **+23.0 KB** for the full surface. This is a tree-shaking limitation, not a
+  queue: measured at about **+21.4 KB gzip** over an app without the library, against
+  about **+23.5 KB** for the full surface. This is a tree-shaking limitation, not a
   claim that the unused features are free; fixing it needs a module per factory,
   which is a public-API decision for a later release. The measured numbers and the
   budgets are in [Bundle](#bundle).
@@ -1877,18 +1880,19 @@ report and one you read here is a design decision.
 
 ### Cache
 
-| Export                                                                  | Description                                                                                                                                                                            |
-| ----------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `QueryClient`                                                           | Injectable: `invalidate` · `refetch` · `cancel` · `getData` · `setData` · `remove` · `evict` · `size` · `isFetching` · `isPaused` · `count` · `clear` · `isMutating` · `mutatingCount` |
-| `MutationRegistry`                                                      | In-flight mutation counts, globally and per `mutationKey`                                                                                                                              |
-| `QueryCache`                                                            | The store: `resolve` · `peek` · `matching` · `markInvalidated` · `remove` · `evictIdle` · `size` · `maxEntries` · `tightenMaxEntries` · `all` · `subscribeChanges` · `clear`           |
-| `CacheEntry`                                                            | One cached resource: `data` · `status` signals, `refetch()` · `subscribe()` · `setData()` · `evict()` · `isStale()`                                                                    |
-| `QueryKey` / `QueryKeyFactory` / `QueryKeyFilter` / `QueryKeyPredicate` | Key shapes and the matching filter                                                                                                                                                     |
-| `normalizeKey` · `matchesFilter` · `startsWith` · `formatKey`           | Key helpers, exported for devtools and custom stores                                                                                                                                   |
-| `defaultStructuralSharing` · `StructuralSharingFn`                      | The default sharing walk, and its type                                                                                                                                                 |
-| `CachedRequest` / `CachedRequestOptions` / `CacheOptions`               | The cached handle and its options                                                                                                                                                      |
-| `RefetchOnMount`                                                        | `'stale'` · `'always'` · `false`                                                                                                                                                       |
-| `RESTORE_GATE` / `RestoreGate` / `IDLE_RESTORE_GATE`                    | How a cached request learns that a restore is in flight, without the core knowing about storage                                                                                        |
+| Export                                                                  | Description                                                                                                                                                                                       |
+| ----------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `QueryClient`                                                           | Injectable: `invalidate` · `refetch` · `cancel` · `getData` · `setData` · `remove` · `evict` · `size` · `isFetching` · `isPaused` · `count` · `clear` · `isMutating` · `mutatingCount`            |
+| `MutationRegistry`                                                      | In-flight mutation counts, globally and per `mutationKey`                                                                                                                                         |
+| `QueryCache`                                                            | The store: `resolve` · `peek` · `matching` · `markInvalidated` · `remove` · `removeExact` · `evictIdle` · `size` · `maxEntries` · `tightenMaxEntries` · `all` · `subscribeChanges` · `clear`      |
+| `CacheEntry`                                                            | One cached resource: `data` · `status` signals, `refetch()` · `subscribe()` · `setData()` · `evict()` · `isStale()`; `fetchHistory` · `retryHistory` · `seeded` · `observerNames` for diagnostics |
+| `QueryKey` / `QueryKeyFactory` / `QueryKeyFilter` / `QueryKeyPredicate` | Key shapes and the matching filter                                                                                                                                                                |
+| `normalizeKey` · `matchesFilter` · `startsWith` · `formatKey`           | Key helpers, exported for devtools and custom stores                                                                                                                                              |
+| `FetchAttempt` / `RetryEvent` / `FetchOutcome`                          | One settled fetch (start, duration, outcome) and one scheduled retry, as recorded on an entry                                                                                                     |
+| `defaultStructuralSharing` · `StructuralSharingFn`                      | The default sharing walk, and its type                                                                                                                                                            |
+| `CachedRequest` / `CachedRequestOptions` / `CacheOptions`               | The cached handle and its options                                                                                                                                                                 |
+| `RefetchOnMount`                                                        | `'stale'` · `'always'` · `false`                                                                                                                                                                  |
+| `RESTORE_GATE` / `RestoreGate` / `IDLE_RESTORE_GATE`                    | How a cached request learns that a restore is in flight, without the core knowing about storage                                                                                                   |
 
 ### `ng-signal-request/testing`
 
@@ -1915,26 +1919,43 @@ export class DevShell {}
 ```
 
 `DevtoolsPanel` is a small, unstyled table of the cache, fixed to the bottom
-right and collapsed to a `cache 3` button until clicked. `QueryDevtools` is the
+right and collapsed to a `cache 3` button until clicked. Every row has a
+`details` toggle that opens a second row with the current value preview (capped
+at 200 characters, with the full JSON size next to it), the plan kind, whether
+the value came from a seed, the observer `debugName`s, the last ten fetch
+timings/outcomes and the last ten scheduled retries. `QueryDevtools` is the
 headless part:
 
-| Member                                         |                                                                                                             |
-| ---------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
-| `entries()`                                    | live snapshot of every entry: key, status, observers, fetch count, age, retry, error, paused                |
-| `online()`                                     | the library's own connectivity state, so the panel cannot disagree with it                                  |
-| `count()` / `fetching()`                       | totals, without building the full snapshot                                                                  |
-| `isOpen()` · `open()` · `close()` · `toggle()` | panel state                                                                                                 |
-| `log()`                                        | `console.table` of the current snapshot                                                                     |
-| `logChanges()`                                 | logs one line per change — `+ key`, `- key`, a fetch, a status move — until the returned function is called |
+| Member                                         |                                                                                                                                   |
+| ---------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| `entries()`                                    | live snapshot: key, status, observers, fetch count, age, retry, error, paused, plan kind, seed origin, attempts and retry history |
+| `online()` / `isRestoring()`                   | the library's own connectivity and restore-gate state, so the panel cannot disagree with it                                       |
+| `count()` / `fetching()`                       | totals, without building the full snapshot                                                                                        |
+| `isOpen()` · `open()` · `close()` · `toggle()` | panel state                                                                                                                       |
+| `invalidate(entry)` / `refetch(entry)`         | by key, like `QueryClient`: the row's key and its children                                                                        |
+| `cancel(entry)`                                | aborts the in-flight request for that key and its children                                                                        |
+| `markStale(entry)` / `remove(entry)`           | **exactly** this row: mark it invalidated without a refetch, or remove it without taking sibling child keys                       |
+| `log()`                                        | `console.table` of the current snapshot                                                                                           |
+| `logChanges()`                                 | logs one line per change — `+ key`, `- key`, a fetch, a status move — until the returned function is called                       |
 
-`snapshotEntries(cache, { filter?, now? })` builds a snapshot without the
-service, for a test or a custom panel.
+`snapshotEntries(cache, { filter?, now?, preview? })` builds a snapshot without
+the service, for a test or a custom panel. `preview` is off by default: the
+panel turns it on only while it is open, because serializing a large payload is
+the one cost that scales with the value. A circular value or a symbol becomes
+`[unserializable]`; the preview never throws.
+
+`entries()` is a `computed` over the entries' own signals — no polling, no
+interval to forget to clear. The header shows the entry count against
+`maxEntries` when one is set, flags an overshoot, and marks `(offline)` and
+`(restoring)` from the same managers the requests use.
 
 **It costs nothing when unused.** The entry point is its own bundle and the
 primary entry point never imports it, so an application that does not write the
 import above ships none of it — there is no production flag to get wrong and no
-branch that could be mis-trimmed. The library's CI checks this by building the
-demo and asserting that none of the devtools strings reach the output.
+branch that could be mis-trimmed. The production demo deliberately does not
+render the panel; `check:dist` asserts that none of the devtools strings reach
+its output. The positive control is `projects/probe/src/main-devtools.ts`, a
+minimal app that does render `<ngsr-devtools />` and is built with the probes.
 
 ```ts
 // what the check is, in one line
@@ -1943,19 +1964,18 @@ expect(demoBundle).not.toContain('no cached queries');
 
 Two things the panel reports that deserve a word:
 
-- **`observers` can lag by one change-detection pass.** Subscription
-  bookkeeping is not a signal, because a template should not be able to depend
-  on it. Everything else in the table is exact.
+- **`observers` and `observerNames` can lag by one change-detection pass.**
+  Subscription bookkeeping is not a signal, because a template should not be
+  able to depend on it. Everything else in the table is exact.
 - **`'ready'` is not the same as fresh.** Real staleness depends on the
   `staleTime` of whichever handle is asking, which is a per-handle decision the
   entry deliberately does not know, so a panel claiming to judge it would be
   guessing. `'invalidated'` is reported exactly, and `age` is the honest
   substitute.
 
-The snapshot is a `computed` over the entries' own signals — no polling, no
-interval to forget to clear. The header shows the entry count against
-`maxEntries` when one is set, and flags an overshoot, since "32 entries, cap 25"
-is the readout that sends you looking for the leak.
+The panel is a debugging aid, not an object inspector: it shows a JSON preview,
+not a lazily expandable tree, and it has no timeline or persisted settings. Those
+are deliberate omissions, not a claim that a bigger panel would be worse.
 
 ## Demo
 
@@ -2031,8 +2051,8 @@ than cosmetic. Sizes are the gzipped ESM bundles from a production build:
 
 | Entry point                  | Size        | When it is in an application |
 | ---------------------------- | ----------- | ---------------------------- |
-| `ng-signal-request`          | **20.5 KB** | always                       |
-| `ng-signal-request/devtools` | 2.7 KB      | only if imported             |
+| `ng-signal-request`          | **20.9 KB** | always                       |
+| `ng-signal-request/devtools` | 4.0 KB      | only if imported             |
 | `ng-signal-request/persist`  | 3.7 KB      | only if imported             |
 | `ng-signal-request/testing`  | 0.8 KB      | only in tests                |
 
@@ -2046,31 +2066,34 @@ demo exercises the pair. The reason to test it rather than trust it is that
 "separate entry point" is an intention and a bundle scan is a fact.
 
 Those numbers are what ships. What an application **retains** is a different
-measurement, and until 0.2.0 it was never taken. `projects/probe` contains four
+measurement, and until 0.2.0 it was never taken. `projects/probe` contains five
 minimal production apps that differ only in their imports; `check:dist` builds them
 and compares gzip sizes against the one without the library:
 
-| Probe     | What it imports                             | Over the control |
-| --------- | ------------------------------------------- | ---------------- |
-| `request` | one uncached `createRequest`                | **+21.2 KB**     |
-| `keyed`   | a keyed `createRequest` and `QueryClient`   | **+21.2 KB**     |
-| `full`    | every core factory, `/persist`, `/devtools` | **+23.0 KB**     |
+| Probe      | What it imports                                             | Over the control |
+| ---------- | ----------------------------------------------------------- | ---------------- |
+| `request`  | one uncached `createRequest`                                | **+21.4 KB**     |
+| `keyed`    | a keyed `createRequest` and `QueryClient`                   | **+21.5 KB**     |
+| `full`     | every core factory and the `/persist` + `/devtools` entries | **+23.5 KB**     |
+| `devtools` | a keyed request with `<ngsr-devtools />` rendered           | **+30.8 KB**     |
 
-The gap between the first and the last row is 1.8 KB, not 15, because angular's
+The gap between the first three rows is 2.1 KB, not 15, because angular's
 bundler keeps the whole primary module once anything in it is imported: the
 factories are built with module-level `Object.assign(...)` tables, and each
 `@Injectable`'s static DI declaration is a call, so esbuild cannot prove the
 unused ones side-effect-free. `sideEffects: false` drops modules, not statements
 inside the module you already import. This is a known cost, not a claim that a
 factory is free; fixing it would mean a module per factory, which is a public-API
-decision reserved for a later release.
+decision reserved for a later release. The `devtools` row is a positive control
+for the secondary entry point, not part of that core comparison: it pays for the
+panel on purpose.
 
 Budgets, so growth is a decision rather than a surprise: the primary entry point
 is not allowed past **21.5 KB gzip** (raised from 20 KB by 0.2.0's `createQuery`;
-the measured 20.5 and the reasoning are in `docs/design-0.2.md`), any new secondary
+the measured 20.9 and the reasoning are in `docs/design-0.2.md`), any secondary
 entry point past **15 KB gzip**, and the probes above past the measured values plus
-roughly 5% (`request` and `keyed` 22.5 KB over the control, `full` 24 KB).
-`pnpm check:dist` prints all of the numbers on every run.
+roughly 5% (`request` and `keyed` 22.5 KB over the control, `full` 24 KB,
+`devtools` 32.5 KB). `pnpm check:dist` prints all of the numbers on every run.
 
 ## Releasing
 

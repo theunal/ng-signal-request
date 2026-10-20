@@ -10,16 +10,16 @@ The 0.2.0 brief has six phases. They are not equally hard, and the brief says so
 two of them are small and mostly additive, and two change the request lifecycle
 itself.
 
-| Phase | Subject                                 | Status                                     |
-| ----- | --------------------------------------- | ------------------------------------------ |
-| 0     | Verify the 0.1.0 claims                 | **Done** — see `docs/verification.md`      |
-| 1     | Bound the cache in space (`maxEntries`) | **Done** in this session                   |
-| 5     | Remove the known traps                  | **Done** in this session                   |
-| A     | Type-compatibility audit against 0.1.0  | **Done** in this session, below            |
-| 2     | Offline / `networkMode`                 | **Done** in this session, below            |
-| 3     | Async persistence and migrations        | Designed here, deferred to its own session |
-| 4     | Non-HTTP sources (`queryFn`)            | Designed here, deferred to its own session |
-| 6     | Devtools depth                          | Designed here, deferred to its own session |
+| Phase | Subject                                 | Status                                |
+| ----- | --------------------------------------- | ------------------------------------- |
+| 0     | Verify the 0.1.0 claims                 | **Done** — see `docs/verification.md` |
+| 1     | Bound the cache in space (`maxEntries`) | **Done** in this session              |
+| 5     | Remove the known traps                  | **Done** in this session              |
+| A     | Type-compatibility audit against 0.1.0  | **Done** in this session, below       |
+| 2     | Offline / `networkMode`                 | **Done** in this session, below       |
+| 3     | Async persistence and migrations        | **Done** in this session              |
+| 4     | Non-HTTP sources (`queryFn`)            | **Done** in this session              |
+| 6     | Devtools depth                          | **Done** in this session              |
 
 Phases 2 and 4 change how a request is _driven_: an offline query does not fetch
 until the network returns, and a `queryFn` query has no `HttpClient` behind it at
@@ -1432,11 +1432,140 @@ lines; the file's own 95.6 / 86.1 / 98.5 / 96.9 still carries uncovered branches
 pre-Phase-4 held-fetch, progress and synchronous-backend paths, which are unchanged by this phase.
 The global totals rose to 97.56 / 93.39 / 98.58 / 98.74, above the 0.2.0 floors.
 
-## Phase 6 - devtools depth (deferred, sketch)
+## Phase 6 - devtools depth
 
-Per-entry detail (data preview, timings, observers, retry history) and actions
-(invalidate, refetch, cancel, remove, set stale). The entry point must stay under
-15 KB gzip and stay absent from a bundle that does not import it, both already
-asserted by `check:dist`. The one invariant to preserve is the reason the panel
-works at all: nothing under `/devtools` may write a signal from a
-`subscribeChanges` listener, because those fire inside a `computed`.
+### Scope, and what it is not
+
+Phase 6 turns the existing table into a panel that answers the questions a cache bug
+actually raises: _what is this value, when did it last run, why did it run again, who
+is watching it, and where did it come from?_ It adds per-entry detail and per-entry
+actions. It does not add routing, a timeline, persistence of its own state, or polling.
+
+The entry point remains a separate bundle. Nothing in the core imports it, and the
+production demo still does not: that demo is the zero-cost proof `check:dist` relies
+on, so adding the panel to it would weaken the check rather than improve the demo. The
+working example for this phase is a dedicated `devtools` probe,
+`projects/probe/src/main-devtools.ts`, which renders `<ngsr-devtools />` and is built
+with the other probes. The `full` probe remains panel-free so its delta stays a
+core-and-persist measurement.
+
+### Core additions: metadata the panel cannot reconstruct
+
+The panel already reads entry signals. Four things it cannot reconstruct live in the
+entry, because they are history rather than current state:
+
+| Addition        | Shape                          | Why it cannot live in `/devtools`                                                       |
+| --------------- | ------------------------------ | --------------------------------------------------------------------------------------- |
+| `fetchHistory`  | getter, last 10 `FetchAttempt` | Start/duration/outcome are only known when the attempt starts and settles.              |
+| `retryHistory`  | getter, last 10 `RetryEvent`   | The retry callback is inside the entry's `withRetry`.                                   |
+| `seeded`        | getter, boolean                | The entry knows whether its value came from `seed`/`restore`; the panel only sees data. |
+| `observerNames` | getter, one entry per observer | `subscribe()` is where a handle's `debugName` arrives.                                  |
+
+`FetchAttempt` is `{ startedAt, durationMs, outcome: 'success' | 'error' | 'aborted' }`.
+`RetryEvent` is `{ at, attempt }`, recorded only when a retry is actually scheduled:
+an offline wait spends no attempt, so it records nothing. Both are capped at ten and
+keep the most recent entries. The history is plain arrays, not signals. The snapshot
+already reads `updatedAt`, `isFetching` and `retryAttempt`, and every write that appends
+history also changes one of those, so a `computed` re-runs without a fifth signal per
+entry. Aborts do not move `updatedAt`, but they flip `isFetching`, which the snapshot
+reads. This keeps the per-entry core cost to one `Date.now()` and two small pushes per
+fetch, plus a token for named observers.
+
+`seeded` becomes `false` on a successful fetch or a local write: after either, the
+current value did not come from the snapshot. `restore()` sets it back to `true` for a
+value that did. A seeded entry that refetches therefore stops claiming to be seeded,
+which is the honest reading of "where did this value come from".
+
+The observer token is created in `subscribe(gcTime, debugName?)` and removed in the
+returned release. `observerCount` stays the exact number; `observerNames` maps each
+handle to its `debugName` or `'anonymous'`, so two handles on one key can be told apart
+when they were given names.
+
+### Devtools surface
+
+`DevtoolsEntry` keeps every existing field and adds:
+
+```ts
+readonly kind: 'http' | 'query' | undefined;  // which plan the entry would run
+readonly seeded: boolean;
+readonly observerNames: readonly string[];
+readonly attempts: readonly FetchAttempt[];   // newest first
+readonly retries: readonly RetryEvent[];      // newest first
+readonly data: unknown;                       // the reference, for the preview
+readonly preview: string | undefined;         // only when requested
+readonly size: number | undefined;            // JSON character count
+```
+
+`SnapshotOptions` gains `preview?: boolean` (default `false`). When false the snapshot
+does no serialization at all. The panel asks for previews only while it is open, so a
+closed panel costs nothing for a large payload. The preview is capped at 200 characters
+with an ellipsis; `size` reports the full JSON length so the cap is visible rather than
+silent. Circular or unserializable values produce `[unserializable]` instead of throwing.
+
+`QueryDevtools` gains `isRestoring` (read from `RESTORE_GATE`) and five actions that
+take a `DevtoolsEntry`: `invalidate`, `refetch`, `cancel`, `markStale`, `remove`.
+Invalidate/refetch/cancel use `QueryClient` and therefore keep its by-key semantics
+(the key and its children); `markStale` marks the exact entry; `remove` is exact, via a
+new `QueryCache.removeExact(key)` — removing a child because its parent prefix matched
+would be a surprising thing for a per-row button to do.
+
+The panel keeps its five columns and gains an actions column. Each row gets a
+`details` toggle that expands a second row (same `@for`, two root elements) containing
+the preview, size, plan kind, seed origin, observer names, the last attempts and the
+retry events. Buttons are plain `<button type="button">`; actions that need a plan are
+disabled when `hasPlan` is false. The header adds `(restoring)` while the gate is busy,
+next to the existing `(offline)`, `(loading)` and staging labels.
+
+### Rejected alternatives
+
+- **Put the history in `/devtools` and subscribe to entry events.** A per-entry event
+  stream would keep the core smaller, but it needs a listener registry, an event type
+  and a shadow history in the panel, and it makes the panel the only consumer of a
+  public API. The plain getters are less machinery and are useful to tests as well.
+- **Always serialize previews.** `JSON.stringify` on every snapshot is the one cost
+  that scales with payload size, and the header reads the snapshot even when the panel
+  is collapsed. Gating on `isOpen()` keeps the common case free.
+- **Add the panel to the production demo.** Tempting for demonstration, but it breaks
+  the one bundle assertion that proves the entry point is opt-in. The dedicated
+  `devtools` probe is the demonstration instead.
+- **Poll for timings.** Every value the panel shows is either a signal or history
+  appended from a signal-producing path. There is no interval, and the existing
+  `subscribeChanges` microtask rule stands: nothing under `/devtools` writes a signal
+  inside that listener.
+- **`remove` by prefix.** Prefix removal is right for a debug "trim" and wrong for a
+  row. The exact method is one map delete plus the existing `destroy()`.
+
+### Budget, before implementation
+
+No change is proposed to either fixed ceiling. The core target stays **21.5 KB gzip**
+(currently 20.5); the additions are two arrays, four getters and a token, and if the
+measurement exceeds the ceiling the history moves behind a listener instead of shipping
+over budget. The `/devtools` ceiling stays **15 KB** (currently 2.7). `check:dist`
+keeps asserting both, and the README/TanStack comparison gets the depth pass rather
+than a promise.
+
+### As built (2026-10-20)
+
+The fixed ceilings did not move:
+
+| Measurement      | Before       | After        | Ceiling |
+| ---------------- | ------------ | ------------ | ------- |
+| core entry point | 20.5 KB gzip | **20.85 KB** | 21.5 KB |
+| `/devtools`      | 2.7 KB gzip  | **4.01 KB**  | 15 KB   |
+| `/persist`       | 3.7 KB       | 3.74 KB      | 15 KB   |
+
+The panel is about 1.3 KB more than the design estimated, not enough to threaten either
+ceiling. The probe deltas over the no-library control are `request` **+21.44 KB**,
+`keyed` **+21.50 KB**, `full` **+23.49 KB** and the new `devtools` probe **+30.85 KB**.
+Adding the panel to the existing `full` probe was measured first: it raised that probe
+from +23.49 to **+32.00 KB**, which would have made the core comparison unreadable and
+required raising an existing budget. It was reverted. The dedicated probe instead
+isolates the panel and gets a **new 32.5 KB budget** (measured plus about 5%); this is
+an added positive control, not a silent raise of `request`, `keyed` or `full`.
+
+The core additions in the shipped build are 17 export names, of which three are the new
+history types (`FetchAttempt`, `FetchOutcome`, `RetryEvent`); `check:api v0.1.0`
+reports **0 removed**. There are no new runtime dependencies. The panel keeps six
+columns (the original five plus actions), and previews are serialized only while the
+panel is open. Tests and coverage for the phase are recorded in
+`docs/verification.md` §12.

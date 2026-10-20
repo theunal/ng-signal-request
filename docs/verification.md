@@ -413,3 +413,51 @@ cache. The checks below are the ones that would notice if that claim were false.
    first-emission-only, and there is no streaming test because there is no
    streaming feature. The shared key in the demo is a demonstration of the
    mechanism, not a recommendation to mix factories per key.
+
+## 12. Phase 6 record (2026-10-20)
+
+Phase 6 added per-entry history and observer metadata to the core, and a detail/action
+layer to `/devtools`. The checks below are the ones that would notice if the panel were
+reading something the entry did not actually record, or if the entry point stopped being
+opt-in.
+
+| Check                                                | Result                                                                                                                                             |
+| ---------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm verify`                                        | **exit 0** - typecheck, lint, format:check, 593 tests, build, check:types-compat, build:demo, check:dist                                           |
+| Coverage (statements / branches / functions / lines) | 97.66 / 93.48 / 98.63 / 98.8 - above the 0.2.0 floors of 97.16 / 92.73 / 98.02 / 98.52                                                             |
+| New-code coverage                                    | `devtools.ts` **99.22 / 94.68 / 100 / 98.86**; the added `cache-entry` history/seeded/observer paths are exercised by the eight new history tests  |
+| `pnpm check:dist`                                    | core **20.85 KB** gzip; `/devtools` **4.01**; `/persist` 3.74; `/testing` 0.8                                                                      |
+| Probe deltas over the no-library control             | `request` **+21.44 KB**, `keyed` **+21.50 KB**, `full` **+23.49 KB**, `devtools` **+30.85 KB**                                                     |
+| `pnpm check:api v0.1.0`                              | **0 removed**; core 76 -> 93 (17 added, including `FetchAttempt` / `FetchOutcome` / `RetryEvent`); `/devtools` unchanged at 6; `/persist` 21 -> 28 |
+| `pnpm test:e2e`                                      | **3/3 passed** against the rebuilt production demo (the offline suite; no devtools e2e spec)                                                       |
+| Bench, control compared in-run                       | control 0.45 µs/op; subscribe/release 25.66 / 24.27; `createQuery` 4.93 µs/entry; nothing >10% slower                                              |
+
+1. **Both fixed budgets were kept, and the new probe budget is labelled.** Core is
+   20.85 KB against 21.5; `/devtools` is 4.01 against 15. Adding `<ngsr-devtools />`
+   to the existing `full` probe was measured at **+32.00 KB** (from +23.49), so it
+   was reverted rather than raising `full`'s 24 KB budget. A dedicated `devtools`
+   probe was added with its own **32.5 KB** budget (measured +30.85 plus about 5%).
+   It is a positive control, not one of the core tree-shaking comparisons.
+2. **The metadata is history, not a second snapshot.** `fetchHistory` and
+   `retryHistory` are capped at ten, oldest dropped first; `seeded` is cleared by a
+   successful fetch or `setData` and set again by `restore`; `observerNames` is one
+   entry per subscribed handle, with `'anonymous'` when no `debugName` was given.
+   The histories are plain arrays, and the panel's `computed` re-runs because every
+   append also moves `updatedAt`, `isFetching` or `retryAttempt`.
+3. **The actions say which rule they use.** `invalidate`, `refetch` and `cancel` go
+   through `QueryClient`, so they keep its by-key (prefix) semantics. `markStale` and
+   `remove` are exact to the clicked row; `remove` uses the new
+   `QueryCache.removeExact`, and the existing prefix `remove` is unchanged. The test
+   removes a parent entry and asserts its child survives.
+4. **Preview cost is gated, not merely small.** `snapshotEntries` serializes only
+   when `preview: true`; the service passes that only while `isOpen()` is true. The
+   preview is capped at 200 characters plus an ellipsis, `size` is the full JSON
+   length, and a circular value or a symbol becomes `[unserializable]`. The panel is
+   a JSON preview, not a lazy object inspector; that limitation is in the README.
+5. **What this does not establish.** The devtools panel has unit/template coverage,
+   not an e2e test in a real browser. `observerCount` / `observerNames` are plain
+   getters and can lag by one change-detection pass; the test asserts the value after
+   a settle, not the timing of Angular's render. There is no timeline, no persisted
+   panel state, and no polling. The benchmark is one run on this machine: the
+   control and the history code are both at the harness's noise floor, so it supports
+   "nothing is flagged", not a claim of a precise constant.

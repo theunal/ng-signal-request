@@ -22,8 +22,20 @@ import {
   type Signal,
   type WritableSignal,
 } from '@angular/core';
-import { QueryCache, formatKey, type CacheEntry, type QueryKeyFilter } from 'ng-signal-request';
+import {
+  QueryCache,
+  QueryClient,
+  RESTORE_GATE,
+  formatKey,
+  type CacheEntry,
+  type FetchAttempt,
+  type QueryKeyFilter,
+  type RetryEvent,
+} from 'ng-signal-request';
 import { OnlineManager } from 'ng-signal-request';
+
+/** How much of a value the expanded row shows before the preview is cut. */
+const PREVIEW_LIMIT = 200;
 
 /**
  * What the panel shows for one entry.
@@ -78,6 +90,25 @@ export interface DevtoolsEntry {
    * until the connection comes back.
    */
   readonly paused: boolean;
+  /** Which factory registered the stored plan, or `undefined` before the first registration. */
+  readonly kind: 'http' | 'query' | undefined;
+  /** Whether the current value came from a seed / transfer rather than a fetch or local write. */
+  readonly seeded: boolean;
+  /** One entry per subscribed handle: its `debugName`, or `'anonymous'`. */
+  readonly observerNames: readonly string[];
+  /** The last settled fetches, newest first. */
+  readonly attempts: readonly FetchAttempt[];
+  /** The last scheduled retries, newest first. */
+  readonly retries: readonly RetryEvent[];
+  /**
+   * The current value, by reference. The panel turns this into a preview only when the row is
+   * expanded; carrying the reference is free, stringifying it is not.
+   */
+  readonly data: unknown;
+  /** A size-capped rendering of {@link data}, only when {@link SnapshotOptions.preview} is set. */
+  readonly preview: string | undefined;
+  /** JSON character count of {@link data}, or `undefined` when it cannot be serialized. */
+  readonly size: number | undefined;
 }
 
 /**
@@ -98,6 +129,11 @@ export interface SnapshotOptions {
    * rather than mocking the clock.
    */
   readonly now?: number;
+  /**
+   * Serialize each value into a size-capped preview. Off by default: a large payload should not be
+   * stringified just because a panel is closed, and the panel asks for this only while it is open.
+   */
+  readonly preview?: boolean;
 }
 
 /**
@@ -113,10 +149,10 @@ export function snapshotEntries(
 ): readonly DevtoolsEntry[] {
   const now = options.now ?? Date.now();
   const entries = options.filter === undefined ? cache.all() : cache.matching(options.filter);
-  return entries.map((entry) => describe(entry, now));
+  return entries.map((entry) => describe(entry, now, options.preview === true));
 }
 
-function describe(entry: CacheEntry, now: number): DevtoolsEntry {
+function describe(entry: CacheEntry, now: number, withPreview: boolean): DevtoolsEntry {
   const error = entry.error();
   const data = entry.data();
   const local = entry.local();
@@ -126,6 +162,7 @@ function describe(entry: CacheEntry, now: number): DevtoolsEntry {
   // Prefer the moment the data landed; fall back to when the attempt started, so a first load that
   // is still in flight is not reported as infinitely old.
   const since = dataUpdatedAt === 0 ? updatedAt : dataUpdatedAt;
+  const preview = withPreview ? previewOf(data) : undefined;
 
   const status: DevtoolsStatus = error
     ? 'error'
@@ -160,6 +197,45 @@ function describe(entry: CacheEntry, now: number): DevtoolsEntry {
     statusCode: entry.statusCode(),
     error: error?.message,
     paused: entry.paused(),
+    kind: entry.planKind,
+    seeded: entry.seeded,
+    observerNames: entry.observerNames,
+    // Newest first is what a panel reads: the last attempt is the interesting one. The entry keeps
+    // the history oldest-first so the cap can drop from the front without moving the array.
+    attempts: [...entry.fetchHistory].reverse(),
+    retries: [...entry.retryHistory].reverse(),
+    data,
+    preview: preview?.text,
+    size: preview?.size,
+  };
+}
+
+/**
+ * A preview that never throws and never grows without a bound.
+ *
+ * `JSON.stringify` is the cost this function exists to defer. A circular payload, or one with a
+ * getter that throws, is a normal thing to find in a cache, so both become a label rather than an
+ * exception escaping a debugging tool.
+ */
+function previewOf(
+  value: unknown,
+): { readonly text: string; readonly size: number | undefined } | undefined {
+  if (value === undefined) return undefined;
+
+  let text: string;
+  try {
+    // `JSON.stringify` types its result as `string`, but returns `undefined` for a function or a
+    // symbol at runtime. Keep the cast honest instead of calling `String()` on an object.
+    const json = JSON.stringify(value) as string | undefined;
+    if (json === undefined) return { text: '[unserializable]', size: undefined };
+    text = json;
+  } catch {
+    return { text: '[unserializable]', size: undefined };
+  }
+
+  return {
+    text: text.length > PREVIEW_LIMIT ? `${text.slice(0, PREVIEW_LIMIT)}…` : text,
+    size: text.length,
   };
 }
 
@@ -182,7 +258,16 @@ function describe(entry: CacheEntry, now: number): DevtoolsEntry {
 @Injectable({ providedIn: 'root' })
 export class QueryDevtools {
   private readonly cache = inject(QueryCache);
+  private readonly client = inject(QueryClient);
   private readonly injector = inject(Injector);
+
+  /**
+   * Whether persistence is still restoring.
+   *
+   * Read through `RESTORE_GATE`, the same seam the core uses to hold a fetch, so the marker cannot
+   * disagree with the ordering it is describing.
+   */
+  readonly isRestoring: Signal<boolean> = inject(RESTORE_GATE).isRestoring;
 
   /**
    * The library's view of connectivity.
@@ -236,7 +321,9 @@ export class QueryDevtools {
     // Read first so a new or collected entry re-runs this; the snapshot itself then reads each
     // entry's signals, which is what makes state changes flow through without polling.
     this.version();
-    return snapshotEntries(this.cache);
+    // Serialization is the one cost that scales with the payload, so it is paid only while somebody
+    // is looking at the table. Reading `isOpen` also makes opening the panel recompute the snapshot.
+    return snapshotEntries(this.cache, { preview: this.isOpen() });
   });
 
   /** Total number of cached entries. */
@@ -283,6 +370,42 @@ export class QueryDevtools {
 
   toggle(): void {
     this.isOpen.update((open) => !open);
+  }
+
+  /**
+   * Marks the entry's key — and its children, like `QueryClient.invalidate` — stale and refetches
+   * the entries that are currently watched. Returns how many entries matched.
+   */
+  invalidate(entry: DevtoolsEntry): number {
+    return this.client.invalidate(entry.key);
+  }
+
+  /** Refetches the entry's key and children without marking them stale. */
+  refetch(entry: DevtoolsEntry): number {
+    return this.client.refetch(entry.key);
+  }
+
+  /** Aborts whatever is in flight for the entry's key and children. */
+  cancel(entry: DevtoolsEntry): number {
+    return this.client.cancel(entry.key);
+  }
+
+  /**
+   * Marks **this row's entry** stale without touching its children and without sending a request.
+   * The next observer that mounts will fetch it.
+   */
+  markStale(entry: DevtoolsEntry): void {
+    this.cache.peek(entry.key)?.markInvalidated();
+  }
+
+  /**
+   * Removes **this row's entry**, not every entry under its prefix.
+   *
+   * Returns whether the entry was still there when the click landed, which is the honest answer for
+   * a row that may already have been collected.
+   */
+  remove(entry: DevtoolsEntry): boolean {
+    return this.cache.removeExact(entry.key);
   }
 
   /** Prints the current snapshot as a table. One shot; nothing is subscribed. */
@@ -360,6 +483,11 @@ export class QueryDevtools {
         @if (!devtools.online()) {
           <span class="offline" title="the browser reports no connection">(offline)</span>
         }
+        @if (devtools.isRestoring()) {
+          <span class="restoring" title="a persisted snapshot is still being restored"
+            >(restoring)</span
+          >
+        }
       </button>
 
       @if (devtools.isOpen()) {
@@ -371,6 +499,7 @@ export class QueryDevtools {
               <th scope="col">obs</th>
               <th scope="col">fetches</th>
               <th scope="col">age</th>
+              <th scope="col">actions</th>
             </tr>
           </thead>
           <tbody>
@@ -389,10 +518,78 @@ export class QueryDevtools {
                 <td>{{ entry.observers }}</td>
                 <td>{{ entry.fetchCount }}</td>
                 <td>{{ formatAge(entry.ageMs) }}</td>
+                <td class="actions">
+                  <button
+                    type="button"
+                    (click)="toggleDetails(entry.hash)"
+                    [attr.aria-expanded]="isExpanded(entry.hash)"
+                  >
+                    {{ isExpanded(entry.hash) ? 'hide' : 'details' }}
+                  </button>
+                  <button type="button" (click)="devtools.invalidate(entry)">invalidate</button>
+                  <button
+                    type="button"
+                    (click)="devtools.refetch(entry)"
+                    [disabled]="!entry.hasPlan"
+                  >
+                    refetch
+                  </button>
+                  <button
+                    type="button"
+                    (click)="devtools.cancel(entry)"
+                    [disabled]="entry.status !== 'loading'"
+                  >
+                    cancel
+                  </button>
+                  <button type="button" (click)="devtools.markStale(entry)">stale</button>
+                  <button type="button" (click)="devtools.remove(entry)">remove</button>
+                </td>
               </tr>
+              @if (isExpanded(entry.hash)) {
+                <tr class="details">
+                  <td colspan="6">
+                    <div class="meta">
+                      plan {{ entry.kind ?? '—' }} · seeded {{ entry.seeded ? 'yes' : 'no' }} ·
+                      observers
+                      {{ entry.observerNames.length > 0 ? entry.observerNames.join(', ') : 'none' }}
+                    </div>
+                    @if (entry.preview !== undefined) {
+                      <pre class="preview">{{ entry.preview }}</pre>
+                      @if (entry.size !== undefined) {
+                        <div class="size">{{ entry.size }} chars</div>
+                      }
+                    } @else {
+                      <div class="muted">no value</div>
+                    }
+                    @if (entry.attempts.length > 0) {
+                      <div class="history">
+                        <strong>attempts</strong>
+                        <ol>
+                          @for (attempt of entry.attempts; track $index) {
+                            <li>
+                              {{ formatTime(attempt.startedAt) }} · {{ attempt.durationMs }}ms ·
+                              {{ attempt.outcome }}
+                            </li>
+                          }
+                        </ol>
+                      </div>
+                    }
+                    @if (entry.retries.length > 0) {
+                      <div class="history">
+                        <strong>retries</strong>
+                        <ol>
+                          @for (retry of entry.retries; track $index) {
+                            <li>attempt {{ retry.attempt }} · {{ formatTime(retry.at) }}</li>
+                          }
+                        </ol>
+                      </div>
+                    }
+                  </td>
+                </tr>
+              }
             } @empty {
               <tr>
-                <td colspan="5">no cached queries</td>
+                <td colspan="6">no cached queries</td>
               </tr>
             }
           </tbody>
@@ -426,6 +623,10 @@ export class QueryDevtools {
     .ngsr-devtools .offline {
       color: #b00020;
     }
+    .ngsr-devtools .restoring {
+      margin-left: 0.35rem;
+      color: #0b5fa5;
+    }
     .ngsr-devtools .paused {
       margin-left: 0.35rem;
       color: #0b5fa5;
@@ -441,6 +642,31 @@ export class QueryDevtools {
       border-top: 1px solid #eee;
       white-space: nowrap;
     }
+    .ngsr-devtools .actions button {
+      margin-right: 0.2rem;
+      font: inherit;
+    }
+    .ngsr-devtools tr.details td {
+      white-space: normal;
+      background: #fafafa;
+    }
+    .ngsr-devtools .meta,
+    .ngsr-devtools .size,
+    .ngsr-devtools .muted {
+      color: #555;
+    }
+    .ngsr-devtools .preview {
+      margin: 0.25rem 0 0;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+    .ngsr-devtools .history {
+      margin-top: 0.35rem;
+    }
+    .ngsr-devtools .history ol {
+      margin: 0.1rem 0 0;
+      padding-left: 1.4rem;
+    }
     .ngsr-devtools tr.loading td {
       color: #b26a00;
     }
@@ -451,6 +677,22 @@ export class QueryDevtools {
 })
 export class DevtoolsPanel {
   protected readonly devtools = inject(QueryDevtools);
+
+  /** Which rows are showing their details. A local UI concern, so it stays out of the service. */
+  protected readonly expanded = signal<ReadonlySet<string>>(new Set<string>());
+
+  protected isExpanded(hash: string): boolean {
+    return this.expanded().has(hash);
+  }
+
+  protected toggleDetails(hash: string): void {
+    this.expanded.update((current) => {
+      const next = new Set(current);
+      if (next.has(hash)) next.delete(hash);
+      else next.add(hash);
+      return next;
+    });
+  }
 
   /** `" / 500"`, or nothing when the cache is unbounded. Templates have no `Infinity`. */
   protected capLabel(): string {
@@ -470,5 +712,12 @@ export class DevtoolsPanel {
     if (ms < 1000) return `${ms}ms`;
     if (ms < 60_000) return `${Math.round(ms / 1000)}s`;
     return `${Math.round(ms / 60_000)}m`;
+  }
+
+  /** A wall-clock time without a locale-dependent date, so the panel reads the same everywhere. */
+  protected formatTime(at: number): string {
+    const date = new Date(at);
+    const pad = (value: number): string => String(value).padStart(2, '0');
+    return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
   }
 }

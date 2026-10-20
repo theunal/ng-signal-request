@@ -454,6 +454,27 @@ export class QueryCache {
   }
 
   /**
+   * Removes **exactly** this key, not its children.
+   *
+   * `remove(['users'])` is a prefix operation because that is what invalidation and "trim the
+   * cache" mean. A devtools row is a single entry, so it needs the other rule: deleting
+   * `['users', 1]` must not take `['users', 2]` with it. Returns whether the entry existed.
+   */
+  removeExact(key: QueryKey): boolean {
+    const normalized = normalizeKey(key);
+    const entry = this.entries.get(normalized.hash);
+    if (entry === undefined) return false;
+    this.entries.delete(normalized.hash);
+    this.recency.delete(normalized.hash);
+    this.settleDetachers.get(normalized.hash)?.();
+    this.settleDetachers.delete(normalized.hash);
+    entry.destroy();
+    this.notify();
+    this.notifyActivity();
+    return true;
+  }
+
+  /**
    * Number of live entries. Asserted by the leak tests.
    *
    * Not the number `maxEntries` compares against — that one includes {@link pendingSeeds}. This

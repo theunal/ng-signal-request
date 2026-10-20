@@ -43,6 +43,35 @@ export interface SeedValue<T> {
   readonly dataUpdatedAt: number;
 }
 
+/** How a fetch ended. `aborted` is a cancel, not a failure, but it is still an attempt. */
+export type FetchOutcome = 'success' | 'error' | 'aborted';
+
+/**
+ * One settled fetch on an entry, for the devtools panel.
+ *
+ * A fetch can contain retries; `durationMs` is the total wall time of the attempt that
+ * `run()` was waiting on, and the retries are reported separately by {@link RetryEvent}.
+ */
+export interface FetchAttempt {
+  /** Epoch ms when the fetch started — the same instant `updatedAt` records. */
+  readonly startedAt: number;
+  /** Wall time until the attempt settled, in ms. */
+  readonly durationMs: number;
+  /** How the attempt ended. An abort is recorded, because it was still an attempt. */
+  readonly outcome: FetchOutcome;
+}
+
+/** One scheduled retry: the attempt number the retry policy counted and when it was armed. */
+export interface RetryEvent {
+  /** Epoch ms when the retry was scheduled (not when it eventually ran). */
+  readonly at: number;
+  /** 1-based retry number, the same value `retryAttempt()` reports while it is pending. */
+  readonly attempt: number;
+}
+
+/** How many history rows an entry keeps. Enough to see a pattern, small enough to ignore. */
+const HISTORY_LIMIT = 10;
+
 /** Fields both kinds of plan share. */
 export interface BaseFetchPlan<T> {
   readonly structuralSharing: StructuralSharingFn<T>;
@@ -170,6 +199,22 @@ export class CacheEntry<T = unknown> {
   private destroyed = false;
 
   /**
+   * Devtools history, newest last.
+   *
+   * Plain arrays rather than signals: the snapshot already reads `updatedAt`, `isFetching` and
+   * `retryAttempt`, and every append happens on a path that moves one of them. A signal per entry
+   * would be a per-entry cost paid by applications that never open the panel.
+   */
+  private readonly attempts: FetchAttempt[] = [];
+  private readonly retries: RetryEvent[] = [];
+  /** Epoch ms of the attempt in flight, or `0` when nothing is running. */
+  private attemptStartedAt = 0;
+  /** Whether the current value came from a seed/restore rather than a fetch or a local write. */
+  private seededValue: boolean;
+  /** One token per subscribed handle, so `observerNames` can identify them without a back-reference. */
+  private readonly observerTokens = new Set<{ readonly name: string | undefined }>();
+
+  /**
    * The held fetch, when the entry is paused before its first attempt.
    *
    * Held as a promise rather than as a plan-and-a-flag so the existing dedup keeps working: `inFlight`
@@ -242,6 +287,7 @@ export class CacheEntry<T = unknown> {
     // default, so a restored entry is an ordinary entry that happens to have old data: it is not
     // `local`, it is not `invalidated`, and `fetchCount` is 0 because nothing has hit the network.
     const restoredAt = seed?.dataUpdatedAt ?? 0;
+    this.seededValue = seed !== undefined;
     this.data = signal<T | undefined>(seed?.value);
     this.error = signal<Error | undefined>(undefined);
     this.errorTimeout = signal<number | undefined>(undefined);
@@ -270,11 +316,16 @@ export class CacheEntry<T = unknown> {
    * read on the way *down* to zero observers — the moment when there is no handle
    * left to ask for it.
    *
+   * `debugName` is optional and exists only for `observerNames`; it does not affect the count,
+   * the gc timer or anything the request does.
+   *
    * Calling the returned function twice is a no-op, so a handle can hand it to a
    * `DestroyRef` without tracking whether it already ran.
    */
-  subscribe(gcTime: number): () => void {
+  subscribe(gcTime: number, debugName?: string): () => void {
     if (this.destroyed) return noop;
+    const token = { name: debugName };
+    this.observerTokens.add(token);
     this.observers += 1;
     this.gcMs = gcTime;
     // A returning subscriber means the entry is wanted again, so the countdown stops.
@@ -285,6 +336,7 @@ export class CacheEntry<T = unknown> {
     return () => {
       if (released) return;
       released = true;
+      this.observerTokens.delete(token);
       this.release();
     };
   }
@@ -333,6 +385,60 @@ export class CacheEntry<T = unknown> {
   /** Observer count. Surfaced by the devtools panel and asserted by the leak tests. */
   get observerCount(): number {
     return this.observers;
+  }
+
+  /**
+   * The `debugName` of every subscribed handle, one entry per handle.
+   *
+   * Named handles are identified; anonymous ones appear as `'anonymous'`, because the panel should
+   * say *how many* are watching even when the application named none. This is a plain getter, like
+   * {@link observerCount}: subscription bookkeeping is not something a template should drive change
+   * detection from, and the devtools snapshot already re-runs on the entry's signals.
+   */
+  get observerNames(): readonly string[] {
+    return [...this.observerTokens].map((token) => token.name ?? 'anonymous');
+  }
+
+  /**
+   * The last {@link HISTORY_LIMIT} settled fetches, oldest first.
+   *
+   * A plain getter for the same reason as {@link observerNames}; read it next to `updatedAt` in a
+   * `computed` to make a panel live. The returned array is the entry's own: treat it as read-only.
+   */
+  get fetchHistory(): readonly FetchAttempt[] {
+    return this.attempts;
+  }
+
+  /** The last {@link HISTORY_LIMIT} scheduled retries, oldest first. */
+  get retryHistory(): readonly RetryEvent[] {
+    return this.retries;
+  }
+
+  /**
+   * Whether the value on screen came from a persisted seed / transfer rather than a fetch or a local
+   * write. Cleared by a successful fetch or `setData`, set again by `restore`.
+   */
+  get seeded(): boolean {
+    return this.seededValue;
+  }
+
+  private recordAttempt(outcome: FetchOutcome): void {
+    if (this.attemptStartedAt === 0) return;
+    const startedAt = this.attemptStartedAt;
+    // Consume the start time: a settled attempt must never be recorded twice, even if a late abort
+    // reaches `finish` after a newer fetch has already reset the field.
+    this.attemptStartedAt = 0;
+    this.attempts.push({
+      startedAt,
+      durationMs: Math.max(0, Date.now() - startedAt),
+      outcome,
+    });
+    if (this.attempts.length > HISTORY_LIMIT) this.attempts.shift();
+  }
+
+  private recordRetry(attempt: number): void {
+    this.retries.push({ at: Date.now(), attempt });
+    if (this.retries.length > HISTORY_LIMIT) this.retries.shift();
   }
 
   /** Entries with no observer left, which is when the gc timer is armed. */
@@ -518,11 +624,13 @@ export class CacheEntry<T = unknown> {
   }
 
   private start(plan: EntryPlan<T>): Promise<T | undefined> {
+    const now = Date.now();
+    this.attemptStartedAt = now;
     this.isFetching.set(true);
     this.error.set(undefined);
     this.errorTimeout.set(undefined);
     this.retryAttempt.set(0);
-    this.updatedAt.set(Date.now());
+    this.updatedAt.set(now);
     this.fetchCount.update((n) => n + 1);
 
     const promise = this.execute(plan);
@@ -569,6 +677,7 @@ export class CacheEntry<T = unknown> {
           // Reporting the attempt here is what keeps `retryAttempt()` honest
           // without a separate supervisor.
           this.retryAttempt.set(attemptNo);
+          this.recordRetry(attemptNo);
           return timer(delay);
         },
       }),
@@ -595,12 +704,13 @@ export class CacheEntry<T = unknown> {
   } {
     let settled = false;
 
-    const finish = (): void => {
+    const finish = (outcome: FetchOutcome): void => {
       settled = true;
       this.subscription = undefined;
       this.abortCurrent = undefined;
       this.isFetching.set(false);
       this.retryAttempt.set(0);
+      this.recordAttempt(outcome);
       // A settled call has no progress left to report; leaving it behind would
       // pin a `<progress>` element at its final value.
       this.progress.set(undefined);
@@ -608,7 +718,7 @@ export class CacheEntry<T = unknown> {
 
     const fail = (err: Error): void => {
       if (settled) return;
-      finish();
+      finish('error');
       this.error.set(err);
       this.errorTimeout.set(timeout);
       this.updatedAt.set(Date.now());
@@ -625,7 +735,7 @@ export class CacheEntry<T = unknown> {
         fail(toError(e));
         return;
       }
-      finish();
+      finish('success');
 
       // Sharing runs *before* the write: an unchanged response must not touch
       // the signal at all, or every consumer re-renders for nothing.
@@ -637,6 +747,7 @@ export class CacheEntry<T = unknown> {
         this.dataUpdatedAt.set(now);
       }
       this.updatedAt.set(now);
+      this.seededValue = false;
       this.invalidated.set(false);
       this.local.set(false);
       this.notifySettle({ ok: true, value: shared });
@@ -648,7 +759,7 @@ export class CacheEntry<T = unknown> {
       fail,
       abort(error: Error = new RequestCancelledError()): void {
         if (settled) return;
-        finish();
+        finish('aborted');
         reject(error);
       },
       get settled(): boolean {
@@ -833,6 +944,7 @@ export class CacheEntry<T = unknown> {
     this.updatedAt.set(now);
     this.invalidated.set(false);
     this.local.set(true);
+    this.seededValue = false;
     this.error.set(undefined);
     return value;
   }
@@ -864,6 +976,7 @@ export class CacheEntry<T = unknown> {
     this.error.set(undefined);
     this.errorTimeout.set(undefined);
     this.invalidated.set(false);
+    this.seededValue = true;
   }
 
   /**

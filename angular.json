@@ -85,6 +85,10 @@
             "full": {
               "browser": "projects/probe/src/main-full.ts",
               "outputPath": "dist/probes/full"
+            },
+            "devtools": {
+              "browser": "projects/probe/src/main-devtools.ts",
+              "outputPath": "dist/probes/devtools"
             }
           },
           "defaultConfiguration": "none"

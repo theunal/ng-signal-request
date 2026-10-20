@@ -92,10 +92,14 @@ const PROBE_BUDGETS = new Map([
   ['request', 22.5],
   ['keyed', 22.5],
   ['full', 24],
+  // Not a core tree-shaking probe: this app renders `<ngsr-devtools />`, so its delta is the
+  // positive control for the secondary entry point. Kept in the same harness so the panel has a
+  // measured budget instead of only a unit test.
+  ['devtools', 32.5],
 ]);
 
 function checkProbeSizes() {
-  const names = ['none', 'request', 'keyed', 'full'];
+  const names = ['none', 'request', 'keyed', 'full', 'devtools'];
   const sizes = new Map();
   const text = new Map();
   for (const name of names) {
@@ -126,7 +130,7 @@ function checkProbeSizes() {
 
   const base = sizes.get('none');
   notes.push(`probe none ${base.toFixed(2)} KB gzip (control)`);
-  for (const name of ['request', 'keyed', 'full']) {
+  for (const name of ['request', 'keyed', 'full', 'devtools']) {
     const size = sizes.get(name);
     const delta = size - base;
     notes.push(`probe ${name} ${size.toFixed(2)} KB gzip, +${delta.toFixed(2)} over control`);

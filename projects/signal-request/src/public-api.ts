@@ -75,8 +75,11 @@ export { IDLE_RESTORE_GATE, RESTORE_GATE, type RestoreGate } from './lib/restore
 export {
   CacheEntry,
   type EntryPlan,
+  type FetchAttempt,
+  type FetchOutcome,
   type FetchPlan,
   type QueryFetchPlan,
+  type RetryEvent,
   type SeedValue,
   type SettleOutcome,
 } from './lib/cache/cache-entry';

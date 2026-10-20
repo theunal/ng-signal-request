@@ -311,7 +311,7 @@ export function buildCachedHandleEngine<T, R, TParams>(
         if (previous !== undefined) lastGood.set(previous);
 
         release?.();
-        release = current.entry.subscribe(gcTime);
+        release = current.entry.subscribe(gcTime, config.debugName);
         removeSettleListener?.();
         removeSettleListener = current.entry.addSettleListener(settleListener);
         // Registered on every evaluation, so a cache-driven refetch always rebuilds the request

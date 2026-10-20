@@ -395,9 +395,37 @@ the phase does not touch. Nothing moves in the slower direction by more than the
 control, so **nothing is flagged**.
 
 The two new numbers say what the design claims. A function source costs about
-**4.7–4.9 µs** end to end — the `defer`, the `from`, one entry write and a promise
-resume — which is in the same range as the cached subscribe/release loops and two
+**4.7-4.9 µs** end to end - the `defer`, the `from`, one entry write and a promise
+resume - which is in the same range as the cached subscribe/release loops and two
 orders of magnitude below a network round-trip. A join costs **0.04 µs**: it is the
 `if (this.inFlight) return this.inFlight` branch, and the 20,000-call loop asserts
 that the source ran exactly once. The dedup is not a second cache or a listener
 registry; it is the entry's existing in-flight promise.
+
+## Phase 6 - metadata is not a hot path (2026-10-20)
+
+Phase 6 adds one `Date.now()` and one array push when a fetch settles, one more
+`Date.now()` and push when a retry is scheduled, and one small object per
+subscriber. It adds no work per render, no polling, and no serialization unless the
+panel is open. The existing cases are therefore the control for it, not evidence
+about it; `pnpm bench` on this tree:
+
+| Case                                       | This run      |
+| ------------------------------------------ | ------------- |
+| `resolve`, warm key - **the control**      | 0.45 µs/op    |
+| `resolve` + `subscribe` + release, no cap  | 25.66 µs/op   |
+| `resolve` + `subscribe` + release, cap 100 | 24.27 µs/op   |
+| At-cap inserts, cap 100 pre-warmed         | 18.99 µs/op   |
+| `seed`, no cap                             | 0.69 µs/op    |
+| `seed`, cap 100                            | 1.56 µs/op    |
+| `seed` into an existing entry              | 0.48 µs/op    |
+| `createQuery run, promise source`          | 4.93 µs/entry |
+| `createQuery dedup, joined fetch`          | 0.03 µs/entry |
+
+The control was 0.45 µs/op, faster than the 0.52-0.60 seen on earlier runs - the
+machine, not a Phase 6 change. The subscribe/release rows (25.66 and 24.27) sit
+inside the 22.90-30.22 range Phase 4 recorded, and at-cap inserts are faster than
+that run. `createQuery` moved from 4.71-4.88 to 4.93 µs/entry, about +1-4%, less
+than the control moved between runs and far below the 10% flag. This is one run and
+is not a precision claim; nothing is flagged, and the Phase 6 code itself is a
+`Date.now()` plus a shift-capped push, which is below this harness's resolution.

@@ -278,6 +278,39 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   - **The core budget moves from 20 KB to 21.5 KB gzip**, measured at 20.5 KB after
     the feature; the probes measured +21.2 / +21.2 / +23.0 KB. This is a deliberate,
     recorded budget change, not a silent one (see `docs/design-0.2.md`, Phase 4).
+- **Devtools depth - what is in the entry, where it came from, and what happened.**
+  The panel can now answer a cache bug rather than only list keys.
+  - **Per-entry details.** A `details` toggle expands a row with the current value
+    preview, the full JSON size, the plan kind, whether the value came from a seed or
+    transfer, the observer `debugName`s, the last ten fetch attempts
+    (`startedAt` / `durationMs` / `success` | `error` | `aborted`) and the last ten
+    scheduled retries.
+  - **Previews are opt-in and bounded.** `snapshotEntries(..., { preview: true })`
+    serializes the value; the panel asks for that only while it is open, caps the
+    preview at 200 characters with an ellipsis, reports the full size, and renders a
+    circular or unserializable value as `[unserializable]` instead of throwing.
+  - **Actions.** `QueryDevtools.invalidate`, `refetch`, `cancel`, `markStale` and
+    `remove`. Invalidate/refetch/cancel follow `QueryClient`'s by-key semantics (the
+    key and its children); stale and remove affect exactly the clicked row. Removal
+    uses the new exact `QueryCache.removeExact(key)`; the existing prefix `remove`
+    still means what it did.
+  - **`isRestoring`**, read from `RESTORE_GATE`, and a `(restoring)` header marker
+    beside `(offline)`, so the panel cannot disagree with the gate that holds the
+    first fetch.
+  - **Core metadata the panel cannot reconstruct.** `CacheEntry` gains
+    `fetchHistory`, `retryHistory`, `seeded` and `observerNames` getters, and
+    `subscribe(gcTime, debugName?)` records one token per handle. The public types
+    `FetchAttempt`, `FetchOutcome` and `RetryEvent` describe the history. The
+    histories are plain capped arrays, not signals: the writes that append to them
+    also move `updatedAt`, `isFetching` or `retryAttempt`, so the existing computed
+    snapshot re-runs without a fifth signal per entry. `observerCount` stays exact;
+    `observerNames` returns a `debugName` or `'anonymous'` per subscriber.
+  - **No polling and no new dependency.** Everything is a signal or history appended
+    from a signal-producing path. The production demo still does not import
+    `/devtools`; a dedicated `devtools` probe renders the panel as the positive
+    control, measured at **+30.85 KB** over the no-library control with a new
+    **32.5 KB** probe budget. The core (20.85 KB) and `/devtools` (4.01 KB) ceilings
+    are unchanged at 21.5 / 15 KB. See `docs/design-0.2.md`, Phase 6.
 
 ### Fixed
 

@@ -1150,3 +1150,219 @@ describe('cached request — entry lifecycle edges', () => {
     http.expectNone(() => true);
   });
 });
+
+/**
+ * Devtools metadata that only the entry can know: why a value is there, who is watching it, and
+ * how the last fetches went. These are plain getters rather than signals, so the tests read them
+ * directly and assert the paths that append to them.
+ */
+describe('cached request - entry history', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it('records the duration and outcome of a successful fetch', async () => {
+    const { http, create } = setup();
+    const handle = create(() =>
+      createRequest<User[]>('/users', { key: () => ['users'], refetchOnMount: false }),
+    );
+    await settle();
+    const entry = cache().peek<User[]>(['users'])!;
+
+    advanceClock(250);
+    handle.reload();
+    await settle();
+    advanceClock(250);
+    http.expectOne('/users').flush([{ id: 1, name: 'Ada' }]);
+    await settle();
+
+    expect(entry.fetchHistory).toHaveLength(1);
+    expect(entry.fetchHistory[0]).toMatchObject({
+      durationMs: 250,
+      outcome: 'success',
+    });
+    expect(entry.fetchHistory[0].startedAt).toBeGreaterThan(0);
+    expect(entry.seeded).toBe(false);
+
+    handle.destroy();
+  });
+
+  it('records a failed fetch without turning it into a success', async () => {
+    const { http, create } = setup();
+    const handle = create(() =>
+      createRequest<User[]>('/users', { key: () => ['users'], refetchOnMount: false }),
+    );
+    await settle();
+    const entry = cache().peek<User[]>(['users'])!;
+
+    advanceClock(40);
+    handle.reload();
+    await settle();
+    advanceClock(40);
+    http.expectOne('/users').flush({ message: 'boom' }, { status: 500, statusText: 'Error' });
+    await settle();
+
+    expect(entry.fetchHistory).toHaveLength(1);
+    expect(entry.fetchHistory[0]).toMatchObject({ durationMs: 40, outcome: 'error' });
+
+    handle.destroy();
+  });
+
+  it('records an abort as its own outcome', async () => {
+    const { http, create } = setup();
+    const handle = create(() => createRequest<User[]>('/users', { key: () => ['users'] }));
+    await settle();
+    const entry = cache().peek<User[]>(['users'])!;
+    const request = http.expectOne('/users');
+
+    entry.cancel();
+    await settle();
+
+    expect(request.cancelled).toBe(true);
+    expect(entry.fetchHistory.at(-1)?.outcome).toBe('aborted');
+
+    handle.destroy();
+  });
+
+  it('keeps the last ten attempts, dropping the oldest', async () => {
+    const { http, create } = setup();
+    const handle = create(() =>
+      createRequest<User[]>('/users', { key: () => ['users'], refetchOnMount: false }),
+    );
+    await settle();
+    const entry = cache().peek<User[]>(['users'])!;
+
+    for (let i = 0; i < 11; i++) {
+      handle.reload();
+      await settle();
+      http.expectOne('/users').flush([{ id: i, name: `row-${i}` }]);
+      await settle();
+    }
+
+    // Eleven fetches, ten rows: the panel shows a pattern, not an unbounded log.
+    expect(entry.fetchHistory).toHaveLength(10);
+    expect(entry.fetchHistory.at(-1)?.outcome).toBe('success');
+
+    handle.destroy();
+  });
+
+  it('records retries when they are scheduled, and keeps them after the fetch settles', async () => {
+    vi.useFakeTimers({
+      toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'],
+    });
+    const { http, create } = setup();
+    const handle = create(() =>
+      createRequest<User[]>('/users', {
+        key: () => ['users'],
+        retry: { count: 1, delay: 100 },
+      }),
+    );
+    await settle();
+    const entry = cache().peek<User[]>(['users'])!;
+
+    http.expectOne('/users').flush({}, { status: 503, statusText: 'Unavailable' });
+    await settle();
+    expect(entry.retryHistory).toHaveLength(1);
+    expect(entry.retryHistory[0].attempt).toBe(1);
+    expect(entry.retryAttempt()).toBe(1);
+
+    vi.advanceTimersByTime(100);
+    await settle();
+    http.expectOne('/users').flush([{ id: 1, name: 'Ada' }]);
+    await settle();
+
+    // The retry number resets with the attempt, but the history is what happened, not what is
+    // pending, so it survives the success.
+    expect(entry.retryAttempt()).toBe(0);
+    expect(entry.retryHistory).toHaveLength(1);
+    expect(entry.fetchHistory.at(-1)?.outcome).toBe('success');
+
+    handle.destroy();
+  });
+
+  it('marks a value as seeded until a fetch or a local write replaces it', async () => {
+    const { http, create } = setup();
+    cache().seed(['users'], [{ id: 1, name: 'Ada' }], 100);
+    const handle = create(() =>
+      createRequest<User[]>('/users', {
+        key: () => ['users'],
+        staleTime: Number.POSITIVE_INFINITY,
+        refetchOnMount: false,
+      }),
+    );
+    await settle();
+    const entry = cache().peek<User[]>(['users'])!;
+
+    expect(entry.seeded).toBe(true);
+    handle.reload();
+    await settle();
+    http.expectOne('/users').flush([{ id: 2, name: 'Grace' }]);
+    await settle();
+    expect(entry.seeded).toBe(false);
+
+    // `restore()` is the path an async storage or a transfer-state snapshot takes.
+    entry.restore([{ id: 3, name: 'Lin' }], Date.now() + 1000);
+    expect(entry.seeded).toBe(true);
+    handle.set([{ id: 4, name: 'Edsger' }]);
+    expect(entry.seeded).toBe(false);
+
+    handle.destroy();
+  });
+
+  it('lists observers by debugName, including anonymous handles', async () => {
+    const { createChild } = setup();
+    const a = createChild();
+    const b = createChild();
+    const first = a.create(() =>
+      createRequest<User[]>('/users', {
+        key: () => ['users'],
+        debugName: 'list',
+        refetchOnMount: false,
+      }),
+    );
+    const second = b.create(() =>
+      createRequest<User[]>('/users', {
+        key: () => ['users'],
+        debugName: 'header',
+        refetchOnMount: false,
+      }),
+    );
+    await settle();
+
+    const entry = cache().peek<User[]>(['users'])!;
+    expect(entry.observerCount).toBe(2);
+    expect([...entry.observerNames].sort()).toEqual(['header', 'list']);
+
+    first.destroy();
+    await settle();
+    expect(entry.observerNames).toEqual(['header']);
+
+    // A handle that never chose a name is still visible as an observer.
+    const anonymous = b.create(() =>
+      createRequest<User[]>('/users', { key: () => ['users'], refetchOnMount: false }),
+    );
+    await settle();
+    expect(entry.observerNames).toContain('anonymous');
+
+    anonymous.destroy();
+    second.destroy();
+  });
+
+  it('removeExact() removes one entry without taking its children', async () => {
+    setup();
+    cache().resolve(['users'], 'list');
+    cache().resolve(['users', 1], 'detail');
+    cache().resolve(['users', 2], 'detail');
+
+    expect(cache().removeExact(['users'])).toBe(true);
+    expect(cache().peek(['users'])).toBeUndefined();
+    expect(cache().peek(['users', 1])).toBeDefined();
+    expect(cache().peek(['users', 2])).toBeDefined();
+    expect(cache().removeExact(['users'])).toBe(false);
+
+    // The prefix operation is still available and still does what it always did.
+    expect(cache().remove(['users'])).toBe(2);
+    expect(cache().all()).toHaveLength(0);
+  });
+});

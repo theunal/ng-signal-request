@@ -351,3 +351,53 @@ microtask of bookkeeping rather than a thousand wake-ups.
 The core bundle cost of the offline code is reported separately, in the release
 report and the README's bundle note: it lives in the core entry point, so
 `pnpm check:dist` cannot prove it absent.
+
+## Phase 4 — two `createQuery` cases
+
+Phase 4 adds a second transport (`QueryFetchPlan`) to the same entry, so the
+existing cases are again the control rather than evidence: the cache, the key
+resolution and the seed path did not change. What is new is the cost of turning a
+function's `Promise`/`Observable` into a settled entry, and the dedup that makes a
+second handle join an in-flight query instead of calling the function again.
+
+Both new cases report per operation rather than per 200,000-iteration loop, because
+one of them is inherently a promise chain and the other is a join:
+
+- **`createQuery run, promise source`** — a lazy handle is run 5,000 times
+  sequentially; every `run()` starts a fetch, constructs the `defer`/`from` chain,
+  settles the entry signals and resolves. It measures the whole function-source
+  path, not just a map lookup.
+- **`createQuery dedup, joined fetch`** — one entry has a never-settling query plan
+  in flight; 20,000 further `fetch(plan)` calls must return the same promise and
+  must not call the source again. The assertion counts source calls, so a dedup
+  regression fails rather than merely slows.
+
+Two consecutive runs of the **same Phase 4 tree**, minutes apart:
+
+| Case                                       | Run 1          | Run 2          | Δ (run 1 → 2) |
+| ------------------------------------------ | -------------- | -------------- | ------------- |
+| `resolve`, warm key — **the control**      | 0.56 µs/op     | 0.52 µs/op     | −7%           |
+| `resolve` + `subscribe` + release, no cap  | 30.22 µs/op    | 25.30 µs/op    | −16%          |
+| `resolve` + `subscribe` + release, cap 100 | 23.74 µs/op    | 22.90 µs/op    | −4%           |
+| At-cap inserts, cap 100 pre-warmed         | 21.06 µs/op    | 20.37 µs/op    | −3%           |
+| `reconnect`, 1,000 paused entries          | 17.87 µs/entry | 18.48 µs/entry | +3%           |
+| mutation replay, 1,000 queued calls        | 22.47 µs/entry | 22.01 µs/entry | −2%           |
+| `seed`, no cap                             | 0.72 µs/op     | 0.72 µs/op     | 0%            |
+| `seed`, cap 100                            | 1.47 µs/op     | 1.47 µs/op     | 0%            |
+| `seed` into an existing entry              | 0.47 µs/op     | 0.47 µs/op     | 0%            |
+| **`createQuery run, promise source** (new) | 4.71 µs/entry  | 4.88 µs/entry  | +4%           |
+| **`createQuery dedup, joined fetch** (new) | 0.04 µs/entry  | 0.04 µs/entry  | 0%            |
+
+Read it against the control in the same run, as the rule above requires. The
+control moved −7% between the two runs; the largest movement against it is the
+uncapped subscribe/release row at −16%, in the **faster** direction and on a loop
+the phase does not touch. Nothing moves in the slower direction by more than the
+control, so **nothing is flagged**.
+
+The two new numbers say what the design claims. A function source costs about
+**4.7–4.9 µs** end to end — the `defer`, the `from`, one entry write and a promise
+resume — which is in the same range as the cached subscribe/release loops and two
+orders of magnitude below a network round-trip. A join costs **0.04 µs**: it is the
+`if (this.inFlight) return this.inFlight` branch, and the 20,000-call loop asserts
+that the source ran exactly once. The dedup is not a second cache or a listener
+registry; it is the entry's existing in-flight promise.

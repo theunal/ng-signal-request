@@ -2,9 +2,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { TestBed } from '@angular/core/testing';
 import {
   createMutation,
+  createQuery,
   createRequest,
   OnlineManager,
   provideSignalRequest,
+  type QueryFetchPlan,
 } from '../../public-api';
 import { cache, settle, setup } from '../../../testing/testing';
 
@@ -375,6 +377,77 @@ describe('perf — late seeds', () => {
       expect(c.peek(['late'])?.dataUpdatedAt()).toBe((N - 1) * 2 + 1);
       expect(ms - mid).toBeLessThan((mid - started) * SHAPE_LIMIT);
       expect(usPerOp(ms)).toBeLessThan(CEILING_PER_OP_US);
+    },
+    TIMEOUT_MS,
+  );
+});
+
+/**
+ * The two costs `createQuery` adds to the cached path.
+ *
+ * A query shares the entry machinery, so what is new is (a) turning a function's promise into a
+ * settled entry, and (b) the dedup that makes a second handle join instead of calling the function
+ * again. Both are compared against the same run's ceiling rather than against a number from an
+ * older machine.
+ */
+describe('perf — createQuery', () => {
+  const RUNS = BENCH ? 5_000 : 500;
+  const JOIN = BENCH ? 20_000 : 2_000;
+
+  it(
+    'resolves a Promise source through the entry',
+    async () => {
+      const { create } = setup();
+      const query = create(() =>
+        createQuery<number>(async () => 1, { key: () => ['query-run'], lazy: true }),
+      );
+
+      const started = performance.now();
+      for (let i = 0; i < RUNS; i++) await query.run();
+      const ms = performance.now() - started;
+      reportEach('createQuery run, promise source', ms, RUNS);
+
+      expect(query.fetchCount()).toBe(RUNS);
+      expect((ms * 1000) / RUNS).toBeLessThan(CEILING_PER_OP_US);
+    },
+    TIMEOUT_MS,
+  );
+
+  it(
+    'joining an in-flight query is a promise check, not another source call',
+    () => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      setup([provideSignalRequest({ gcTime: GC })]);
+      const c = cache();
+      const entry = c.resolve<number>(['query-dedup']);
+      entry.subscribe(GC);
+
+      let calls = 0;
+      const never = new Promise<number>(() => undefined);
+      const plan: QueryFetchPlan<number> = {
+        kind: 'query',
+        structuralSharing: (_previous, next) => next,
+        retry: undefined,
+        parse: undefined,
+        run: () => {
+          calls += 1;
+          return never;
+        },
+      };
+
+      const first = entry.fetch(plan);
+      first.catch(() => undefined);
+
+      const started = performance.now();
+      for (let i = 0; i < JOIN; i++) void entry.fetch(plan);
+      const ms = performance.now() - started;
+      reportEach('createQuery dedup, joined fetch', ms, JOIN);
+
+      expect(calls).toBe(1);
+      expect((ms * 1000) / JOIN).toBeLessThan(CEILING_PER_OP_US);
+
+      entry.cancel();
+      c.clear();
     },
     TIMEOUT_MS,
   );

@@ -243,6 +243,41 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   and in order, and no duplicate on a second offline/online flap. Playwright is a
   devDependency, `pnpm test:e2e` is the entry point, and CI runs it as a separate
   `e2e` job — it is not part of `pnpm verify`.
+- **`createQuery(source, options)` — a cached query whose source is a function.**
+  `createRequest` assumes `HttpClient`; a query is for IndexedDB, storage, GraphQL, a
+  WASM call, or an Observable you already have:
+  ```ts
+  const draft = createQuery<string>(async () => localStorage.getItem('draft') ?? '', {
+    key: () => ['draft'],
+    initialValue: '',
+  });
+  ```
+  The source is `(params, ctx) => Promise<T> | Observable<T>`, `ctx` carries
+  `AbortSignal` and the current params, and `key` is required. It is the same cache
+  and the same handle as a keyed `createRequest`: `staleTime`, `gcTime`, dedup,
+  structural sharing, `maxEntries`, `networkMode` / `paused()`, retry, invalidation,
+  `select`, `run` / `reload` / `cancel` / `set` / `update`, `/persist`, SSR and
+  devtools all apply. A keyed `createRequest` and a `createQuery` on one key share
+  one entry and one in-flight call; the most recently registered plan decides how a
+  cache-driven refetch runs, and a dev-mode warning fires once when two kinds
+  disagree (they do not share a data type).
+  - **Aborts are real.** The signal is aborted when `cancel()` is called, the last
+    subscriber leaves, or the handle is destroyed, and a late promise/emission can
+    never write to the entry. A cancelled entry keeps no timer or listener.
+  - **An Observable's first emission is the value.** The entry unsubscribes after
+    it; later emissions are ignored, and completion without a value is an error.
+    Streaming is listed under Known limitations, not silently half-supported.
+  - **Errors are classified as `unknown`, not as HTTP.** An abort-like rejection is
+    `{ kind: 'aborted' }`; everything else — including a `TypeError` — is
+    `{ kind: 'unknown', cause }`, because a function source has no HTTP status to
+    interpret.
+  - **The shared engine is one engine.** `createRequest`'s cached path and
+    `createQuery` now call the extracted `cached-handle.ts`; the HTTP half is the
+    thin wrapper that resolves a source to an `HttpResourceRequest`. `createRequest`
+    itself is unchanged.
+  - **The core budget moves from 20 KB to 21.5 KB gzip**, measured at 20.5 KB after
+    the feature; the probes measured +21.2 / +21.2 / +23.0 KB. This is a deliberate,
+    recorded budget change, not a silent one (see `docs/design-0.2.md`, Phase 4).
 
 ### Fixed
 

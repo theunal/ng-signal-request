@@ -1,7 +1,16 @@
 import type { HttpHeaders, HttpProgressEvent, HttpResourceRequest } from '@angular/common/http';
 import { type HttpClient, HttpEventType, type HttpEvent } from '@angular/common/http';
 import { computed, signal, untracked, type Signal, type WritableSignal } from '@angular/core';
-import { Observable, retry, throwError, timer, type Subscription } from 'rxjs';
+import {
+  defer,
+  from,
+  isObservable,
+  Observable,
+  retry,
+  throwError,
+  timer,
+  type Subscription,
+} from 'rxjs';
 import { ALWAYS_ONLINE, type Connectivity, type NetworkMode } from '../connectivity';
 import { RequestCancelledError, toError } from '../errors';
 import { noop, nextRetryDelay, type NormalizedRetry } from '../utils';
@@ -34,14 +43,11 @@ export interface SeedValue<T> {
   readonly dataUpdatedAt: number;
 }
 
-/** One fetch's worth of configuration, supplied by the handle that starts it. */
-export interface FetchPlan<T> {
-  readonly request: HttpResourceRequest;
+/** Fields both kinds of plan share. */
+export interface BaseFetchPlan<T> {
   readonly structuralSharing: StructuralSharingFn<T>;
   readonly retry: NormalizedRetry | undefined;
   readonly parse: ((raw: unknown) => T) | undefined;
-  /** Which `HttpClient` body reader to use, from the verb variant that was called. */
-  readonly responseType: 'json' | 'text' | 'blob' | 'arraybuffer';
   /**
    * How this fetch treats connectivity. Optional, and `undefined` means `'always'`.
    *
@@ -52,6 +58,31 @@ export interface FetchPlan<T> {
    */
   readonly networkMode?: NetworkMode;
 }
+
+/** One HTTP fetch's worth of configuration, supplied by the handle that starts it. */
+export interface FetchPlan<T> extends BaseFetchPlan<T> {
+  /** Absent on plans built before `createQuery` existed; treated as `'http'`. */
+  readonly kind?: 'http';
+  readonly request: HttpResourceRequest;
+  /** Which `HttpClient` body reader to use, from the verb variant that was called. */
+  readonly responseType: 'json' | 'text' | 'blob' | 'arraybuffer';
+}
+
+/**
+ * One `createQuery` fetch's worth of configuration.
+ *
+ * `run` is called once per attempt with the entry's `AbortSignal`, so a retry re-invokes the
+ * caller's function instead of resubscribing a promise that has already settled. The result may be
+ * a `Promise` or an `Observable`; an Observable's **first** emission is the value and the entry
+ * unsubscribes after it. Streaming is not part of 0.2.0.
+ */
+export interface QueryFetchPlan<T> extends BaseFetchPlan<T> {
+  readonly kind: 'query';
+  readonly run: (signal: AbortSignal) => Promise<T> | Observable<T>;
+}
+
+/** Either transport. `CacheEntry.fetch` accepts both; the stored plan is what `invalidate()` runs. */
+export type EntryPlan<T> = FetchPlan<T> | QueryFetchPlan<T>;
 
 /**
  * One cached resource, and the only place in the library that owns a network
@@ -148,7 +179,7 @@ export class CacheEntry<T = unknown> {
    */
   private held:
     { readonly promise: Promise<T | undefined>; readonly settle: HeldSettle<T> } | undefined;
-  private heldPlan: FetchPlan<T> | undefined;
+  private heldPlan: EntryPlan<T> | undefined;
   private detachHold: (() => void) | undefined;
 
   /**
@@ -162,7 +193,7 @@ export class CacheEntry<T = unknown> {
    * Two handles with one key must therefore agree on the request — which is the same rule the
    * `key` option documents.
    */
-  private plan: FetchPlan<T> | undefined;
+  private plan: EntryPlan<T> | undefined;
 
   /**
    * Notified once per settled fetch, to every handle watching this entry.
@@ -272,8 +303,14 @@ export class CacheEntry<T = unknown> {
    * Cleared when the last observer leaves: an entry nobody is watching has no live request
    * description, and holding one would keep the body and headers of the last call alive.
    */
-  registerPlan(plan: FetchPlan<T>): void {
+  registerPlan(plan: EntryPlan<T>): void {
     this.plan = plan;
+  }
+
+  /** Which factory registered the stored plan, or `undefined` before the first registration. */
+  get planKind(): 'http' | 'query' | undefined {
+    if (this.plan === undefined) return undefined;
+    return this.plan.kind === 'query' ? 'query' : 'http';
   }
 
   /**
@@ -396,7 +433,7 @@ export class CacheEntry<T = unknown> {
    * instead of opening a second connection. A held fetch participates in that — it puts its own
    * promise in `inFlight` — so "paused" and "fetching" are one state to everyone outside the entry.
    */
-  fetch(plan: FetchPlan<T>): Promise<T | undefined> {
+  fetch(plan: EntryPlan<T>): Promise<T | undefined> {
     if (this.destroyed) {
       return rejected(new RequestCancelledError('The query was removed from the cache.'));
     }
@@ -413,7 +450,7 @@ export class CacheEntry<T = unknown> {
    * through its own `onReconnect` subscription instead, which is one notification rather than one
    * per handle.
    */
-  private shouldHold(plan: FetchPlan<T>): boolean {
+  private shouldHold(plan: EntryPlan<T>): boolean {
     return plan.networkMode === 'online' && !this.isOnline();
   }
 
@@ -428,7 +465,7 @@ export class CacheEntry<T = unknown> {
    * teardown all behave exactly as they do for a fetch in flight: losing the last observer cancels a
    * paused request the same way it cancels a running one.
    */
-  private hold(plan: FetchPlan<T>): Promise<T | undefined> {
+  private hold(plan: EntryPlan<T>): Promise<T | undefined> {
     this.paused.set(true);
     this.heldPlan = plan;
 
@@ -480,7 +517,7 @@ export class CacheEntry<T = unknown> {
     this.start(plan).then(held.settle.resolve, held.settle.reject);
   }
 
-  private start(plan: FetchPlan<T>): Promise<T | undefined> {
+  private start(plan: EntryPlan<T>): Promise<T | undefined> {
     this.isFetching.set(true);
     this.error.set(undefined);
     this.errorTimeout.set(undefined);
@@ -504,93 +541,141 @@ export class CacheEntry<T = unknown> {
     return this.inFlight;
   }
 
-  private execute(plan: FetchPlan<T>): Promise<T | undefined> {
-    const { request } = plan;
-    let stream = this.http.request<unknown>(request.method ?? 'GET', request.url, {
-      ...request,
-      // `events` is what makes `reportProgress: true` observable. Without it the
-      // body arrives bare and the progress events are swallowed.
-      observe: 'events',
-      responseType: plan.responseType,
-    } as never);
+  private execute(plan: EntryPlan<T>): Promise<T | undefined> {
+    return plan.kind === 'query' ? this.executeQuery(plan) : this.executeHttp(plan);
+  }
 
-    if (plan.retry) {
-      const policy = plan.retry;
-      // `'always'` never consults connectivity, so only the other two modes can pause a retry.
-      const pauseRetries = (plan.networkMode ?? 'always') !== 'always';
-      stream = stream.pipe(
-        retry({
-          delay: (err: unknown, attemptNo: number) => {
-            const delay = nextRetryDelay(policy, attemptNo, toError(err));
-            if (delay === undefined) return throwError(() => err);
-            // The attempt is spent **only** on the branch that arms a timer. Offline, the retry waits
-            // for a connection instead of counting down a clock that is not running, and `paused`
-            // is what says so — `retryAttempt()` staying at 0 is the honest reading, because no
-            // retry is scheduled.
-            if (pauseRetries && !this.isOnline()) return this.waitForReconnect();
-            // Reporting the attempt here is what keeps `retryAttempt()` honest
-            // without a separate supervisor.
-            this.retryAttempt.set(attemptNo);
-            return timer(delay);
-          },
-        }),
-      );
-    }
+  /**
+   * Applies the retry policy to whichever transport produced the stream.
+   *
+   * Shared rather than copied: "wait for a connection instead of arming a clock" is the same
+   * question whether the attempt was an HTTP call or a function.
+   */
+  private withRetry<V>(stream: Observable<V>, plan: EntryPlan<T>): Observable<V> {
+    if (!plan.retry) return stream;
+    const policy = plan.retry;
+    // `'always'` never consults connectivity, so only the other two modes can pause a retry.
+    const pauseRetries = (plan.networkMode ?? 'always') !== 'always';
+    return stream.pipe(
+      retry({
+        delay: (err: unknown, attemptNo: number) => {
+          const delay = nextRetryDelay(policy, attemptNo, toError(err));
+          if (delay === undefined) return throwError(() => err);
+          // The attempt is spent **only** on the branch that arms a timer. Offline, the retry waits
+          // for a connection instead of counting down a clock that is not running, and `paused`
+          // is what says so — `retryAttempt()` staying at 0 is the honest reading, because no
+          // retry is scheduled.
+          if (pauseRetries && !this.isOnline()) return this.waitForReconnect();
+          // Reporting the attempt here is what keeps `retryAttempt()` honest
+          // without a separate supervisor.
+          this.retryAttempt.set(attemptNo);
+          return timer(delay);
+        },
+      }),
+    );
+  }
+
+  /**
+   * The settlement closures every transport shares.
+   *
+   * `settled` is the late-write guard: `cancel()` settles before it aborts or unsubscribes, so a
+   * promise that resolves anyway, or an Observable that emits after teardown, cannot touch the
+   * entry. `timeout` is the HTTP request's, and `undefined` for a query.
+   */
+  private settler(
+    plan: EntryPlan<T>,
+    timeout: number | undefined,
+    resolve: (value: T | undefined) => void,
+    reject: (error: Error) => void,
+  ): {
+    succeed(raw: unknown): void;
+    fail(error: Error): void;
+    abort(error?: Error): void;
+    readonly settled: boolean;
+  } {
+    let settled = false;
+
+    const finish = (): void => {
+      settled = true;
+      this.subscription = undefined;
+      this.abortCurrent = undefined;
+      this.isFetching.set(false);
+      this.retryAttempt.set(0);
+      // A settled call has no progress left to report; leaving it behind would
+      // pin a `<progress>` element at its final value.
+      this.progress.set(undefined);
+    };
+
+    const fail = (err: Error): void => {
+      if (settled) return;
+      finish();
+      this.error.set(err);
+      this.errorTimeout.set(timeout);
+      this.updatedAt.set(Date.now());
+      this.notifySettle({ ok: false, error: err });
+      reject(err);
+    };
+
+    const succeed = (raw: unknown): void => {
+      if (settled) return;
+      let value: T;
+      try {
+        value = plan.parse ? plan.parse(raw) : (raw as T);
+      } catch (e) {
+        fail(toError(e));
+        return;
+      }
+      finish();
+
+      // Sharing runs *before* the write: an unchanged response must not touch
+      // the signal at all, or every consumer re-renders for nothing.
+      const previous = untracked(this.data);
+      const shared = plan.structuralSharing(previous, value);
+      const now = Date.now();
+      if (!Object.is(shared, previous)) {
+        this.data.set(shared);
+        this.dataUpdatedAt.set(now);
+      }
+      this.updatedAt.set(now);
+      this.invalidated.set(false);
+      this.local.set(false);
+      this.notifySettle({ ok: true, value: shared });
+      resolve(shared);
+    };
+
+    return {
+      succeed,
+      fail,
+      abort(error: Error = new RequestCancelledError()): void {
+        if (settled) return;
+        finish();
+        reject(error);
+      },
+      get settled(): boolean {
+        return settled;
+      },
+    };
+  }
+
+  private executeHttp(plan: FetchPlan<T>): Promise<T | undefined> {
+    const { request } = plan;
+    const stream = this.withRetry(
+      this.http.request<unknown>(request.method ?? 'GET', request.url, {
+        ...request,
+        // `events` is what makes `reportProgress: true` observable. Without it the
+        // body arrives bare and the progress events are swallowed.
+        observe: 'events',
+        responseType: plan.responseType,
+      } as never),
+      plan,
+    );
 
     return new Promise<T | undefined>((resolve, reject) => {
-      let settled = false;
-
-      const finish = (): void => {
-        settled = true;
-        this.subscription = undefined;
-        this.abortCurrent = undefined;
-        this.isFetching.set(false);
-        this.retryAttempt.set(0);
-        // A settled call has no progress left to report; leaving it behind would
-        // pin a `<progress>` element at its final value.
-        this.progress.set(undefined);
-      };
-
-      const succeed = (raw: unknown): void => {
-        if (settled) return;
-        let value: T;
-        try {
-          value = plan.parse ? plan.parse(raw) : (raw as T);
-        } catch (e) {
-          fail(toError(e));
-          return;
-        }
-        finish();
-
-        // Sharing runs *before* the write: an unchanged response must not touch
-        // the signal at all, or every consumer re-renders for nothing.
-        const previous = untracked(this.data);
-        const shared = plan.structuralSharing(previous, value);
-        const now = Date.now();
-        if (!Object.is(shared, previous)) {
-          this.data.set(shared);
-          this.dataUpdatedAt.set(now);
-        }
-        this.updatedAt.set(now);
-        this.invalidated.set(false);
-        this.local.set(false);
-        this.notifySettle({ ok: true, value: shared });
-        resolve(shared);
-      };
-
-      const fail = (err: Error): void => {
-        if (settled) return;
-        finish();
-        this.error.set(err);
-        this.errorTimeout.set(request.timeout);
-        this.updatedAt.set(Date.now());
-        this.notifySettle({ ok: false, error: err });
-        reject(err);
-      };
+      const settle = this.settler(plan, request.timeout, resolve, reject);
 
       const onEvent = (raw: unknown): void => {
         if (!isHttpEvent(raw)) {
-          succeed(raw); // defensive: no `HttpEvent` wrapper
+          settle.succeed(raw); // defensive: no `HttpEvent` wrapper
           return;
         }
         switch (raw.type) {
@@ -603,7 +688,7 @@ export class CacheEntry<T = unknown> {
             // throws — a failed call still told you what the server answered.
             this.statusCode.set(raw.status);
             this.headers.set(raw.headers);
-            succeed(raw.body);
+            settle.succeed(raw.body);
             return;
           }
           default:
@@ -613,18 +698,59 @@ export class CacheEntry<T = unknown> {
 
       // Without this, a cancelled fetch would leave `run()` awaiting a promise that
       // can never settle. Cancelling has to reject, not abandon.
-      this.abortCurrent = () => {
-        if (settled) return;
-        finish();
-        reject(new RequestCancelledError());
+      this.abortCurrent = () => settle.abort();
+
+      this.subscription = stream.subscribe({
+        next: onEvent,
+        error: (e) => settle.fail(toError(e)),
+      });
+      // A custom `HttpBackend` may answer synchronously, in which case `finish()` has already run
+      // and left the completed subscription behind.
+      if (settle.settled) this.subscription.unsubscribe();
+    });
+  }
+
+  /**
+   * Runs a `createQuery` source.
+   *
+   * `defer` is deliberate: `retry` resubscribes the stream, and for a function-based source a
+   * resubscription must **call the function again**. Subscribing a promise twice would retry
+   * nothing, because the promise's rejection is already decided. The `AbortController` is
+   * per-fetch and survives retries, so `cancel()` still aborts the attempt in progress.
+   */
+  private executeQuery(plan: QueryFetchPlan<T>): Promise<T | undefined> {
+    const controller = new AbortController();
+
+    return new Promise<T | undefined>((resolve, reject) => {
+      const settle = this.settler(plan, undefined, resolve, reject);
+      let unsubscribe: () => void = noop;
+
+      this.abortCurrent = (): void => {
+        settle.abort();
+        controller.abort();
+        unsubscribe();
       };
 
-      this.subscription = stream.subscribe({ next: onEvent, error: (e) => fail(toError(e)) });
-      // A custom `HttpBackend` may answer synchronously, in which case `finish()` has already run
-      // and left the completed subscription behind. The type checker narrows `settled` to `false`
-      // because it cannot see that the callback ran inside `subscribe`.
-      // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
-      if (settled) this.subscription.unsubscribe();
+      const source = defer(() => {
+        const produced = plan.run(controller.signal);
+        return isObservable(produced) ? produced : from(produced);
+      });
+
+      const subscription = this.withRetry(source, plan).subscribe({
+        next: (value) => {
+          settle.succeed(value);
+          unsubscribe();
+        },
+        error: (e) => settle.fail(toError(e)),
+        complete: () => {
+          if (!settle.settled) {
+            settle.fail(new Error('The query completed without emitting a value.'));
+          }
+        },
+      });
+      unsubscribe = () => subscription.unsubscribe();
+      this.subscription = subscription;
+      if (settle.settled) subscription.unsubscribe();
     });
   }
 

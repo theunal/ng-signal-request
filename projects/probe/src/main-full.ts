@@ -5,6 +5,7 @@ import {
   combine,
   createInfiniteRequest,
   createMutation,
+  createQuery,
   createRequest,
   QueryClient,
 } from 'ng-signal-request';
@@ -19,6 +20,7 @@ class ProbeComponent {
   readonly client = inject(QueryClient);
   readonly list = createRequest<unknown>('/probe', { key: () => ['probe'] });
   readonly detail = createRequest<unknown>('/detail', { key: () => ['detail'] });
+  readonly local = createQuery<string>(() => Promise.resolve('local'), { key: () => ['local'] });
   readonly infinite = createInfiniteRequest<unknown, number>((page) => `/pages?page=${page}`, {
     key: () => ['pages'],
     initialPageParam: 1,

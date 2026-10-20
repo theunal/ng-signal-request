@@ -73,7 +73,7 @@ const FORBIDDEN_IN = new Map([
 
 /** Gzip budgets per entry point, in KB. Stated in the README, enforced here. */
 const BUDGETS = new Map([
-  ['ng-signal-request.mjs', 20],
+  ['ng-signal-request.mjs', 21.5],
   ['ng-signal-request-devtools.mjs', 15],
   ['ng-signal-request-testing.mjs', 15],
   ['ng-signal-request-persist.mjs', 15],
@@ -89,9 +89,9 @@ const BUDGETS = new Map([
  * worse, and the only honest way to state a size in the README.
  */
 const PROBE_BUDGETS = new Map([
-  ['request', 21.5],
-  ['keyed', 21.5],
-  ['full', 23],
+  ['request', 22.5],
+  ['keyed', 22.5],
+  ['full', 24],
 ]);
 
 function checkProbeSizes() {

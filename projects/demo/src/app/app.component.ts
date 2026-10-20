@@ -6,14 +6,23 @@ import { FormSection } from './sections/form-section';
 import { InfiniteSection } from './sections/infinite-section';
 import { ListSection } from './sections/list-section';
 import { OfflineSection } from './sections/offline-section';
+import { QuerySection } from './sections/query-section';
 import { RetrySection } from './sections/retry-section';
 
-type Tab = 'list' | 'form' | 'retry' | 'infinite' | 'cache' | 'offline';
+type Tab = 'list' | 'form' | 'retry' | 'infinite' | 'cache' | 'offline' | 'query';
 
 @Component({
   selector: 'demo-root',
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [ListSection, FormSection, RetrySection, InfiniteSection, CacheSection, OfflineSection],
+  imports: [
+    ListSection,
+    FormSection,
+    RetrySection,
+    InfiniteSection,
+    CacheSection,
+    OfflineSection,
+    QuerySection,
+  ],
   template: `
     <header>
       <h1>ng-signal-request</h1>
@@ -79,6 +88,9 @@ type Tab = 'list' | 'form' | 'retry' | 'infinite' | 'cache' | 'offline';
         @case ('offline') {
           <demo-offline />
         }
+        @case ('query') {
+          <demo-query />
+        }
       }
     </main>
   `,
@@ -91,6 +103,7 @@ export class AppComponent {
     { id: 'infinite', label: 'Sonsuz liste' },
     { id: 'cache', label: 'Paylaşılan önbellek' },
     { id: 'offline', label: 'Çevrimdışı (offline)' },
+    { id: 'query', label: 'createQuery (HTTP dışı)' },
   ];
 
   protected readonly tab = signal<Tab>('list');

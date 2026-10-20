@@ -956,6 +956,84 @@ need it: destroying the owning injector does the same thing. It exists for a
 mutation built with an explicit `{ injector }` outside an injection context,
 where the handle is the only thing you are holding.
 
+## `createQuery(source, options)` - a cached query for data that is not HTTP
+
+`createRequest` assumes `HttpClient`. `createQuery` keeps the same cache, the same
+lifecycle and the same handle, but the source is a function you write — for
+IndexedDB, `localStorage`, a hand-rolled GraphQL client, a WASM module, or any
+promise or observable you already have:
+
+```ts
+const draft = createQuery<Draft | undefined>(
+  async (_params, { signal }) => {
+    const db = await openDb({ signal });
+    return db.get('drafts', 'current');
+  },
+  { key: () => ['draft', 'current'], initialValue: undefined },
+);
+```
+
+The source is `(params, ctx) => Promise<T> | Observable<T>` and `key` is
+**required**: without an identity there is nothing to share. `ctx` carries
+`signal: AbortSignal` and the same `params` value as the first argument, so a
+source that declares no parameters can still read them from the context. Options
+are the cached subset — `staleTime`, `gcTime`, `maxEntries`, `refetchOnMount`,
+`structuralSharing`, `equal`, `parse`, `select`, `networkMode`, `retry`,
+`initialValue`, `lazy`, `debounce`, polling, the refetch switches and the hooks.
+`headers`, `statusCode`, `progress`, `timeout` and `responseType` do not exist,
+because the function may not have made an HTTP call at all.
+
+The handle is a `QueryRequest` and behaves like `CachedRequest` everywhere else:
+`response`, `status`, `error`, `success`, `loading`, `paused`, `run()`,
+`tryRun()`, `reload()`, `cancel()`, `set()`, `update()`, `select()` and the
+devtools entry are all the same code. Two handles on one key share one entry and
+one in-flight call.
+
+```ts
+// Params work exactly like the cached HTTP path: changing them refetches,
+// setting them to `undefined` disables the query.
+const profile = createQuery<User, { id: number }>((params) => api.user(params.id), {
+  key: () => ['user', id()],
+  params: { id: 1 },
+});
+```
+
+### The abort signal
+
+The signal is aborted when the last subscriber leaves, when `cancel()` is called,
+or when the handle is destroyed. Pass it to `fetch`, to IndexedDB, or to whatever
+else supports cancellation. A result that arrives after the abort is dropped: it
+never writes to the entry, so a component that unmounted cannot be resurrected by
+a slow promise.
+
+### Observable sources
+
+The **first** emission is the value and the entry unsubscribes after it. This is a
+cache, not a stream: later emissions are ignored, and streaming is not part of
+0.2.0 (see [Known limitations](#known-limitations)). Completion without an
+emission is an error rather than an empty success.
+
+```ts
+const clock = createQuery<string>(() => timer(0, 1000).pipe(map(() => new Date().toISOString())), {
+  key: () => ['clock'],
+});
+```
+
+### Sharing an entry with `createRequest`
+
+A keyed `createRequest` and a `createQuery` on the same key share one entry and
+one in-flight call. Whichever registered its plan last decides how a cache-driven
+refetch runs — the same "last plan wins" rule two keyed requests already follow.
+They do **not** share a data type; using both for one key is an application bug,
+and dev mode warns once per entry.
+
+### Errors
+
+A query is not HTTP, so its classifier does not guess: an abort-like value is
+`{ kind: 'aborted' }`, and everything else is `{ kind: 'unknown', cause }` — even
+a `TypeError`, which the HTTP path treats as a network failure. `error()` still
+has the original `Error`.
+
 ## Offline
 
 Connectivity is **opt-in**, and opting in is one option. The default,
@@ -1510,7 +1588,8 @@ you give up when you stay inside Angular.
 | Concern              | Here                                                                                                                                                         | TanStack Query (Angular)                                                             |
 | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------ |
 | Runtime dependencies | `tslib` and the Angular peers only                                                                                                                           | `@tanstack/query-core` plus the adapter                                              |
-| Describing a request | The request _is_ the options — `url`, `params`, `path`, `headers`, `reportProgress` are routed for you                                                       | A `queryFn` you write, plus a `queryKey`                                             |
+| Describing a request | The request _is_ the options — `url`, `params`, `path`, `headers`, `reportProgress` are routed for you — or, with `createQuery`, a function source           | A `queryFn` you write, plus a `queryKey`                                             |
+| Non-HTTP sources     | `createQuery`: IndexedDB, storage, GraphQL, a WASM call, any promise or observable, on the same cache and handle as an HTTP request                          | `queryFn`, which is the only way a query works                                       |
 | Uncached requests    | First class: no `key` means Angular's `httpResource`, its own lifetime, no cache entry                                                                       | Not a concept — every query has a key and a cache entry                              |
 | Infinite queries     | `createInfiniteRequest`, **one entry per page**, so prefix invalidation and cross-component sharing work on a feed                                           | `injectInfiniteQuery`, one entry per list                                            |
 | `select`             | A **method**: `.select(fn, { equal })`, so the handle's own `response()` is untouched                                                                        | An option on the query observer                                                      |
@@ -1535,9 +1614,13 @@ Where TanStack Query is simply ahead, with no clever reframing:
   `indexedDbStorage()`, with `maxAge`, `buster`, `migrate` and key/state filters.
   `persistQueryClient` still has more storage adapters, and a broader
   subscribe-and-write model, and it is the mature one of the two.
-- **A `queryFn` is more general.** Anything that returns a promise — GraphQL,
-  IndexedDB, a WASM call — is a query there. This library is HTTP only, which is
-  exactly what lets the request stay declarative, but it is a real limit.
+- **A `queryFn` is the default, not an alternative.** `createQuery` closes the
+  functional gap — any promise or observable is a query now, and it shares entries
+  with the HTTP path — but TanStack's function-first design means its docs, its
+  typed `queryOptions` helper and its plugin ecosystem all assume it. Here the
+  declarative HTTP request is still the primary path and `createQuery` is the way
+  out when your data is not behind `HttpClient`. Observable sources are also
+  first-emission-only here; neither library streams into one cached value.
 - **Devtools depth**, and an ecosystem: plugins, years of answered questions.
 
 Where this library is ahead, in an Angular-only codebase:
@@ -1558,22 +1641,22 @@ Where this library is ahead, in an Angular-only codebase:
 
 Vocabularies, so the two do not fight in your head:
 
-| TanStack Query                                                                        | Here                                                                         |
-| ------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
-| `queryKey`                                                                            | `key`                                                                        |
-| `queryFn`                                                                             | the source: a `url`, or `(params, ctx) => url`                               |
-| `staleTime`, `gcTime`, `refetchOnMount`, `refetchOnWindowFocus`, `refetchOnReconnect` | the same names, the same meanings                                            |
-| `enabled: false`                                                                      | `params` set to `undefined` — `status() === 'idle'`                          |
-| `placeholderData` / `keepPreviousData`                                                | `keepPreviousValue`                                                          |
-| `initialData`, `initialDataUpdatedAt`                                                 | `initialValue`, and `cache().seed(key, value, dataUpdatedAt)`                |
-| `queryClient.setQueryData` / `getQueryData`                                           | `client.setData` / `client.getData`, `cache().peek`                          |
-| `useIsMutating` / `mutationKey`                                                       | `client.isMutating(filter)` / `mutationKey`                                  |
-| `onMutate` + manual rollback                                                          | `optimistic` + automatic rollback                                            |
-| `onlineManager.setEventListener` / `onlineManager.setOnline`                          | `OnlineManager.setOnline` (a test seam; the window events are wired already) |
-| `networkMode: 'online' / 'offlineFirst' / 'always'`                                   | the same names, the same meanings                                            |
-| `useIsFetching`                                                                       | `client.isFetching`, and `client.isPaused` for the offline case              |
-| `hydrate` / `dehydrate`                                                               | `hydrate` / `dehydrate` in `/persist`                                        |
-| `queryClient.invalidateQueries`                                                       | `client.invalidate`, `invalidates` on a mutation                             |
+| TanStack Query                                                                        | Here                                                                                                             |
+| ------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `queryKey`                                                                            | `key`                                                                                                            |
+| `queryFn`                                                                             | the source: a `url`, a `(params, ctx) => url`, or `createQuery`'s `(params, ctx) => Promise<T> \| Observable<T>` |
+| `staleTime`, `gcTime`, `refetchOnMount`, `refetchOnWindowFocus`, `refetchOnReconnect` | the same names, the same meanings                                                                                |
+| `enabled: false`                                                                      | `params` set to `undefined` — `status() === 'idle'`                                                              |
+| `placeholderData` / `keepPreviousData`                                                | `keepPreviousValue`                                                                                              |
+| `initialData`, `initialDataUpdatedAt`                                                 | `initialValue`, and `cache().seed(key, value, dataUpdatedAt)`                                                    |
+| `queryClient.setQueryData` / `getQueryData`                                           | `client.setData` / `client.getData`, `cache().peek`                                                              |
+| `useIsMutating` / `mutationKey`                                                       | `client.isMutating(filter)` / `mutationKey`                                                                      |
+| `onMutate` + manual rollback                                                          | `optimistic` + automatic rollback                                                                                |
+| `onlineManager.setEventListener` / `onlineManager.setOnline`                          | `OnlineManager.setOnline` (a test seam; the window events are wired already)                                     |
+| `networkMode: 'online' / 'offlineFirst' / 'always'`                                   | the same names, the same meanings                                                                                |
+| `useIsFetching`                                                                       | `client.isFetching`, and `client.isPaused` for the offline case                                                  |
+| `hydrate` / `dehydrate`                                                               | `hydrate` / `dehydrate` in `/persist`                                                                            |
+| `queryClient.invalidateQueries`                                                       | `client.invalidate`, `invalidates` on a mutation                                                                 |
 
 ## Upgrading from 0.0.x
 
@@ -1679,11 +1762,16 @@ report and one you read here is a design decision.
 - **Importing one factory keeps the whole primary entry point in your bundle.** The
   factories live in one module with module-level tables, so an app that only calls
   `createRequest` still retains the cached path, the infinite path and the mutation
-  queue: measured at about **+20.4 KB gzip** over an app without the library, against
-  about **+21.9 KB** for the full surface. This is a tree-shaking limitation, not a
+  queue: measured at about **+21.2 KB gzip** over an app without the library, against
+  about **+23.0 KB** for the full surface. This is a tree-shaking limitation, not a
   claim that the unused features are free; fixing it needs a module per factory,
   which is a public-API decision for a later release. The measured numbers and the
   budgets are in [Bundle](#bundle).
+- **A `createQuery` Observable is a value, not a stream.** The first emission settles
+  the entry and the subscription is torn down; later emissions are ignored. There is
+  no way to append to a cached value from a live source — streaming would need a
+  different cache shape and an answer to what `response()` means while it grows, and
+  0.2.0 does not have one.
 - **`online` means an interface appeared, not that a request will be routed.** A
   captive portal, a VPN that is down, a DNS failure or an unreachable API all look
   online. `'online'` is permission to stop holding; the request that starts can
@@ -1744,6 +1832,7 @@ report and one you read here is a design decision.
 | `createMutation(builder, options?)`                           | Imperative `POST` write with its own lifecycle                                                                                                                      |
 | `createMutation.post` / `.put` / `.patch` / `.delete`         | Verb variants (`.post` is the bare call)                                                                                                                            |
 | `createInfiniteRequest(source, options?)`                     | Paginated query; one cache entry per page, with `createInfiniteRequest.<verb>` and `.<verb>.text` / `.blob` / `.arrayBuffer` variants                               |
+| `createQuery(source, options)`                                | Cached query whose source is `(params, ctx) => Promise<T> \| Observable<T>` — for IndexedDB, storage, GraphQL, anything non-HTTP                                    |
 | `combine(sources)`                                            | Aggregates handles: `response` · `loading` · `status` · `error` · `reload` · `cancel`                                                                               |
 | `createRequests(items, build, options?)`                      | One handle per list item, reconciled by identity                                                                                                                    |
 | `provideSignalRequest(config \| () => config)`                | Global `baseUrl`, `retry`, `retryTimeouts`, `networkMode`, `headers`, `onError`, `onSuccess`, and the cache defaults. The factory form runs in an injection context |
@@ -1765,6 +1854,9 @@ report and one you read here is a design decision.
 | `RequestErrorContext`                                               | `{ timeout? }` used for timeout classification                     |
 | `SignalRequest<T, R, TParams>`                                      | Query handle                                                       |
 | `CachedRequest<T, R, TParams>`                                      | Query handle backed by a shared cache entry                        |
+| `QueryRequest<T, R, TParams>`                                       | Handle returned by `createQuery` (no HTTP-only state)              |
+| `QuerySource<T, TParams>` / `QueryContext<TParams>`                 | The function a query runs, and its `{ signal, params }` context    |
+| `QueryOptions<T, TParams>`                                          | Options for `createQuery`                                          |
 | `InfiniteRequest<TPage, TParam>`                                    | Paginated handle                                                   |
 | `FlattenedPages<TPage>`                                             | What `response()` yields: items for an array page, pages otherwise |
 | `Combinable<T>` / `Combined<T>` / `RequestSet<T>`                   | The shapes `combine` and `createRequests` accept and return        |
@@ -1939,7 +2031,7 @@ than cosmetic. Sizes are the gzipped ESM bundles from a production build:
 
 | Entry point                  | Size        | When it is in an application |
 | ---------------------------- | ----------- | ---------------------------- |
-| `ng-signal-request`          | **19.3 KB** | always                       |
+| `ng-signal-request`          | **20.5 KB** | always                       |
 | `ng-signal-request/devtools` | 2.7 KB      | only if imported             |
 | `ng-signal-request/persist`  | 3.7 KB      | only if imported             |
 | `ng-signal-request/testing`  | 0.8 KB      | only in tests                |
@@ -1960,11 +2052,11 @@ and compares gzip sizes against the one without the library:
 
 | Probe     | What it imports                             | Over the control |
 | --------- | ------------------------------------------- | ---------------- |
-| `request` | one uncached `createRequest`                | **+20.4 KB**     |
-| `keyed`   | a keyed `createRequest` and `QueryClient`   | **+20.5 KB**     |
-| `full`    | every core factory, `/persist`, `/devtools` | **+21.9 KB**     |
+| `request` | one uncached `createRequest`                | **+21.2 KB**     |
+| `keyed`   | a keyed `createRequest` and `QueryClient`   | **+21.2 KB**     |
+| `full`    | every core factory, `/persist`, `/devtools` | **+23.0 KB**     |
 
-The gap between the first and the last row is 1.5 KB, not 15, because angular's
+The gap between the first and the last row is 1.8 KB, not 15, because angular's
 bundler keeps the whole primary module once anything in it is imported: the
 factories are built with module-level `Object.assign(...)` tables, and each
 `@Injectable`'s static DI declaration is a call, so esbuild cannot prove the
@@ -1974,10 +2066,11 @@ factory is free; fixing it would mean a module per factory, which is a public-AP
 decision reserved for a later release.
 
 Budgets, so growth is a decision rather than a surprise: the primary entry point
-is not allowed past **20 KB gzip**, any new secondary entry point past **15 KB
-gzip**, and the probes above past the measured values plus roughly 5% (`request`
-and `keyed` 21.5 KB over the control, `full` 23 KB). `pnpm check:dist` prints all
-of the numbers on every run.
+is not allowed past **21.5 KB gzip** (raised from 20 KB by 0.2.0's `createQuery`;
+the measured 20.5 and the reasoning are in `docs/design-0.2.md`), any new secondary
+entry point past **15 KB gzip**, and the probes above past the measured values plus
+roughly 5% (`request` and `keyed` 22.5 KB over the control, `full` 24 KB).
+`pnpm check:dist` prints all of the numbers on every run.
 
 ## Releasing
 

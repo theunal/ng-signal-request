@@ -277,6 +277,21 @@ function classify(cause: unknown, context: RequestErrorContext): RequestError {
 }
 
 /**
+ * The classifier a `createQuery` handle uses.
+ *
+ * A query is not HTTP: a `TypeError` thrown inside the function is a bug in the function at least
+ * as often as it is a network failure, and an `HttpErrorResponse` may just be what a hand-rolled
+ * source chose to reject with. Only an abort keeps a specific member; everything else is
+ * `unknown`, carrying the original error as `cause`.
+ */
+export function toQueryRequestError(cause: unknown): RequestErrorView {
+  if (cause instanceof RequestCancelledError || isAbortLike(cause)) {
+    return asView({ kind: 'aborted' });
+  }
+  return asView({ kind: 'unknown', cause });
+}
+
+/**
  * The `network` member, with `offline: true` added only when the browser reports no connection.
  *
  * Built as two object shapes rather than one shape with an `undefined` field: a `network` error

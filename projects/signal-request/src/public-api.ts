@@ -6,6 +6,7 @@ export { ALWAYS_ONLINE, OnlineManager } from './lib/connectivity';
 export type { Connectivity, NetworkMode } from './lib/connectivity';
 export { createRequest } from './lib/create-request';
 export type { CreateRequest, CreateRequestFn } from './lib/create-request';
+export { createQuery } from './lib/create-query';
 export {
   createInfiniteRequest,
   type CreateInfiniteRequest,
@@ -37,8 +38,12 @@ export type {
   OptimisticTarget,
   ParamsOption,
   PathParams,
+  QueryContext,
+  QueryOptions,
   QueryParams,
   QueryPrimitive,
+  QueryRequest,
+  QuerySource,
   QueryValue,
   RefetchOnMount,
   Reloadable,
@@ -69,7 +74,9 @@ export { MutationRegistry } from './lib/cache/mutation-registry';
 export { IDLE_RESTORE_GATE, RESTORE_GATE, type RestoreGate } from './lib/restore-gate';
 export {
   CacheEntry,
+  type EntryPlan,
   type FetchPlan,
+  type QueryFetchPlan,
   type SeedValue,
   type SettleOutcome,
 } from './lib/cache/cache-entry';

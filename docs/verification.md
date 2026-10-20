@@ -364,3 +364,52 @@ actually retains, and whether the offline path works in a real browser.
    suite still drives a fake `OnlineManager`; the e2e proves the wiring to
    `navigator.onLine` and the window events, not every browser's offline
    semantics. Section 6's limits apply unchanged.
+
+## 11. Phase 4 record (2026-10-20)
+
+`createQuery` added a second plan kind to the existing entry instead of a second
+cache. The checks below are the ones that would notice if that claim were false.
+
+| Check                                                | Result                                                                                                                                              |
+| ---------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm verify`                                        | **exit 0** — typecheck, lint, format:check, 576 tests, build, check:types-compat, build:demo, check:dist                                            |
+| Coverage (statements / branches / functions / lines) | 97.56 / 93.39 / 98.58 / 98.74 — above the 0.2.0 floors of 97.16 / 92.73 / 98.02 / 98.52                                                             |
+| New-code coverage                                    | `create-query.ts` 100 / 97.1 / 100 / 100; `cached-handle.ts` 97.9 / 90.9 / 100 / 99.5; `executeQuery` in `cache-entry.ts` 100% statements and lines |
+| `pnpm check:dist`                                    | core **20.5 KB** gzip; `/devtools` 2.7; `/persist` 3.7; `/testing` 0.8                                                                              |
+| Probe deltas over the no-library control             | `request` **+21.17 KB**, `keyed` **+21.21 KB**, `full` **+22.97 KB**                                                                                |
+| `pnpm check:api v0.1.0`                              | **0 removed**; 14 added in core (7 query names) and 7 added in `/persist`                                                                           |
+| `pnpm test:e2e`                                      | **3/3 passed** against the rebuilt production demo (the offline suite; no query e2e spec)                                                           |
+| Bench, control compared in-run                       | query promise source **4.71–4.88 µs/entry**, dedup **0.04 µs/entry**; nothing >10% slower, so no flag                                               |
+
+1. **One engine, measured by the diff.** `createRequest` is unchanged at the
+   public surface (the 0.1.0 export check still passes, and the existing request
+   suites did not need edits). `cached-handle.ts` now owns the entry, refcount,
+   subscription effect, polling, focus/reconnect, state signals and settle hooks;
+   `create-cached-request.ts` only builds the HTTP plan and `create-query.ts` only
+   the function plan. The only engine branches the feature added are the
+   `EntryPlan` dispatch and the kind-switch warning.
+2. **The tests that matter are the shared-entry ones.** A keyed `createRequest`
+   and a `createQuery` on one key see one entry and one in-flight call in both
+   directions, a dev-mode warning fires once when the kinds disagree, and a late
+   promise or Observable emission after `cancel()` / last-unsubscribe / `destroy()`
+   does not write. The 30 query tests also cover Promise and Observable sources,
+   error normalization (`unknown` with the original `cause`, aborted as
+   `aborted`), retry with `defer`, `networkMode` pause/resume, invalidation during
+   a flight, persist/SSR, and `expectTypeOf` for the generic, `select` and
+   `initialValue`.
+3. **The budget was raised on purpose, and it is still the tight number.** The
+   design record proposed 24 KB before the code existed; the measured cost was
+   20.5 KB, so the applied ceiling is **21.5 KB** (measured plus about 5%), not the
+   proposal. Probe ceilings are 22.5 / 22.5 / 24 KB. Raising the core budget from
+   20 KB is stated in the README and the CHANGELOG and is flagged in the release
+   report; `check:dist` prints the measured value on every run.
+4. **The benchmark is a ceiling, not a target.** Both new cases live in the
+   ordinary perf spec and are compared against the in-run control as the rule
+   requires. The join is a branch on the entry's existing in-flight promise, and
+   the loop asserts the source ran exactly once, so a dedup regression fails
+   rather than merely slowing down. Full numbers are in `docs/perf.md`.
+5. **What this does not establish.** The e2e suite still covers only the offline
+   path; the query demo section is not e2e-tested. Observable sources are
+   first-emission-only, and there is no streaming test because there is no
+   streaming feature. The shared key in the demo is a demonstration of the
+   mechanism, not a recommendation to mix factories per key.

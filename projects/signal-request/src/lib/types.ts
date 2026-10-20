@@ -9,6 +9,7 @@ import type { NetworkMode } from './connectivity';
 import type { QueryKey, QueryKeyFactory } from './cache/key';
 import type { CacheEntry } from './cache/cache-entry';
 import type { StructuralSharingFn } from './cache/structural-sharing';
+import type { Observable } from 'rxjs';
 import type {
   Injector,
   ResourceParamsContext,
@@ -637,6 +638,121 @@ export interface RequestBase<T, R = T | undefined, TParams = void> {
 
 export type RunResult<T> =
   { ok: true; response: T; error?: undefined } | { ok: false; error: Error; response?: undefined };
+
+/* -------------------------------------------------------------------------- */
+/*  Query (createQuery)                                                       */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * What a {@link QuerySource} receives besides its params.
+ *
+ * The signal is the whole reason this type exists: a `fetch`, an IndexedDB read or a WASM call
+ * needs a way to stop when the last subscriber leaves, and the library owns that decision.
+ */
+export interface QueryContext<TParams> {
+  /**
+   * Aborted when the last subscriber leaves, when `cancel()` is called, or when the handle is
+   * destroyed. Pass it to whatever supports cancellation.
+   */
+  readonly signal: AbortSignal;
+  /** The same value as the source's first argument, for a source that declares no parameters. */
+  readonly params: TParams;
+}
+
+/**
+ * A function-based data source for {@link createQuery}.
+ *
+ * Return a `Promise` or an `Observable`. An Observable's **first** emission is the value and the
+ * entry unsubscribes after it; completion without an emission is an error. Streaming is not part
+ * of 0.2.0.
+ */
+export type QuerySource<T, TParams = void> = (
+  params: TParams,
+  ctx: QueryContext<TParams>,
+) => Promise<T> | Observable<T>;
+
+interface QueryOptionsBase<T> {
+  /** `true` means nothing happens until `run()`. Default `false`: fetch on mount. */
+  lazy?: boolean;
+  /** Value of `response()` while idle / loading / failed. Makes `response` non-nullable. */
+  initialValue?: NoInfer<T>;
+  /** Validate / map the value before it is stored. */
+  parse?: (raw: unknown) => T;
+  /** Keep showing the previous value across a params change. Default `false`. */
+  keepPreviousValue?: boolean;
+  /** Debounce (ms) for key/params changes. Browser only. */
+  debounce?: number;
+  /** Retry a failed attempt. Falls back to the global `retry` setting. */
+  retry?: RetryConfig;
+  /**
+   * How this query treats connectivity. Defaults to the global
+   * {@link SignalRequestConfig.networkMode}, then `'always'`. `'online'` holds the first attempt
+   * and its retries until a connection appears; `paused()` is `true` while it waits.
+   */
+  networkMode?: NetworkMode;
+  /** Re-run every N ms after a settle. A function makes it reactive. Browser only. */
+  pollInterval?: number | (() => number | false | null | undefined);
+  /** Keep polling while the tab is hidden. Default `false`. */
+  pollWhenHidden?: boolean;
+  /** Re-run when the tab becomes visible again. Default `false`. Browser only. */
+  refetchOnWindowFocus?: boolean;
+  /** Re-run when the browser reports it is back online. Default `false`. Browser only. */
+  refetchOnReconnect?: boolean;
+  onSuccess?: (value: T) => void;
+  onError?: (error: Error) => void;
+  /** Runs after `onSuccess` / `onError`. */
+  onSettled?: () => void;
+  /** Custom equality for the value. Composes with structural sharing. */
+  equal?: ValueEqualityFn<NoInfer<T>>;
+  /** Required if `createQuery` is called outside an injection context. */
+  injector?: Injector;
+  debugName?: string;
+}
+
+/**
+ * Options for {@link createQuery}.
+ *
+ * `key` is required — a query without an identity cannot share an entry with anything. `params`
+ * is required exactly when a `TParams` type argument is declared, mirroring
+ * {@link RequestOptions}:
+ *
+ * ```ts
+ * createQuery<User[]>((_params, { signal }) => fetch('/users', { signal }).then((r) => r.json()), {
+ *   key: () => ['users'],
+ * });
+ *
+ * createQuery<User, { id: number }>(
+ *   (params) => fetch(`/users/${params.id}`).then((r) => r.json()),
+ *   { key: () => ['user', id()], params: { id: 1 } },
+ * );
+ * ```
+ */
+export type QueryOptions<T, TParams = void> = QueryOptionsBase<T> &
+  CacheOptions<T> &
+  // `void` in a tuple is the "no params declared" marker this API is built on.
+  // eslint-disable-next-line @typescript-eslint/no-invalid-void-type
+  ([TParams] extends [void] ? unknown : ParamsOption<TParams>);
+
+/**
+ * A handle returned by {@link createQuery}.
+ *
+ * The same handle shape as {@link CachedRequest}, minus the HTTP-only state: there are no
+ * response headers, status code or upload/download progress to report for a function that may not
+ * have made an HTTP call at all.
+ */
+export interface QueryRequest<T, R = T | undefined, TParams = void> extends Omit<
+  RequestBase<T, R, TParams>,
+  'headers' | 'statusCode' | 'progress'
+> {
+  /** Whether the entry is running a fetch right now. A cache hit is not `loading`. */
+  readonly isFetching: Signal<boolean>;
+  /** Epoch ms of the last successful fetch, or `0` when there has never been one. */
+  readonly dataUpdatedAt: Signal<number>;
+  /** How many times this entry has run its source. Useful for proving a dedup in a test. */
+  readonly fetchCount: Signal<number>;
+  /** Whether the entry owes a fetch by its own clock. */
+  isStale(): boolean;
+}
 
 /* -------------------------------------------------------------------------- */
 /*  Infinite query (createInfiniteRequest)                                    */

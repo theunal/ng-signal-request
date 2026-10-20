@@ -1313,24 +1313,126 @@ What the real browser showed that the fake could not:
 - One reconnect starts exactly one request and replays exactly one queue. After the queue has
   settled, further offline/online flaps send nothing.
 
-## Phase 4 — `queryFn` (deferred, sketch)
+## Phase 4 — `queryFn` without a second cache
+
+### Shape
 
 ```ts
-createQuery<T>({
-  key: () => ['user', id()],
-  queryFn: ({ signal, params }) => fetch(...),
-});
+const user = createQuery<User, { id: number }>(
+  (params, ctx) => fetch(`/api/users/${params.id}`, { signal: ctx.signal }).then((r) => r.json()),
+  { key: () => ['user', id()], params: { id: 1 }, initialValue: undefined },
+);
 ```
 
-A second _plan_ for the same `CacheEntry`, not a second cache. `FetchPlan` is
-already the seam: today it carries an `HttpClient` request, and a query would
-carry a function plus an `AbortSignal` built from the subscription the entry
-already owns. The acceptance criterion — a keyed `createRequest` and a
-`createQuery` on one key share one entry and one in-flight call — is a decoder
-requirement: the plan must be re-buildable when _either_ kind of handle built it,
-which is why `FetchPlan` already stores the request rather than a closure.
+The source is `(params, ctx) => Promise<T> | Observable<T>`, the key is **required**, and the
+context carries `signal: AbortSignal` and `params` (the same value passed as the first argument,
+so a source that ignores the first parameter can still read it from `ctx`). `createQuery` is a
+cached handle in every other respect: same `QueryCache`, `staleTime`, `gcTime`, `refetchOnMount`,
+dedup, structural sharing, `maxEntries`, `networkMode` / `paused()`, retry, invalidation,
+`select`, `run`, `reload`, `cancel`, `set` / `update`, persistence / SSR and devtools.
 
-## Phase 6 — devtools depth (deferred, sketch)
+### The seam: a plan, not a second cache
+
+`FetchPlan` stays the HTTP description. A sibling `QueryFetchPlan<T>` carries the same
+lifecycle fields (`structuralSharing`, `retry`, `parse`, `networkMode`) and one extra function:
+
+```ts
+run(signal: AbortSignal): Promise<T> | Observable<T>;
+```
+
+`CacheEntry` accepts `EntryPlan<T> = FetchPlan<T> | QueryFetchPlan<T>` where it used to accept
+`FetchPlan`, and `execute` dispatches on which one it was given. That is additive: every existing
+caller (the keyed request, the infinite request) still passes a `FetchPlan`, and the public
+`FetchPlan` type is unchanged.
+
+A query plan is rebuilt from the handle's **current params** every time the handle's key or params
+change, exactly like an HTTP request is rebuilt today. It is stored on the entry through the
+existing `registerPlan`, so `invalidate()` can refetch it with no handle present. If a keyed
+`createRequest` and a `createQuery` share a key, the last registered plan wins — that is the same
+rule two `createRequest`s on one key already follow, and it is what makes "one entry, one in-flight
+call" true across kinds. A type disagreement (`createRequest<User[]>` and `createQuery<Post>` on
+one key) is an application bug the library can only see at runtime: dev mode warns once, naming
+both kinds; production keeps the data it has, and the caller's type is an assertion either way.
+
+### Abort lifecycle
+
+Each query fetch owns an `AbortController` and, for an Observable source, a subscription. The
+signal is aborted when:
+
+- the last subscriber leaves (`CacheEntry.release` already calls `cancel()`),
+- `cancel()` is called, or
+- the handle is destroyed before an effect could subscribe (`destroy()` → `cancel()`).
+
+The entry's settle guard (`settled`) is set before the abort, so a promise that resolves anyway,
+or an observable that emits late, cannot write to the entry: the late result is dropped, not
+stored. For an Observable the first `next` **is** the value; after it is stored the entry
+unsubscribes. Completion without a `next` is an error (`unknown`, cause
+`"The query completed without emitting a value"`) rather than an empty success. Streaming is
+explicitly out of scope for 0.2.0 and listed under Known limitations.
+
+### Errors
+
+A query failure goes through a query-specific classifier: an abort-like value becomes
+`{ kind: 'aborted' }`, everything else becomes `{ kind: 'unknown', cause }` — including a
+`TypeError`, which the HTTP classifier treats as a network failure but which, from an arbitrary
+`queryFn`, is just as likely to be a bug in the function. The original error is what `cause`
+holds, and `error()` still exposes the `Error`.
+
+### Entry point: why `createQuery` stays in core
+
+The core entry point is currently 19.3 KB gzip against a 20 KB budget. A separate
+`ng-signal-request/query` entry could carry the new factory, but it also needs the shared handle
+engine (`buildCachedHandle`, the entry-plan plumbing) and the same `QueryCache` instance. A
+secondary entry may import **core's public API** — that is how `/persist` works — but the shared
+handle builder is deliberately internal, and the only way to let `/query` import it is to export
+it as public API and freeze it. That would trade a real bundle budget for an unstable surface,
+which is the wrong trade for a feature whose entire point is to share entries with
+`createRequest`.
+
+**Budget proposal, before implementation:** core **24 KB**, probe budgets `request` and `keyed`
+**24.5 KB**, `full` **26 KB** over the control. The estimate is the current 19.3 KB plus roughly
+3–5 KB for the query path, its types and the shared-engine extraction; the measured numbers below
+replace the estimate and are the ones the design record keeps. Raising a budget is a decision, not
+a side effect: it is stated here before the code exists, and flagged in the release report.
+
+### As built, and measured (2026-10-20)
+
+The estimate was high. `pnpm check:dist` on the final tree:
+
+| Measure                   | Before Phase 4 | After Phase 4      |
+| ------------------------- | -------------- | ------------------ |
+| core entry point          | 19.3 KB gzip   | **20.5 KB**        |
+| probe `request` / `keyed` | +20.41 / 20.46 | **+21.17 / 21.21** |
+| probe `full`              | +21.92         | **+22.97**         |
+
+The **applied** budgets are the measured values plus about 5%, not the proposal: core **21.5 KB**,
+probes `request` / `keyed` **22.5 KB**, `full` **24 KB**. The proposal of 24 KB is recorded above
+because it was made before the code; applying the looser number afterwards would have been a budget
+raise dressed as a plan. The change from 20 KB to 21.5 KB is still a raise, is stated in the README,
+and is flagged in the release report.
+
+Two things about the implementation are worth keeping with the numbers:
+
+1. **The extraction did not duplicate the engine.** `cached-handle.ts` owns the entry, refcount,
+   subscription effect, polling, focus/reconnect, the public state signals and the settle hooks;
+   `create-cached-request.ts` is now only the HTTP plan builder, and `create-query.ts` only the
+   function plan builder. The only branches the engine gained are `CachedPlan.plan` being an
+   `EntryPlan` and the kind-switch warning.
+2. **`CacheEntry` gained a dispatch, not a second path.** `execute()` chooses `executeHttp` or
+   `executeQuery`; `withRetry` and `settler` are shared. That is why the retry hold, the late-write
+   guard and the progress reset behave identically for a promise that fails and a request that
+   times out — they are the same closures. A query retry re-runs the function through `defer`
+   instead of resubscribing an already-settled promise, which is the one place a naive reuse would
+   have been wrong.
+
+Coverage of the new code at the time of writing: `create-query.ts` 100 / 97.1 / 100 / 100 and
+`cached-handle.ts` 97.9 / 90.9 / 100 / 99.5 (statements / branches / functions / lines), so both
+new modules clear 90 on every metric. `executeQuery` in `cache-entry.ts` is 100% statements and
+lines; the file's own 95.6 / 86.1 / 98.5 / 96.9 still carries uncovered branches from the
+pre-Phase-4 held-fetch, progress and synchronous-backend paths, which are unchanged by this phase.
+The global totals rose to 97.56 / 93.39 / 98.58 / 98.74, above the 0.2.0 floors.
+
+## Phase 6 - devtools depth (deferred, sketch)
 
 Per-entry detail (data preview, timings, observers, retry history) and actions
 (invalidate, refetch, cancel, remove, set stale). The entry point must stay under

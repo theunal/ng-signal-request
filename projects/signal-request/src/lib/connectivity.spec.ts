@@ -1,7 +1,7 @@
 import { PLATFORM_ID } from '@angular/core';
 import { TestBed } from '@angular/core/testing';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { ALWAYS_ONLINE, OnlineManager } from './connectivity';
+import { ALWAYS_ONLINE, OnlineManager, reportedOffline, resolveConnectivity } from './connectivity';
 import { setup } from '../../testing/testing';
 
 /* `readInitialOnline` reads a global, and `onLine` is a getter on `Navigator.prototype` in jsdom, so
@@ -168,5 +168,52 @@ describe('ALWAYS_ONLINE', () => {
     const detach = ALWAYS_ONLINE.onReconnect(listener);
     detach();
     expect(listener).not.toHaveBeenCalled();
+  });
+});
+
+describe('resolveConnectivity', () => {
+  it('does not construct OnlineManager when nothing will read connectivity', () => {
+    const created = vi.fn();
+    TestBed.configureTestingModule({
+      providers: [
+        {
+          provide: OnlineManager,
+          useFactory: () => {
+            created();
+            return new OnlineManager();
+          },
+        },
+      ],
+    });
+
+    // The default configuration: both the mode and the reconnect flag are untouched.
+    expect(TestBed.runInInjectionContext(() => resolveConnectivity('always', false))).toBe(
+      ALWAYS_ONLINE,
+    );
+    expect(created).not.toHaveBeenCalled();
+
+    // One flag is enough to make the manager the source of truth.
+    TestBed.runInInjectionContext(() => resolveConnectivity('always', true));
+    expect(created).toHaveBeenCalledTimes(1);
+
+    TestBed.runInInjectionContext(() => resolveConnectivity('online', false));
+    expect(created).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('reportedOffline', () => {
+  it('leaves the answer to the navigator when there is no manager', () => {
+    expect(reportedOffline(ALWAYS_ONLINE)).toBeUndefined();
+  });
+
+  it('reports the manager state when there is one', () => {
+    setup();
+    const manager = TestBed.inject(OnlineManager);
+
+    manager.setOnline(false);
+    expect(reportedOffline(manager)).toBe(true);
+
+    manager.setOnline(true);
+    expect(reportedOffline(manager)).toBe(false);
   });
 });

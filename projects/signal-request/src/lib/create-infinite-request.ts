@@ -20,7 +20,7 @@ import { normalizeKey } from './cache/key';
 import { QueryCache } from './cache/query-cache';
 import { resolveStructuralSharing } from './cache/structural-sharing';
 import { SIGNAL_REQUEST_CONFIG } from './config';
-import { OnlineManager, type NetworkMode } from './connectivity';
+import { resolveConnectivity, type NetworkMode } from './connectivity';
 import { RequestCancelledError, toRequestError } from './errors';
 import type {
   FlattenedPages,
@@ -135,7 +135,6 @@ function buildInfiniteInContext<TPage, TParam>(
   const errorHandler = inject(ErrorHandler);
   const destroyRef = inject(DestroyRef);
   const isBrowser = isPlatformBrowser(inject(PLATFORM_ID));
-  const online = inject(OnlineManager);
 
   const retryPolicy = normalizeRetry(options.retry, {
     timeout: options.timeout,
@@ -147,6 +146,7 @@ function buildInfiniteInContext<TPage, TParam>(
   const debounceMs = isBrowser ? (options.debounce ?? 0) : 0;
   const maxPages = options.maxPages;
   const networkMode: NetworkMode = options.networkMode ?? globalConfig.networkMode ?? 'always';
+  const online = resolveConnectivity(networkMode, options.refetchOnReconnect === true);
 
   const safe = (fn: () => void): void => {
     try {

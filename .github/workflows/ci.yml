@@ -49,3 +49,26 @@ jobs:
         run: |
           pnpm run build:demo
           pnpm run check:dist
+
+  # Kept out of `verify` because it needs a browser download. It drives the production demo, so it
+  # runs after a demo build of its own - see e2e/playwright.config.ts.
+  e2e:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Enable pnpm via corepack
+        run: corepack enable pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Install Chromium
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: Offline checks in a real browser
+        run: pnpm run test:e2e

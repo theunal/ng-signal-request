@@ -17,7 +17,7 @@ import {
 } from '@angular/core';
 import { retry, throwError, timer, type Observable, type Subscription } from 'rxjs';
 import { SIGNAL_REQUEST_CONFIG } from './config';
-import { OnlineManager, type NetworkMode } from './connectivity';
+import { reportedOffline, resolveConnectivity, type NetworkMode } from './connectivity';
 import { QueryCache } from './cache/query-cache';
 import { MutationRegistry } from './cache/mutation-registry';
 import { QueryClient } from './cache/query-client';
@@ -153,8 +153,8 @@ function buildMutation<T, TArgs, TContext>(
     timeouts: options.retryTimeouts ?? config.retryTimeouts,
   });
   const concurrency = options.concurrency ?? 'parallel';
-  const online = inject(OnlineManager);
   const networkMode: NetworkMode = options.networkMode ?? config.networkMode ?? 'always';
+  const online = resolveConnectivity(networkMode, false);
 
   const response = signal<T | undefined>(undefined);
   const error = signal<Error | undefined>(undefined);
@@ -170,7 +170,7 @@ function buildMutation<T, TArgs, TContext>(
     const timeout = errorTimeout();
     return toRequestError(cause, {
       ...(timeout === undefined ? {} : { timeout }),
-      offline: !online.online(),
+      offline: reportedOffline(online),
     });
   });
   const args = signal<TArgs | undefined>(undefined);

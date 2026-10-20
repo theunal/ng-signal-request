@@ -21,7 +21,7 @@ import { normalizeKey } from './cache/key';
 import { QueryCache } from './cache/query-cache';
 import { resolveStructuralSharing } from './cache/structural-sharing';
 import { SIGNAL_REQUEST_CONFIG } from './config';
-import { OnlineManager, type NetworkMode } from './connectivity';
+import { reportedOffline, resolveConnectivity, type NetworkMode } from './connectivity';
 import { RequestCancelledError, toError, toRequestError } from './errors';
 import { RESTORE_GATE } from './restore-gate';
 import type {
@@ -124,7 +124,6 @@ function buildCachedInContext<T, R, TParams>(
   // See `restore-gate.ts`. The default is idle, so a request in an application that never persists
   // reads one constant signal and does nothing else.
   const restoreGate = inject(RESTORE_GATE);
-  const online = inject(OnlineManager);
 
   const lazy = options.lazy ?? false;
   const initial = options.initialValue as T | undefined;
@@ -147,6 +146,7 @@ function buildCachedInContext<T, R, TParams>(
     options.refetchOnWindowFocus ?? globalConfig.refetchOnWindowFocus ?? false;
   const refetchOnReconnect = options.refetchOnReconnect ?? globalConfig.refetchOnReconnect ?? false;
   const networkMode: NetworkMode = options.networkMode ?? globalConfig.networkMode ?? 'always';
+  const online = resolveConnectivity(networkMode, refetchOnReconnect);
   const share = resolveStructuralSharing<T>(options.structuralSharing, options.equal);
   const waitForRestore = options.waitForRestore ?? globalConfig.waitForRestore ?? true;
 
@@ -384,7 +384,7 @@ function buildCachedInContext<T, R, TParams>(
     const timeout = entry()?.errorTimeout();
     return toRequestError(cause, {
       ...(timeout === undefined ? {} : { timeout }),
-      offline: !online.online(),
+      offline: reportedOffline(online),
     });
   });
 

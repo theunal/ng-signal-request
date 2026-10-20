@@ -1205,6 +1205,114 @@ Known risks, stated rather than mitigated away:
   here — the snapshot is untrusted input, which is why the version check exists and
   is why `migrate` is optional.
 
+## Step B1 — what an application actually pays
+
+### The question the entry-point budgets could not answer
+
+`check:dist` gzips each FESM file, which says what we publish and nothing about what an app
+retains. Phase 2 made the gap concrete: the offline code lives in core because `createRequest`
+injects `OnlineManager`, so a per-entry budget cannot prove that a request which never opts into
+`networkMode` avoids it.
+
+### Method: four probe applications, built four times
+
+`projects/probe` is a production Angular application with four entry points that differ only in
+what they import:
+
+| Probe     | Entry point imports                                                     |
+| --------- | ----------------------------------------------------------------------- |
+| `none`    | Angular only (`provideHttpClient`, so the control has the same surface) |
+| `request` | `createRequest('/probe')` - the uncached path                           |
+| `keyed`   | `createRequest('/probe', { key })` + `QueryClient`                      |
+| `full`    | every core factory, `/persist` and `/devtools`                          |
+
+Each build is `optimization: true`, `outputHashing: none`, one `main.js`. The number reported is
+`gzip(probe) - gzip(none)`, which is what an application pays for the library on top of an app that
+does not use it. `scripts/check-dist.mjs` recomputes all four and fails if a probe is missing, if
+the control contains library markers (the measurement would be meaningless), or if a delta exceeds
+its budget.
+
+Two rejected methods, recorded because both looked better than they were:
+
+- **Attribution through a metafile.** `@angular/build:application` does not emit `stats.json` or an
+  esbuild metafile in this version (checked in its `schema.json`), and a source-map-explorer-style
+  tool would be a new dependency.
+- **Building the probe against library source.** The first attempt mapped `ng-signal-request` to
+  `projects/signal-request/src`. Every probe then measured the same 20 KB because a path-mapped
+  source file does not carry the package's `sideEffects: false` metadata, so nothing was shaken.
+  The probe now maps to `dist/signal-request` and is built after `pnpm build`.
+
+### Results (0.2.0, before `createQuery`)
+
+| Probe     | gzip     | over control |
+| --------- | -------- | ------------ |
+| `none`    | 38.42 KB | -            |
+| `request` | 58.83 KB | **+20.41**   |
+| `keyed`   | 58.88 KB | **+20.46**   |
+| `full`    | 60.34 KB | **+21.92**   |
+
+The finding matters more than the numbers: **an app that imports one factory retains almost the
+whole core entry point.** The uncached path, the keyed path and the full surface are within 1.5 KB
+of each other. The cause is visible in the emitted module: `createRequest`, `createInfiniteRequest`
+and `createMutation` are built with module-level `Object.assign(...)` calls, and each
+`@Injectable` carries a `static ɵprov = ɵɵngDeclareInjectable(...)` initializer. Both are calls at
+module evaluation time, which esbuild cannot prove pure, so the declarations that reference them
+survive. The `sideEffects: false` flag removes whole modules, not statements inside the one module
+an app already imports.
+
+This is the honest baseline for the README's size table, and the reason a per-probe budget is
+needed: the entry-point budget alone would not notice one factory getting more expensive for every
+app. Fixing the shaking (separate modules per factory, or pure annotations around the factory
+tables) is a public-API decision for a later release, not something 0.2.0 should smuggle in.
+
+### `OnlineManager` laziness: implemented, but not a size win
+
+`resolveConnectivity(mode, refetchOnReconnect)` now returns `ALWAYS_ONLINE` unless something will
+read connectivity, and resolves `OnlineManager` through `Injector.get` only otherwise. This is a
+runtime win - a default-configured app no longer constructs a manager, registers two `window`
+listeners or reads `navigator.onLine` - and it keeps 0.1.0's `offline` error field intact:
+`reportedOffline()` returns `undefined` for `ALWAYS_ONLINE`, so `toRequestError` falls back to the
+same navigator read it always used instead of asserting "online" on behalf of a manager nobody
+created.
+
+It is **not** a bundle win, and the measurement says why: even with the branch removed entirely,
+`OnlineManager` stays in the probe bundle. A runtime condition cannot delete a module-level class
+whose static DI declaration is a call, and the whole entry module is already retained (above).
+Removing it would need a separate entry point, which would move `networkMode` and `refetchOnReconnect`
+away from the options of `createRequest` - a breaking change for a class that costs well under a
+kilobyte. Recorded as a deliberate non-goal.
+
+### Budgets
+
+- Per entry point: unchanged (core 20 KB, secondary 15 KB).
+- Per probe: `request` and `keyed` 21.5 KB, `full` 23 KB over the control. The limits are the
+  measured values plus roughly 5%, enough for a dependency bump, small enough that a new feature
+  is a decision.
+- `pnpm check:dist` builds the probes itself, so `pnpm verify` grows by about eight seconds.
+
+## Step B2 — the offline path in a real browser
+
+The unit suite drives a fake `OnlineManager`, which is the right seam for the queue's state machine
+and says nothing about `navigator.onLine`, the window's `online` / `offline` events, or their
+ordering. `e2e/offline.spec.ts` runs Playwright's Chromium against the **production** demo, served
+by `scripts/serve-dist.mjs`, and takes the whole browser offline with `context.setOffline`. The API
+is mocked at the network layer so the assertions can count requests exactly.
+
+`pnpm test:e2e` builds the demo and runs the three checks; Playwright is a devDependency only and
+the job is separate from `verify` because it needs a downloaded browser. CI has an `e2e` job.
+
+What the real browser showed that the fake could not:
+
+- A held request reports `status: 'loading'`, not `'idle'`. It has not failed and is still in
+  progress; `paused()` is the separate answer. The devtools entry list maps a paused, never-fetched
+  entry to `'empty'`, which is a different question.
+- A JSON `POST` cross-origin produces a CORS **preflight**, so "one write" is one `POST` plus one
+  `OPTIONS`. Any network-level count that does not filter the preflight is wrong.
+- Chromium's `setOffline` changes `navigator.onLine` and dispatches the matching event; the
+  manager's signal and the banner agreed without polling.
+- One reconnect starts exactly one request and replays exactly one queue. After the queue has
+  settled, further offline/online flaps send nothing.
+
 ## Phase 4 — `queryFn` (deferred, sketch)
 
 ```ts

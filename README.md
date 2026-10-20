@@ -1312,7 +1312,7 @@ for a request that never arrives.
 
 `pnpm test` runs v8 coverage and fails if the totals drop below the thresholds in
 `angular.json` (`90%` statements, `85%` branches, `90%` functions, `90%` lines).
-Current totals are ~96% statements, ~90% branches, ~96% functions and ~98% lines,
+Current totals are ~97% statements, ~93% branches, ~98% functions and ~99% lines,
 so the distance to the threshold is the regression margin rather than the target.
 The gate is verified rather than trusted: raising a threshold above the current
 number fails the run with
@@ -1676,6 +1676,14 @@ report and one you read here is a design decision.
   those are a storage feature, not a connectivity one, and 0.2.0 does not pretend to
   have them. If losing a write is unacceptable, disable the form while offline,
   keep your own outbox in IndexedDB, or use a service worker's background sync.
+- **Importing one factory keeps the whole primary entry point in your bundle.** The
+  factories live in one module with module-level tables, so an app that only calls
+  `createRequest` still retains the cached path, the infinite path and the mutation
+  queue: measured at about **+20.4 KB gzip** over an app without the library, against
+  about **+21.9 KB** for the full surface. This is a tree-shaking limitation, not a
+  claim that the unused features are free; fixing it needs a module per factory,
+  which is a public-API decision for a later release. The measured numbers and the
+  budgets are in [Bundle](#bundle).
 - **`online` means an interface appeared, not that a request will be routed.** A
   captive portal, a VPN that is down, a DNS failure or an unreachable API all look
   online. `'online'` is permission to stop holding; the request that starts can
@@ -1889,7 +1897,15 @@ pnpm check:dist    # post-build assertions (see "Bundle" below)
 pnpm check:api     # export diff against a git ref: `pnpm check:api v0.1.0`
 pnpm check:types-compat  # compile the 0.1.0 compatibility fixture against the build
 pnpm bench         # the resolve() benchmark at 200k iterations (see docs/perf.md)
+pnpm test:e2e      # Playwright against the production demo (needs `pnpm exec playwright install chromium`)
 ```
+
+`pnpm test:e2e` is deliberately outside `pnpm verify`: it downloads a browser and
+takes longer than the rest of the gate together. CI runs it as a separate job. It
+needs a built demo first, which the script does itself; the API is mocked at the
+network layer, so it does not depend on jsonplaceholder being reachable. See
+[Step B2 in the design notes](docs/design-0.2.md) for what it found that the fake
+`OnlineManager` could not.
 
 `pnpm lint` and `pnpm format:check` are part of `pnpm verify` and of CI, so a pull
 request cannot land a lint error or a formatting difference. The config is
@@ -1923,8 +1939,8 @@ than cosmetic. Sizes are the gzipped ESM bundles from a production build:
 
 | Entry point                  | Size        | When it is in an application |
 | ---------------------------- | ----------- | ---------------------------- |
-| `ng-signal-request`          | **17.6 KB** | always                       |
-| `ng-signal-request/devtools` | 2.5 KB      | only if imported             |
+| `ng-signal-request`          | **19.3 KB** | always                       |
+| `ng-signal-request/devtools` | 2.7 KB      | only if imported             |
 | `ng-signal-request/persist`  | 3.7 KB      | only if imported             |
 | `ng-signal-request/testing`  | 0.8 KB      | only in tests                |
 
@@ -1937,9 +1953,31 @@ other three's strings, so a cross-entry `import` is caught even when nothing in 
 demo exercises the pair. The reason to test it rather than trust it is that
 "separate entry point" is an intention and a bundle scan is a fact.
 
+Those numbers are what ships. What an application **retains** is a different
+measurement, and until 0.2.0 it was never taken. `projects/probe` contains four
+minimal production apps that differ only in their imports; `check:dist` builds them
+and compares gzip sizes against the one without the library:
+
+| Probe     | What it imports                             | Over the control |
+| --------- | ------------------------------------------- | ---------------- |
+| `request` | one uncached `createRequest`                | **+20.4 KB**     |
+| `keyed`   | a keyed `createRequest` and `QueryClient`   | **+20.5 KB**     |
+| `full`    | every core factory, `/persist`, `/devtools` | **+21.9 KB**     |
+
+The gap between the first and the last row is 1.5 KB, not 15, because angular's
+bundler keeps the whole primary module once anything in it is imported: the
+factories are built with module-level `Object.assign(...)` tables, and each
+`@Injectable`'s static DI declaration is a call, so esbuild cannot prove the
+unused ones side-effect-free. `sideEffects: false` drops modules, not statements
+inside the module you already import. This is a known cost, not a claim that a
+factory is free; fixing it would mean a module per factory, which is a public-API
+decision reserved for a later release.
+
 Budgets, so growth is a decision rather than a surprise: the primary entry point
-is not allowed past **20 KB gzip**, and any new secondary entry point past
-**15 KB gzip**. `pnpm check:dist` prints the numbers on every run.
+is not allowed past **20 KB gzip**, any new secondary entry point past **15 KB
+gzip**, and the probes above past the measured values plus roughly 5% (`request`
+and `keyed` 21.5 KB over the control, `full` 23 KB). `pnpm check:dist` prints all
+of the numbers on every run.
 
 ## Releasing
 

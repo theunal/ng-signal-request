@@ -222,6 +222,27 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
     user cannot act on it, and the next reconnect is the retry.
   - **The queue is in memory and does not survive a reload** — stated under Known
     limitations in the README, with the reasons.
+- **The bundle's real cost is measured.** `projects/probe` holds four minimal
+  production applications that differ only in their imports; `pnpm check:dist` builds
+  all four and enforces the gzip delta over a no-library control (`request` and
+  `keyed` 21.5 KB, `full` 23 KB). The measurement confirms what a per-entry budget
+  could not: an app that imports one factory retains almost the whole core
+  (+20.4 KB), because the module-level `Object.assign(...)` factory tables and the
+  `@Injectable` static declarations are calls esbuild cannot prove pure. The README's
+  Bundle section now reports the retained number next to the published one, and
+  `docs/design-0.2.md` records the method and the two methods that were rejected.
+- **`OnlineManager` is constructed only when connectivity will actually be read.**
+  With the default `networkMode: 'always'` and no `refetchOnReconnect`, no manager,
+  `window` listeners or `navigator.onLine` read are created; `RequestError.offline`
+  keeps 0.1.0's navigator fallback in that case. This is a runtime change only — it
+  was measured and removes 0 bytes from the bundle (see `docs/design-0.2.md`).
+- **A real-browser check of the offline path.** `e2e/offline.spec.ts` runs Playwright
+  Chromium against the **production** demo, takes the browser offline with
+  `context.setOffline`, and counts network requests at the route layer: the banner,
+  a paused `networkMode: 'online'` request resuming, a queued mutation replaying once
+  and in order, and no duplicate on a second offline/online flap. Playwright is a
+  devDependency, `pnpm test:e2e` is the entry point, and CI runs it as a separate
+  `e2e` job — it is not part of `pnpm verify`.
 
 ### Fixed
 

@@ -4,6 +4,7 @@ import {
   DestroyRef,
   inject,
   Injectable,
+  Injector,
   PLATFORM_ID,
   signal,
   type Signal,
@@ -155,4 +156,37 @@ function readInitialOnline(isBrowser: boolean): boolean {
   if (!isBrowser) return true;
   const navigator = (globalThis as { navigator?: { onLine?: unknown } }).navigator;
   return navigator?.onLine !== false;
+}
+
+/**
+ * Connectivity for a handle that may never ask a connectivity question.
+ *
+ * `OnlineManager` is a browser listener, a signal and a public class; an application that leaves
+ * `networkMode` at its default and does not ask for `refetchOnReconnect` should not pay for any of
+ * it. Resolving through `Injector.get` rather than a constructor-time `inject` leaves the class
+ * unreferenced in that case, so a production build can drop it - which is what the size probes in
+ * `projects/probe` measure.
+ *
+ * The mode and the reconnect flag are read once, at construction, exactly like the rest of the
+ * options. Passing `'always'` with reconnect off therefore means `ALWAYS_ONLINE`: no listener, no
+ * `navigator` read, and `paused()` is permanently `false` - the 0.1.x behaviour.
+ */
+export function resolveConnectivity(
+  networkMode: NetworkMode,
+  refetchOnReconnect: boolean,
+): Connectivity {
+  if (networkMode === 'always' && !refetchOnReconnect) return ALWAYS_ONLINE;
+  return inject(Injector).get(OnlineManager);
+}
+
+/**
+ * What a failure should report for `RequestErrorContext.offline`.
+ *
+ * `undefined` when nobody is listening to connectivity, so `toRequestError` falls back to the same
+ * `navigator.onLine` read 0.1.0 used. Reporting `false` there would be a claim ("the browser is
+ * online") that a lazily skipped manager never made, and would change the `offline` field of every
+ * default-configuration failure.
+ */
+export function reportedOffline(connectivity: Connectivity): boolean | undefined {
+  return connectivity === ALWAYS_ONLINE ? undefined : !connectivity.online();
 }

@@ -36,17 +36,18 @@ const POSTS_KEY = ['demo', 'offline', 'posts'] as const;
         <button type="button" (click)="reload()">Yeniden yükle</button>
       </div>
 
-      <p class="hint">
+      <p class="hint" data-testid="request-state">
         istek: <code>{{ posts.status() }}</code>
         @if (posts.paused()) {
-          <span class="badge warn">paused</span>
+          <span class="badge warn" data-testid="request-paused">paused</span>
         }
-        · {{ posts.response().length }} kayıt · fetchCount {{ posts.fetchCount() }}
+        · {{ posts.response().length }} kayıt · fetchCount
+        <span data-testid="fetch-count">{{ posts.fetchCount() }}</span>
       </p>
 
-      <ul class="list">
+      <ul class="list" data-testid="posts">
         @for (post of posts.response(); track post.id) {
-          <li>
+          <li data-testid="post">
             <span class="badge" [class]="post.local ? 'badge local' : 'badge'">
               {{ post.local ? 'iyimser' : 'sunucu' }}
             </span>
@@ -61,29 +62,35 @@ const POSTS_KEY = ['demo', 'offline', 'posts'] as const;
             başlık
             <input
               name="title"
+              data-testid="draft"
               [value]="draft()"
               (input)="draft.set($any($event.target).value)"
               placeholder="çevrimdışıyken yaz"
               required
             />
           </label>
-          <button type="submit">Ekle</button>
-          <button type="button" (click)="cancelQueued()" [disabled]="!add.paused()">
+          <button type="submit" data-testid="submit">Ekle</button>
+          <button
+            type="button"
+            data-testid="cancel"
+            (click)="cancelQueued()"
+            [disabled]="!add.paused()"
+          >
             Kuyruktakini iptal et
           </button>
         </div>
       </form>
 
-      <p class="hint">
+      <p class="hint" data-testid="mutation-state">
         mutation: <code>{{ add.status() }}</code>
         @if (add.paused()) {
-          <span class="badge warn">kuyrukta</span>
+          <span class="badge warn" data-testid="mutation-queued">kuyrukta</span>
         }
         @if (mutating()) {
           <span class="badge busy">isMutating</span>
         }
         @if (outcome(); as text) {
-          · {{ text }}
+          · <span data-testid="outcome">{{ text }}</span>
         }
       </p>
 

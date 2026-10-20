@@ -55,6 +55,42 @@
         }
       }
     },
+    "probe": {
+      "projectType": "application",
+      "root": "projects/probe",
+      "sourceRoot": "projects/probe/src",
+      "prefix": "probe",
+      "architect": {
+        "build": {
+          "builder": "@angular/build:application",
+          "options": {
+            "tsConfig": "projects/probe/tsconfig.json",
+            "index": "projects/probe/src/index.html",
+            "browser": "projects/probe/src/main-none.ts",
+            "outputPath": "dist/probes/none",
+            "outputHashing": "none",
+            "optimization": true,
+            "sourceMap": false
+          },
+          "configurations": {
+            "none": {},
+            "request": {
+              "browser": "projects/probe/src/main-request.ts",
+              "outputPath": "dist/probes/request"
+            },
+            "keyed": {
+              "browser": "projects/probe/src/main-keyed.ts",
+              "outputPath": "dist/probes/keyed"
+            },
+            "full": {
+              "browser": "projects/probe/src/main-full.ts",
+              "outputPath": "dist/probes/full"
+            }
+          },
+          "defaultConfiguration": "none"
+        }
+      }
+    },
     "signal-request": {
       "projectType": "library",
       "root": "projects/signal-request",

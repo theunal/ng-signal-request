@@ -1,0 +1,24 @@
+/* Size probes.
+
+   Four entry points over the same application shell, differing only in how much of the library
+   they import. `pnpm check:dist` builds all four and compares their gzip sizes, so "what does an
+   application pay" is a measurement rather than the size of the FESM files we ship.
+
+   `paths` is repeated here rather than in the root tsconfig because the library source is mapped
+   there for the demo. The probe must measure the **built package** instead: the shipped FESM is
+   what an application installs, and Angular's compiler plus `sideEffects: false` are part of what
+   makes unused parts disappear. Build the library before building a probe. */
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "outDir": "../../out-tsc/probe",
+    "types": [],
+    "paths": {
+      "ng-signal-request": ["../../dist/signal-request"],
+      "ng-signal-request/devtools": ["../../dist/signal-request/devtools"],
+      "ng-signal-request/persist": ["../../dist/signal-request/persist"]
+    }
+  },
+  "files": [],
+  "include": ["src/**/*.ts"]
+}

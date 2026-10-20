@@ -1,0 +1,13 @@
+/* The Playwright checks are TypeScript, so they need a project for the editor and for
+   typescript-eslint's `projectService`. They are not part of `pnpm typecheck` because they run
+   against the built demo and pull in Playwright's own types, which the library does not ship.
+
+   `types: ["node"]` is for `process.env['CI']` in the config. */
+{
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "outDir": "../out-tsc/e2e",
+    "types": ["node"]
+  },
+  "include": ["**/*.ts"]
+}

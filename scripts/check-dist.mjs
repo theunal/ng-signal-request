@@ -79,6 +79,68 @@ const BUDGETS = new Map([
   ['ng-signal-request-persist.mjs', 15],
 ]);
 
+/**
+ * What an application pays, in KB gzip over a control app that does not import the library.
+ *
+ * Per-entry-point budgets measure what we ship; these measure what is retained. They are different
+ * numbers - the whole core entry point is retained by angular's bundler because the factories are
+ * built with module-level `Object.assign` calls, so an app that imports one factory pays for all of
+ * them (see `docs/design-0.2.md`, Step B1). The probes are the only way to notice that getting
+ * worse, and the only honest way to state a size in the README.
+ */
+const PROBE_BUDGETS = new Map([
+  ['request', 21.5],
+  ['keyed', 21.5],
+  ['full', 23],
+]);
+
+function checkProbeSizes() {
+  const names = ['none', 'request', 'keyed', 'full'];
+  const sizes = new Map();
+  const text = new Map();
+  for (const name of names) {
+    const path = join('dist', 'probes', name, 'browser', 'main.js');
+    try {
+      const bytes = readFileSync(path);
+      sizes.set(name, gzipSync(bytes).length / 1024);
+      text.set(name, bytes.toString('utf8'));
+    } catch {
+      failures.push(
+        `no probe build at ${path} - run \`pnpm build\` and then \`pnpm build:probes\``,
+      );
+      return;
+    }
+  }
+
+  // A probe that does not contain the library would make every delta below a lie.
+  const control = text.get('none');
+  const request = text.get('request');
+  if (control.includes('RequestCancelled') || control.includes('httpResource')) {
+    failures.push('the control probe contains library code, so the deltas below are meaningless');
+  }
+  if (!request.includes('RequestCancelled')) {
+    failures.push(
+      'the request probe does not contain the library, so the deltas below are meaningless',
+    );
+  }
+
+  const base = sizes.get('none');
+  notes.push(`probe none ${base.toFixed(2)} KB gzip (control)`);
+  for (const name of ['request', 'keyed', 'full']) {
+    const size = sizes.get(name);
+    const delta = size - base;
+    notes.push(`probe ${name} ${size.toFixed(2)} KB gzip, +${delta.toFixed(2)} over control`);
+    const budget = PROBE_BUDGETS.get(name);
+    if (delta > budget) {
+      failures.push(
+        `probe ${name} costs +${delta.toFixed(2)} KB gzip over an app without the library, ` +
+          `over its ${budget} KB budget. Shrink it or raise the budget deliberately in ` +
+          'scripts/check-dist.mjs and the README.',
+      );
+    }
+  }
+}
+
 function checkBundleBoundaries(demoDir, distDir) {
   let files;
   try {
@@ -182,6 +244,7 @@ function checkReadmeParity(rootReadme, libraryReadme) {
 
 const demoBrowser = join('dist', 'demo', 'browser');
 checkBundleBoundaries(demoBrowser, join('dist', 'signal-request', 'fesm2022'));
+checkProbeSizes();
 checkReadmeParity('README.md', join('projects', 'signal-request', 'README.md'));
 
 // `statSync` so a typo in a path is a loud failure rather than a silent skip.

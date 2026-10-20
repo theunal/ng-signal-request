@@ -321,3 +321,46 @@ The four figures are above the previous report on every axis (96.95 / 92.19 /
    `waitForReconnect` notifier emitted `complete` instead of `next`, which silently
    ended the retried request, and `setOnline(false)` was writable on the server.
    Both are recorded in `docs/design-0.2.md` under "As built".
+
+## 10. Step B record (2026-10-20)
+
+Two measurements that the entry-point budgets could not make: what an application
+actually retains, and whether the offline path works in a real browser.
+
+| Check                                                | Result                                                                                                   |
+| ---------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| `pnpm verify`                                        | **exit 0** — typecheck, lint, format:check, 541 tests, build, check:types-compat, build:demo, check:dist |
+| Coverage (statements / branches / functions / lines) | 97.16 / 92.69 / 98.03 / 98.52                                                                            |
+| `pnpm check:dist`                                    | core 19.3 KB gzip; `/devtools` 2.7; `/persist` 3.7; `/testing` 0.8                                       |
+| Probe deltas over the no-library control             | `request` +20.41 KB, `keyed` +20.46 KB, `full` +21.92 KB                                                 |
+| `pnpm test:e2e`                                      | **3/3 passed** in Playwright Chromium, 1 worker, against the production demo                             |
+
+1. **The probe number is the number that matters, and it is larger than the entry
+   point.** Importing any one factory retains almost the whole core: the three
+   probes are within 1.5 KB of each other. The cause and the rejected measurement
+   methods are in `docs/design-0.2.md` under Step B1; the README's Bundle section
+   now leads with the retained figure rather than the published one.
+2. **A runtime branch is not a bundle branch.** `OnlineManager` is now resolved
+   only when `networkMode` or `refetchOnReconnect` needs it, which removes the
+   construction and two `window` listeners for the default configuration - and
+   changes the probe by 0 bytes, because the class and its static DI declaration
+   are still in the imported module. This is reported as a runtime win, not a size
+   win.
+3. **The probe budgets are part of `verify`, and they cost about eight seconds.**
+   `check:dist` now runs `build:probes` itself, which requires `pnpm build` first
+   (the probes resolve `ng-signal-request` to `dist/signal-request` so that
+   `sideEffects: false` is in play). The limits - 21.5 KB for `request` and
+   `keyed`, 23 KB for `full` over the control - are the measured values plus about
+   5%.
+4. **The e2e job is real, and it is not in `verify`.** `e2e/offline.spec.ts`
+   passes three checks against the production demo served by
+   `scripts/serve-dist.mjs`, with the API mocked through `context.route` and the
+   browser taken offline with `context.setOffline`. CI has a separate `e2e` job.
+   What the browser revealed (a paused fetch reports `loading`; a cross-origin
+   JSON `POST` also produces an `OPTIONS` preflight; one reconnect means one
+   request and one replay; settled queues stay settled) is recorded in
+   `docs/design-0.2.md` under Step B2.
+5. **Nothing here claims coverage of the browser's own behaviour.** The unit
+   suite still drives a fake `OnlineManager`; the e2e proves the wiring to
+   `navigator.onLine` and the window events, not every browser's offline
+   semantics. Section 6's limits apply unchanged.

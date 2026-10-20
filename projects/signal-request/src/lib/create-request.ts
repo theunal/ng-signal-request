@@ -22,7 +22,7 @@ import {
 } from '@angular/core';
 import { fromEvent, type Subscription } from 'rxjs';
 import { SIGNAL_REQUEST_CONFIG } from './config';
-import { OnlineManager } from './connectivity';
+import { reportedOffline, resolveConnectivity } from './connectivity';
 import { RequestCancelledError, toError, toRequestError } from './errors';
 import type {
   CachedRequest,
@@ -107,7 +107,6 @@ function buildInContext<T, R, TParams>(
   const errorHandler = inject(ErrorHandler);
   const destroyRef = inject(DestroyRef);
   const isBrowser = isPlatformBrowser(inject(PLATFORM_ID));
-  const online = inject(OnlineManager);
 
   const lazy = options.lazy ?? false;
   const initial = options.initialValue as T | undefined;
@@ -116,6 +115,7 @@ function buildInContext<T, R, TParams>(
    * anything else — see {@link NetworkMode} for why that is the default rather than `'online'`.
    */
   const networkMode: NetworkMode = options.networkMode ?? globalConfig.networkMode ?? 'always';
+  const online = resolveConnectivity(networkMode, options.refetchOnReconnect === true);
   const retryPolicy = normalizeRetry(options.retry ?? globalConfig.retry, {
     timeout: options.timeout,
     timeouts: options.retryTimeouts ?? globalConfig.retryTimeouts,
@@ -272,7 +272,7 @@ function buildInContext<T, R, TParams>(
     const effective = timeout ?? (key && key !== THROWN ? key.timeout : undefined);
     return toRequestError(cause, {
       ...(effective === undefined ? {} : { timeout: effective }),
-      offline: !online.online(),
+      offline: reportedOffline(online),
     });
   });
   const loading = computed(() => {

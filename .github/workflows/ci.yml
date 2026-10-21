@@ -30,6 +30,12 @@ jobs:
       - name: Typecheck
         run: pnpm run typecheck
 
+      # The probe tsconfig maps `ng-signal-request` to `dist/signal-request` so the size probes
+      # measure the built package. Type-aware ESLint reads that tsconfig, so the library has to be
+      # built before linting; otherwise the probe imports are unresolved on a clean checkout.
+      - name: Build the library
+        run: pnpm run build
+
       - name: Lint (angular-eslint + typescript-eslint strict-type-checked)
         run: pnpm run lint
 
@@ -38,9 +44,6 @@ jobs:
 
       - name: Test (v8 coverage; the thresholds in angular.json are enforced)
         run: pnpm run test
-
-      - name: Build the library
-        run: pnpm run build
 
       - name: Check the 0.1.0 type compatibility fixture
         run: pnpm run check:types-compat

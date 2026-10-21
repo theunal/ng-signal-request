@@ -157,3 +157,11 @@ about four minutes after the job; that was npm CDN propagation, not a skipped pu
   signatures and 1 verified attestation.
 - The first run (#10, `0b4192c`) failed in tests and published nothing. The tag was
   moved to `47db330` after the test fix and the `origin/main` merge.
+
+## Post-release CI
+
+The separate `CI` workflow failed at lint on `47db330` and `7f19821`: the probe tsconfig
+maps `ng-signal-request` to `dist/signal-request`, but CI ran lint before the library
+build, so on a clean runner the probe imports were unresolved. The fix builds the library
+before lint in `.github/workflows/ci.yml` and `pnpm verify`; with `dist` removed,
+`pnpm verify` passes. The npm tarball, provenance and tag still point at `47db330`.

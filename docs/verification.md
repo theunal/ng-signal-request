@@ -845,3 +845,10 @@ verified registry signatures and 1 verified attestation; the SLSA v1 statement n
 `refs/tags/v0.2.0`, the repository, and resolved dependency `gitCommit` 47db330. The
 version document was briefly 404 after the run because of npm CDN propagation; a later
 cache-busted read returned 200.
+
+The separate `CI` workflow then failed at lint on `47db330` and `7f19821`. The probe
+tsconfig maps `ng-signal-request` to `dist/signal-request` so the size probes measure the
+built package; CI ran lint before the library build, so on a clean runner the probe imports
+were unresolved and `@typescript-eslint/no-unsafe-*` reported 30 errors. A local `dist`
+hid the problem. The CI workflow and `pnpm verify` now build the library before lint; with
+`dist` removed, `pnpm verify` passes. This changes no shipped code and no bundle number.

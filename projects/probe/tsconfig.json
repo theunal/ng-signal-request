@@ -7,7 +7,8 @@
    `paths` is repeated here rather than in the root tsconfig because the library source is mapped
    there for the demo. The probe must measure the **built package** instead: the shipped FESM is
    what an application installs, and Angular's compiler plus `sideEffects: false` are part of what
-   makes unused parts disappear. Build the library before building a probe. */
+   makes unused parts disappear. Build the library before building a probe. Type-aware ESLint reads
+   this file too, so `pnpm verify` and CI build the library before linting. */
 {
   "extends": "../../tsconfig.json",
   "compilerOptions": {

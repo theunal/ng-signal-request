@@ -321,7 +321,7 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   - **No polling, no new dependency, and no per-entry history when unused.** The
     production demo still does not import `/devtools`; a dedicated `devtools` probe
     renders the panel with history opted in as the positive control, measured at
-    **+28.2 KB** over the no-library control with a **32.5 KB** probe budget. The core (20.9 KB) and
+    **+27.9 KB** over the no-library control with a **32.5 KB** probe budget. The core (20.6 KB) and
     `/devtools` (4.5 KB) ceilings are unchanged at 21.5 / 15 KB. See
     `docs/design-0.2.md`, Phase 6 and `docs/verification.md` §15.
 

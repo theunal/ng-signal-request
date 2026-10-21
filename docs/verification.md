@@ -729,3 +729,73 @@ behind `@ts-expect-error`.
 `/devtools` 6 -> 8, `/persist` 21 -> 28, `/testing` 6 -> 6. Total added over the four
 entry points: **23**. `isAnythingPaused()` is a method on the already-exported `QueryClient`,
 so it does not move the export count. No 0.1.0 export was removed.
+
+## 18. Release-candidate verification and budget trim (2026-10-21)
+
+Run on `56060ee` plus the warning-copy trim described below; no other source change.
+
+### E2E
+
+`pnpm exec playwright install chromium` was already satisfied, then `pnpm test:e2e`
+built the production demo and ran the real-browser offline suite:
+
+```text
+Running 3 tests using 1 worker
+  ✓ the banner follows the browser and an online-only request waits for a connection
+  ✓ queued mutations replay once, in call order, on reconnect
+  ✓ flapping after the queue settled does not replay anything
+  3 passed (3.4s)
+```
+
+The previous record said this had not been rerun after Step 5; it now has, on the
+candidate.
+
+### Bundle measurement
+
+`pnpm check:dist` was run three times, each rebuilding all five probes. All three
+runs produced byte-identical gzip sizes, so the measurement variance is **0.00 KB**
+and the only real risk was the 0.21 KB margin itself:
+
+| Probe      | Run 1  | Run 2  | Run 3  | Limit | Budget |
+| ---------- | ------ | ------ | ------ | ----- | ------ |
+| `request`  | +17.83 | +17.83 | +17.83 | 18.4  | 22.5   |
+| `keyed`    | +18.59 | +18.59 | +18.59 | 19.2  | 22.5   |
+| `full`     | +23.79 | +23.79 | +23.79 | 24    | 24     |
+| `devtools` | +28.21 | +28.21 | +28.21 | 28.8  | 32.5   |
+
+### Trim: shorter dev-only warning copy
+
+`pnpm attribution` on the `full` probe (source map build) showed the retained
+library modules, but no module was dead: the full probe exercises all of them. The
+bytes that were removable were the four **dev-only warning messages**, retained in
+production because `isDevMode()` is a runtime call, so the minifier cannot fold the
+branches around them:
+
+- `timeout` + retry warning (`utils.ts`)
+- non-`lazy`, non-`GET` `createRequest` warning (`utils.ts`)
+- `maxEntries` overshoot warning (`query-cache.ts`)
+- mixed `createRequest` / `createQuery` key warning (`cached-handle.ts`)
+
+Each message keeps its actionable tokens (the option names and the factory names the
+tests assert) and moves the explanation to the docs. A first attempt used the
+`ngDevMode` global to make the branches constant-fold; the application build does
+not define it for library code, the attempt **added** 0.01 KB, and it was reverted.
+
+After the trim, on three consecutive rebuilds with no variance:
+
+| Probe      | Before | After  | Delta    | Limit | Headroom |
+| ---------- | ------ | ------ | -------- | ----- | -------- |
+| `request`  | +17.83 | +17.54 | -0.29 KB | 18.4  | 0.86     |
+| `keyed`    | +18.59 | +18.30 | -0.29 KB | 19.2  | 0.90     |
+| `full`     | +23.79 | +23.49 | -0.30 KB | 24    | **0.51** |
+| `devtools` | +28.21 | +27.91 | -0.30 KB | 28.8  | 0.89     |
+
+The `full` target (median <= 23.6 KB, at least 0.4 KB headroom) is met without
+raising a budget. The core FESM is now **20.6 KB** gzip (was 20.9), so the primary
+entry point has 0.9 KB against its 21.5 KB ceiling; `/devtools` stays at 4.5 KB.
+§16 and §17 keep their original numbers: they are the record of the commits they
+describe, not of this trim.
+
+`pnpm test` remains **599 passed**, coverage **97.86 / 93.61 / 99.25 / 99.03**
+(statements / branches / functions / lines); `pnpm run typecheck` and
+`pnpm run lint` are clean.

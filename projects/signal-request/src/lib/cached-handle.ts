@@ -273,11 +273,10 @@ export function buildCachedHandleEngine<T, R, TParams>(
     ) {
       warnedKinds.add(entry);
       console.warn(
-        `ng-signal-request: the cache entry for ${entry.hash} is used by both a ` +
+        `ng-signal-request: ${entry.hash} is used by both a ` +
           `${previous === 'http' ? 'createRequest' : 'createQuery'} and a ` +
-          `${config.kind === 'http' ? 'createRequest' : 'createQuery'}. They share one entry ` +
-          `and one in-flight call, but not a data type; the most recently registered plan decides ` +
-          `what is fetched. Use the same factory for a given key.`,
+          `${config.kind === 'http' ? 'createRequest' : 'createQuery'}, with different data types. ` +
+          `Use one factory per key.`,
       );
     }
     entry.registerPlan(entryPlan);

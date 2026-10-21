@@ -261,9 +261,8 @@ export class QueryCache {
     if (this.capWarned || !isDevMode()) return;
     this.capWarned = true;
     console.warn(
-      `[ngsr] maxEntries: the cache holds ${this.entries.size} entries against a cap of ${this.cap}. ` +
-        'Every entry that could be dropped has a subscriber or a request in flight, so the cache ' +
-        'stays over its cap until one goes idle. Raise `maxEntries` if this is not a burst.',
+      `[ngsr] maxEntries: ${this.entries.size} entries over cap ${this.cap}; ` +
+        'every droppable entry is subscribed or fetching. Raise `maxEntries`.',
     );
   }
 

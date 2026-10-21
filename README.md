@@ -589,8 +589,8 @@ If neither applies to anything, the cache **overshoots** rather than mangling a
 live component, and says so in dev mode:
 
 ```
-[ngsr] maxEntries: the cache holds 32 entries against a cap of 25. Every entry
-that could be dropped has a subscriber or a request in flight, …
+[ngsr] maxEntries: 32 entries over cap 25; every droppable entry is subscribed
+or fetching. Raise `maxEntries`.
 ```
 
 Enforcement happens **as entries arrive**, synchronously, so the cap is a memory
@@ -1773,8 +1773,8 @@ report and one you read here is a design decision.
 - **Importing one factory keeps the whole primary entry point in your bundle.** The
   factories live in one module with module-level tables, so an app that only calls
   `createRequest` still retains the cached path, the infinite path and the mutation
-  queue: measured at about **+17.9 KB gzip** over an app without the library, against
-  about **+23.8 KB** for the full surface. This is a tree-shaking limitation, not a
+  queue: measured at about **+17.5 KB gzip** over an app without the library, against
+  about **+23.5 KB** for the full surface. This is a tree-shaking limitation, not a
   claim that the unused features are free; fixing it needs a module per factory,
   which is a public-API decision for a later release. The measured numbers and the
   budgets are in [Bundle](#bundle).
@@ -2081,8 +2081,8 @@ than cosmetic. Sizes are the gzipped ESM bundles from a production build:
 
 | Entry point                  | Size        | When it is in an application |
 | ---------------------------- | ----------- | ---------------------------- |
-| `ng-signal-request`          | **20.9 KB** | always                       |
-| `ng-signal-request/devtools` | 4.0 KB      | only if imported             |
+| `ng-signal-request`          | **20.6 KB** | always                       |
+| `ng-signal-request/devtools` | 4.5 KB      | only if imported             |
 | `ng-signal-request/persist`  | 3.7 KB      | only if imported             |
 | `ng-signal-request/testing`  | 0.8 KB      | only in tests                |
 
@@ -2102,12 +2102,12 @@ and compares gzip sizes against the one without the library:
 
 | Probe      | What it imports                                               | Over the control |
 | ---------- | ------------------------------------------------------------- | ---------------- |
-| `request`  | one uncached `createRequest`                                  | **+17.9 KB**     |
-| `keyed`    | a keyed `createRequest` and `QueryClient`                     | **+18.6 KB**     |
-| `full`     | every core factory and the `/persist` + `/devtools` entries   | **+23.8 KB**     |
-| `devtools` | a keyed request with history opted in and `<ngsr-devtools />` | **+28.2 KB**     |
+| `request`  | one uncached `createRequest`                                  | **+17.5 KB**     |
+| `keyed`    | a keyed `createRequest` and `QueryClient`                     | **+18.3 KB**     |
+| `full`     | every core factory and the `/persist` + `/devtools` entries   | **+23.5 KB**     |
+| `devtools` | a keyed request with history opted in and `<ngsr-devtools />` | **+27.9 KB**     |
 
-The unkeyed request probe fell from +21.4 KB to +17.9 KB after the module-level
+The unkeyed request probe fell from +21.4 KB to +17.5 KB after the module-level
 factory tables were marked `/*#__PURE__*/`. The unused `createInfiniteRequest`
 and `createMutation` tables - and the injectables only they reached - are now
 dropped. What remains is the cached engine itself: `createRequest` has keyed
@@ -2120,7 +2120,7 @@ purpose.
 
 Budgets, so growth is a decision rather than a surprise: the primary entry point
 is not allowed past **21.5 KB gzip** (raised from 20 KB by 0.2.0's `createQuery`;
-the measured 20.9 and the reasoning are in `docs/design-0.2.md`), and any
+the measured 20.6 and the reasoning are in `docs/design-0.2.md`), and any
 secondary entry point past **15 KB gzip**. The probe release budgets are unchanged
 (`request` and `keyed` 22.5 KB over the control, `full` 24 KB, `devtools` 32.5 KB);
 `check:dist` now also enforces tighter regression limits of **18.4 / 19.2 / 24 /

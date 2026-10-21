@@ -320,10 +320,8 @@ function warnIfTimeoutRetried(
   if (timeout === undefined || !retryTimeouts || when !== undefined) return;
 
   warnDevOnce(
-    `ng-signal-request: \`timeout: ${timeout}\` is combined with retry, so an elapsed timeout is ` +
-      `retried like a network failure and the call can take several multiples of the timeout before ` +
-      `it reports \`{ kind: 'timeout' }\`. Pass \`retryTimeouts: false\` to report it as soon as it ` +
-      `happens, or \`retry: { when }\` to decide per failure.`,
+    `ng-signal-request: \`timeout: ${timeout}\` is retried like a network failure. ` +
+      `Pass \`retryTimeouts: false\` or \`retry: { when }\` to change that.`,
   );
 }
 
@@ -395,9 +393,8 @@ export function warnIfNonGetQuery(method: string, lazy: boolean, caller: () => v
 
   const name = caller.name || 'createRequest';
   warnDevOnce(
-    `ng-signal-request: ${name} is not \`lazy\`, so this ${method} re-fires whenever a signal read by ` +
-      `its source changes. For a write, \`createMutation\` runs on demand and gives you optimistic ` +
-      `updates and \`invalidates\`; pass \`lazy: true\` if you do want a query.`,
+    `ng-signal-request: ${name} is not \`lazy\`, so this ${method} re-fires on signal changes. ` +
+      `Use \`createMutation\` for writes, or \`lazy: true\` for a query.`,
   );
 }
 

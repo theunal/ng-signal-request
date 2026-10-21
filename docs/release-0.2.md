@@ -1,12 +1,12 @@
 # 0.2.0 release review (2026-10-21)
 
-This is the pre-release record for the 0.2.0 candidate. It compares the candidate with
-`v0.1.0`, lists every behavior change and its opt-out, and keeps the manual release
-checks in one place. It does not publish anything.
+This is the release record for 0.2.0. It compares the published release with `v0.1.0`,
+lists every behavior change and its opt-out, and keeps the manual release checks in one
+place. The npm outcome is recorded at the end.
 
 ## Diff against 0.1.0
 
-At the final candidate (including this document):
+At the published release commit `47db330` (the tag target):
 
 ```text
 $ git diff v0.1.0 --stat
@@ -48,26 +48,27 @@ settings, or a legal decision rather than the repository.
 
 ### Package identity and version
 
-- [x] The package is unscoped: `ng-signal-request`. `npm view ng-signal-request name
-version dist-tags` returns `0.1.0` as `latest`; `ng-signal-request@0.2.0` returns
-      `E404`, so the version is free. `npm owner ls ng-signal-request` returns `theunal`.
+- [x] The package is unscoped: `ng-signal-request`. Before the release, `latest` was
+      `0.1.0` and `0.2.0` was free; `npm owner ls ng-signal-request` returns `theunal`.
+      After the release, `latest` is `0.2.0`.
 - [x] Keep the unscoped name. A scope (`@theunal/...`) would change every install
       command and is a breaking package-name change; do not do it in this release
       without a migration plan.
-- [ ] Create the tag **on the final commit**: `git tag v0.2.0`. The first attempt
-      (`0b4192c`) failed in CI; see "CI retry" below.
+- [x] Create the tag **on the final commit**: `v0.2.0` points at `47db330`. The first
+      attempt (`0b4192c`) failed in CI; see "CI retry" and "Published" below.
 - [x] Do not `npm publish` the working `dist/` by hand. The manifests still say
       `0.1.0`; the workflow rewrites the version from the tag. The dry-run used a
       temporary copy with version `0.2.0` and succeeded.
-- [ ] Push the final commit to `main`, then push only the tag
-      (`git push origin v0.2.0`); the workflow triggers on the tag and derives `0.2.0`
-      from `GITHUB_REF_NAME`.
+- [x] Push the final commit to `main` and the tag (`git push origin main`,
+      `git push origin v0.2.0`); the workflow triggers on the tag and derives `0.2.0`
+      from `GITHUB_REF_NAME`. Post-publish documentation commits follow on `main` and
+      are not part of the tag.
 
 ### Repository metadata
 
-- [ ] `repository.url`, `bugs.url` and `homepage` all point at
-      `https://github.com/theunal/ng-signal-request`; `git remote -v` agrees. Open each
-      URL and confirm the repository is public and the issue tracker is enabled.
+- [x] `repository.url`, `bugs.url` and `homepage` all point at
+      `https://github.com/theunal/ng-signal-request`; `git remote -v` agrees. The
+      repository is public and the issue tracker is enabled (`has_issues: true`).
 - [x] Confirm the README copy in `projects/signal-request/README.md` matches the root
       README; `pnpm check:dist` checks this today.
 - [x] Confirm the published tarball contains `LICENSE`, `README.md`, all four entry
@@ -79,17 +80,19 @@ version dist-tags` returns `0.1.0` as `latest`; `ng-signal-request@0.2.0` return
 - [x] `projects/signal-request/package.json` has `"publishConfig": { "access":
 "public", "provenance": true }`. The generated `dist/signal-request/package.json`
       keeps both.
-- [ ] npm Trusted Publishing is configured for this repository and the workflow file
-      `.github/workflows/npm-publish.yml` (GitHub Actions provider). The npm account must
-      have the package's publisher permission; no long-lived `NPM_TOKEN` should exist.
-      The npm UI setting cannot be checked from this environment; it remains manual.
+- [x] npm Trusted Publishing is configured for this repository and the workflow file
+      `.github/workflows/npm-publish.yml` (GitHub Actions provider). The npm account has
+      the package's publisher permission; no long-lived `NPM_TOKEN` exists. The
+      registry's `_npmUser.trustedPublisher` field and the successful OIDC publish prove
+      the setting.
 - [x] The workflow has `permissions: contents: read` and `id-token: write`, installs
       npm >= 11.5.1, deliberately omits `setup-node`'s `registry-url`, and publishes with
       `npm publish --provenance --access public`. Those are the conditions for OIDC and a
       signed provenance statement.
-- [ ] After the workflow, open the npm version page and confirm the provenance badge and
-      the expected git tag/commit. If the job fails, the "Diagnose Trusted Publishing"
-      step prints the OIDC request state without secrets.
+- [x] After the workflow, the npm metadata matches the tag: `gitHead` is `47db330`, the
+      SLSA statement names `refs/tags/v0.2.0` and the same `gitCommit`, and a clean
+      `npm audit signatures` reports 5 verified registry signatures and 1 verified
+      attestation. See "Published" below.
 
 ### License and attribution
 
@@ -112,7 +115,9 @@ specs in a worker, and `create-request.spec.ts` had already printed the same mes
 before the spy was installed. The publish step was skipped and npm stayed at 0.1.0.
 `add5e61` clears the ledger before each warning test; five consecutive CI-mode runs
 passed. `origin/main` also carried an Angular 22.2.3 bump and the tracked
-`docs/plan.md`, merged in `327f071`; the full gate was rerun on the merge.
+`docs/plan.md`, merged in `327f071`; the full gate was rerun on the merge. Run #11 on
+`47db330` then passed and published 0.2.0. The version document was briefly 404 for
+about four minutes after the job; that was npm CDN propagation, not a skipped publish.
 
 ### Verification gate
 
@@ -133,5 +138,22 @@ passed. `origin/main` also carried an Angular 22.2.3 bump and the tracked
       Do not raise a budget to make a release pass.
 - [x] `git status` is clean on the final commit. `docs/plan.md` is tracked because
       `origin/main` contained it; it is not in the npm tarball.
-- [ ] The tag points at the commit that contains this file and the final CHANGELOG
-      entry.
+- [x] The tag points at the release commit `47db330`; the registry's `gitHead` and the
+      SLSA `gitCommit` both name it. The `0.2.0` CHANGELOG heading and these publish
+      notes are post-release commits on `main`; they are not in the npm tarball.
+
+## Published
+
+- Version: `ng-signal-request@0.2.0`, also `latest`; npm recorded it at
+  2026-10-21 16:53:33 UTC.
+- Release commit / `gitHead`: `47db3304102835b3abf2f58d3497ac49555d5524`; tag `v0.2.0`
+  points at it. Workflow run #11:
+  <https://github.com/theunal/ng-signal-request/actions/runs/39638051821>.
+- Tarball: 15 files, 896482 bytes unpacked, integrity
+  `sha512-f8tw11i5eCPeCyINvJJigSRmU4/uDXdM/ZiTvNP0tIr0f/wHES5lEfRiIxIsosK89koNTnzXm/jkKVeZ3yivGg==`.
+- Provenance: SLSA v1, `refs/tags/v0.2.0`, repository
+  `https://github.com/theunal/ng-signal-request`, resolved dependency `gitCommit`
+  `47db330...`; `npm audit signatures` in a clean install reports 5 verified registry
+  signatures and 1 verified attestation.
+- The first run (#10, `0b4192c`) failed in tests and published nothing. The tag was
+  moved to `47db330` after the test fix and the `origin/main` merge.

@@ -19,7 +19,11 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 > for both) or use `createPersister({ storage })`, whose return type is inferred.
 > Nothing is removed at runtime; this is compile-time only.
 
-## [Unreleased]
+## [0.2.0] - 2026-10-21
+
+Published to npm as `ng-signal-request@0.2.0` with provenance from release commit
+`47db330`; the [workflow run](https://github.com/theunal/ng-signal-request/actions/runs/39638051821)
+and the SLSA statement both name `refs/tags/v0.2.0`.
 
 ### Added
 
@@ -590,3 +594,4 @@ absent from it.
 - No offline support (`onlineManager`-style) and no `networkMode`.
 
 [0.1.0]: https://github.com/theunal/ng-signal-request/releases/tag/v0.1.0
+[0.2.0]: https://github.com/theunal/ng-signal-request/compare/v0.1.0...v0.2.0

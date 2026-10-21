@@ -837,3 +837,11 @@ After the merge, three consecutive `check:dist` runs were identical:
 Control is 38.36 KB gzip; core FESM is 20.6 KB, `/devtools` 4.5 KB. `pnpm verify`
 passes with 599 tests and coverage 97.86 / 93.61 / 99.25 / 99.03; `pnpm check:api
 v0.1.0` still reports 0 removed; e2e is 3/3.
+
+Workflow run #11 on `47db330` then passed and published 0.2.0. npm recorded it at
+16:53:33 UTC; `npm view` reports `latest` 0.2.0 and `gitHead` 47db330. The tarball has
+15 files (896482 bytes unpacked). In a clean install, `npm audit signatures` reports 5
+verified registry signatures and 1 verified attestation; the SLSA v1 statement names
+`refs/tags/v0.2.0`, the repository, and resolved dependency `gitCommit` 47db330. The
+version document was briefly 404 after the run because of npm CDN propagation; a later
+cache-busted read returned 200.

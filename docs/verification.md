@@ -851,4 +851,6 @@ tsconfig maps `ng-signal-request` to `dist/signal-request` so the size probes me
 built package; CI ran lint before the library build, so on a clean runner the probe imports
 were unresolved and `@typescript-eslint/no-unsafe-*` reported 30 errors. A local `dist`
 hid the problem. The CI workflow and `pnpm verify` now build the library before lint; with
-`dist` removed, `pnpm verify` passes. This changes no shipped code and no bundle number.
+`dist` removed, `pnpm verify` passes. The follow-up `CI` run #5 on `474d166` passed:
+<https://github.com/theunal/ng-signal-request/actions/runs/39640775656>. This changes no
+shipped code and no bundle number.

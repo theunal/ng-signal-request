@@ -2,7 +2,7 @@
 
 [![npm version](https://img.shields.io/npm/v/ng-signal-request.svg)](https://www.npmjs.com/package/ng-signal-request)
 [![npm downloads](https://img.shields.io/npm/dm/ng-signal-request.svg)](https://www.npmjs.com/package/ng-signal-request)
-[![CI](https://github.com/theunal/ng-signal-request/actions/workflows/npm-publish.yml/badge.svg)](https://github.com/theunal/ng-signal-request/actions/workflows/npm-publish.yml)
+[![CI](https://github.com/theunal/ng-signal-request/actions/workflows/ci.yml/badge.svg)](https://github.com/theunal/ng-signal-request/actions/workflows/ci.yml)
 [![license](https://img.shields.io/npm/l/ng-signal-request.svg)](./LICENSE)
 
 A **signal-based HTTP layer** for Angular (v22+). `httpResource` from the
@@ -2034,7 +2034,7 @@ pnpm typecheck     # tsc --noEmit over the lib, spec, devtools and demo projects
 pnpm lint          # eslint, type-aware, over every file
 pnpm format        # prettier --write
 pnpm watch         # rebuild on change (development configuration)
-pnpm verify        # typecheck + lint + format:check + test + build + check:types-compat + build:demo + check:dist
+pnpm verify        # typecheck + build + lint + format:check + test + check:types-compat + build:demo + check:dist
 pnpm check:dist    # post-build assertions (see "Bundle" below)
 pnpm check:api     # export diff against a git ref: `pnpm check:api v0.1.0`
 pnpm check:types-compat  # compile the 0.1.0 compatibility fixture against the build
@@ -2132,8 +2132,8 @@ request probe, and `pnpm check:dist` prints every number on each run.
 Publishing is fully automated — no manual `npm publish`. The version comes from
 the tag, so nothing has to be bumped in a manifest:
 
-1. `git tag v0.1.0`
-2. `git push origin v0.1.0`
+1. `git tag v0.2.0` (replace with the version being released)
+2. `git push origin v0.2.0`
 3. [GitHub Actions](.github/workflows/npm-publish.yml) derives the version from the tag,
    builds, runs the unit tests and publishes to npm.
 

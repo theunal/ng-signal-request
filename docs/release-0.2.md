@@ -56,9 +56,10 @@ settings, or a legal decision rather than the repository.
       without a migration plan.
 - [x] Create the tag **on the final commit**: `v0.2.0` points at `47db330`. The first
       attempt (`0b4192c`) failed in CI; see "CI retry" and "Published" below.
-- [x] Do not `npm publish` the working `dist/` by hand. The manifests still say
-      `0.1.0`; the workflow rewrites the version from the tag. The dry-run used a
-      temporary copy with version `0.2.0` and succeeded.
+- [x] Do not `npm publish` the working `dist/` by hand. The manifests in the
+      repository intentionally remain `0.1.0`; the workflow rewrites the version
+      from the tag. The dry-run used a temporary copy with version `0.2.0` and
+      succeeded.
 - [x] Push the final commit to `main` and the tag (`git push origin main`,
       `git push origin v0.2.0`); the workflow triggers on the tag and derives `0.2.0`
       from `GITHUB_REF_NAME`. Post-publish documentation commits follow on `main` and
@@ -164,4 +165,6 @@ The separate `CI` workflow failed at lint on `47db330` and `7f19821`: the probe 
 maps `ng-signal-request` to `dist/signal-request`, but CI ran lint before the library
 build, so on a clean runner the probe imports were unresolved. The fix builds the library
 before lint in `.github/workflows/ci.yml` and `pnpm verify`; with `dist` removed,
-`pnpm verify` passes. The npm tarball, provenance and tag still point at `47db330`.
+`pnpm verify` passes. The follow-up `CI` run #5 on `474d166` passed:
+<https://github.com/theunal/ng-signal-request/actions/runs/39640775656>. The npm
+tarball, provenance and tag still point at `47db330`.

@@ -98,7 +98,7 @@ function buildMutationFactory<T, TArgs, TContext>(
   );
 }
 
-const POST = mutationFactory('createMutation', 'POST');
+const POST = /*#__PURE__*/ mutationFactory('createMutation', 'POST');
 
 /**
  * Creates an imperative write operation with signal state.
@@ -125,11 +125,11 @@ const POST = mutationFactory('createMutation', 'POST');
    intersection of `POST` and the object literal, and `createMutation`'s public type would be that
    intersection rather than the documented interface. */
 // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-assertion
-export const createMutation: CreateMutation = Object.assign(POST, {
-  post: mutationFactory('createMutation.post', 'POST'),
-  put: mutationFactory('createMutation.put', 'PUT'),
-  patch: mutationFactory('createMutation.patch', 'PATCH'),
-  delete: mutationFactory('createMutation.delete', 'DELETE'),
+export const createMutation: CreateMutation = /*#__PURE__*/ Object.assign(POST, {
+  post: /*#__PURE__*/ mutationFactory('createMutation.post', 'POST'),
+  put: /*#__PURE__*/ mutationFactory('createMutation.put', 'PUT'),
+  patch: /*#__PURE__*/ mutationFactory('createMutation.patch', 'PATCH'),
+  delete: /*#__PURE__*/ mutationFactory('createMutation.delete', 'DELETE'),
 }) as CreateMutation;
 
 function buildMutation<T, TArgs, TContext>(

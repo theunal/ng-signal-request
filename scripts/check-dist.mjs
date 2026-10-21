@@ -83,10 +83,9 @@ const BUDGETS = new Map([
  * What an application pays, in KB gzip over a control app that does not import the library.
  *
  * Per-entry-point budgets measure what we ship; these measure what is retained. They are different
- * numbers - the whole core entry point is retained by angular's bundler because the factories are
- * built with module-level `Object.assign` calls, so an app that imports one factory pays for all of
- * them (see `docs/design-0.2.md`, Step B1). The probes are the only way to notice that getting
- * worse, and the only honest way to state a size in the README.
+ * numbers, so an app that imports one factory can pay for more than that factory (see
+ * `docs/verification.md`, Step C). The probes are the only way to notice that getting worse, and
+ * the only honest way to state a size in the README.
  */
 const PROBE_BUDGETS = new Map([
   ['request', 22.5],
@@ -96,6 +95,24 @@ const PROBE_BUDGETS = new Map([
   // positive control for the secondary entry point. Kept in the same harness so the panel has a
   // measured budget instead of only a unit test.
   ['devtools', 32.5],
+]);
+
+/**
+ * Regression limits, tighter than the release budgets above.
+ *
+ * The budgets were set before the factory tables were marked pure and are deliberately left
+ * unchanged here; these limits are the new measured values plus about 3%. They are the check that
+ * the unkeyed `request` probe actually keeps the reduction instead of drifting back toward the
+ * cached engine one import at a time. `full` is not lower than its budget because its extra
+ * surface is the point of the probe.
+ */
+const PROBE_LIMITS = new Map([
+  ['request', 18.4],
+  ['keyed', 19.2],
+  ['full', 24],
+  // The panel is the positive control; this limit still catches a regression in the core part of
+  // the same probe, which is why it moved with `request` rather than staying at 32.5.
+  ['devtools', 28.8],
 ]);
 
 function checkProbeSizes() {
@@ -133,13 +150,23 @@ function checkProbeSizes() {
   for (const name of ['request', 'keyed', 'full', 'devtools']) {
     const size = sizes.get(name);
     const delta = size - base;
-    notes.push(`probe ${name} ${size.toFixed(2)} KB gzip, +${delta.toFixed(2)} over control`);
     const budget = PROBE_BUDGETS.get(name);
+    const limit = PROBE_LIMITS.get(name);
+    notes.push(
+      `probe ${name} ${size.toFixed(2)} KB gzip, +${delta.toFixed(2)} over control ` +
+        `(limit ${limit}, budget ${budget})`,
+    );
     if (delta > budget) {
       failures.push(
         `probe ${name} costs +${delta.toFixed(2)} KB gzip over an app without the library, ` +
           `over its ${budget} KB budget. Shrink it or raise the budget deliberately in ` +
           'scripts/check-dist.mjs and the README.',
+      );
+    } else if (delta > limit) {
+      failures.push(
+        `probe ${name} costs +${delta.toFixed(2)} KB gzip over an app without the library, ` +
+          `over its ${limit} KB regression limit (still under the ${budget} KB release budget). ` +
+          'Find what got retained; do not raise this limit to make the build pass.',
       );
     }
   }

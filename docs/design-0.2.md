@@ -1262,8 +1262,15 @@ an app already imports.
 
 This is the honest baseline for the README's size table, and the reason a per-probe budget is
 needed: the entry-point budget alone would not notice one factory getting more expensive for every
-app. Fixing the shaking (separate modules per factory, or pure annotations around the factory
-tables) is a public-API decision for a later release, not something 0.2.0 should smuggle in.
+app.
+
+**Update (2026-10-21).** The pure-annotation half of that fix was done without an API change:
+marking the outer `Object.assign` and every factory call in its object literal `/*#__PURE__*/` lets
+esbuild drop the unused `createInfiniteRequest` and `createMutation` tables and the injectables they
+reach. The request probe fell from +21.44 to **+17.87 KB**. The remaining cached engine is still
+statically reachable through `createRequest`'s keyed branch; a separate entry point or asynchronous
+import would change the public API or behavior, so it stays for now. Method, per-module bytes and
+the rejected alternatives are in `docs/verification.md` §14.
 
 ### `OnlineManager` laziness: implemented, but not a size win
 

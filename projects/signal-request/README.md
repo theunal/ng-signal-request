@@ -2072,28 +2072,30 @@ and compares gzip sizes against the one without the library:
 
 | Probe      | What it imports                                             | Over the control |
 | ---------- | ----------------------------------------------------------- | ---------------- |
-| `request`  | one uncached `createRequest`                                | **+21.4 KB**     |
-| `keyed`    | a keyed `createRequest` and `QueryClient`                   | **+21.5 KB**     |
+| `request`  | one uncached `createRequest`                                | **+17.9 KB**     |
+| `keyed`    | a keyed `createRequest` and `QueryClient`                   | **+18.6 KB**     |
 | `full`     | every core factory and the `/persist` + `/devtools` entries | **+23.5 KB**     |
-| `devtools` | a keyed request with `<ngsr-devtools />` rendered           | **+30.8 KB**     |
+| `devtools` | a keyed request with `<ngsr-devtools />` rendered           | **+27.9 KB**     |
 
-The gap between the first three rows is 2.1 KB, not 15, because angular's
-bundler keeps the whole primary module once anything in it is imported: the
-factories are built with module-level `Object.assign(...)` tables, and each
-`@Injectable`'s static DI declaration is a call, so esbuild cannot prove the
-unused ones side-effect-free. `sideEffects: false` drops modules, not statements
-inside the module you already import. This is a known cost, not a claim that a
-factory is free; fixing it would mean a module per factory, which is a public-API
-decision reserved for a later release. The `devtools` row is a positive control
-for the secondary entry point, not part of that core comparison: it pays for the
-panel on purpose.
+The unkeyed request probe fell from +21.4 KB to +17.9 KB after the module-level
+factory tables were marked `/*#__PURE__*/`. The unused `createInfiniteRequest`
+and `createMutation` tables - and the injectables only they reached - are now
+dropped. What remains is the cached engine itself: `createRequest` has keyed
+overloads, and its runtime branch imports that engine statically, so an app that
+only uses the uncached path still links it. Removing that last gap would mean a
+module per factory or a separate cached entry point, both public-API decisions
+reserved for a later release. The `devtools` row is a positive control for the
+secondary entry point, not part of that core comparison: it pays for the panel on
+purpose.
 
 Budgets, so growth is a decision rather than a surprise: the primary entry point
 is not allowed past **21.5 KB gzip** (raised from 20 KB by 0.2.0's `createQuery`;
-the measured 20.9 and the reasoning are in `docs/design-0.2.md`), any secondary
-entry point past **15 KB gzip**, and the probes above past the measured values plus
-roughly 5% (`request` and `keyed` 22.5 KB over the control, `full` 24 KB,
-`devtools` 32.5 KB). `pnpm check:dist` prints all of the numbers on every run.
+the measured 20.9 and the reasoning are in `docs/design-0.2.md`), and any
+secondary entry point past **15 KB gzip**. The probe release budgets are unchanged
+(`request` and `keyed` 22.5 KB over the control, `full` 24 KB, `devtools` 32.5 KB);
+`check:dist` now also enforces tighter regression limits of **18.4 / 19.2 / 24 /
+28.8 KB**. `pnpm attribution` prints the per-module retained bytes behind the
+request probe, and `pnpm check:dist` prints every number on each run.
 
 ## Releasing
 

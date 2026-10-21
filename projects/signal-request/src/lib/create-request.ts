@@ -764,14 +764,14 @@ function createFn(method: string, kind: Kind, caller: () => void) {
  * injection context" error points at the exact call: `createRequest.post.text`.
  */
 function createVariant(label: string, method: string): CreateRequestFn<never, never> {
-  return Object.assign(createFn(method, 'json', named(label)), {
-    text: createFn(method, 'text', named(`${label}.text`)),
-    blob: createFn(method, 'blob', named(`${label}.blob`)),
-    arrayBuffer: createFn(method, 'arrayBuffer', named(`${label}.arrayBuffer`)),
+  return /*#__PURE__*/ Object.assign(/*#__PURE__*/ createFn(method, 'json', named(label)), {
+    text: /*#__PURE__*/ createFn(method, 'text', named(`${label}.text`)),
+    blob: /*#__PURE__*/ createFn(method, 'blob', named(`${label}.blob`)),
+    arrayBuffer: /*#__PURE__*/ createFn(method, 'arrayBuffer', named(`${label}.arrayBuffer`)),
   }) as unknown as CreateRequestFn<never, never>;
 }
 
-const GET_JSON = createVariant('createRequest', 'GET');
+const GET_JSON = /*#__PURE__*/ createVariant('createRequest', 'GET');
 
 /**
  * Creates a reactive HTTP query on top of Angular's `httpResource`.
@@ -816,10 +816,10 @@ const GET_JSON = createVariant('createRequest', 'GET');
  * );
  * ```
  */
-export const createRequest: CreateRequest = Object.assign(GET_JSON, {
-  get: createVariant('createRequest.get', 'GET'),
-  post: createVariant('createRequest.post', 'POST'),
-  put: createVariant('createRequest.put', 'PUT'),
-  patch: createVariant('createRequest.patch', 'PATCH'),
-  delete: createVariant('createRequest.delete', 'DELETE'),
+export const createRequest: CreateRequest = /*#__PURE__*/ Object.assign(GET_JSON, {
+  get: /*#__PURE__*/ createVariant('createRequest.get', 'GET'),
+  post: /*#__PURE__*/ createVariant('createRequest.post', 'POST'),
+  put: /*#__PURE__*/ createVariant('createRequest.put', 'PUT'),
+  patch: /*#__PURE__*/ createVariant('createRequest.patch', 'PATCH'),
+  delete: /*#__PURE__*/ createVariant('createRequest.delete', 'DELETE'),
 });

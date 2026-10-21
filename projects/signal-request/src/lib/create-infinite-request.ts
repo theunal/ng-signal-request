@@ -581,14 +581,14 @@ function infiniteFactory(
 }
 
 function createVariant(label: string, method: string): CreateInfiniteRequestFn<never> {
-  return Object.assign(infiniteFactory(label, method, 'json'), {
-    text: infiniteFactory(`${label}.text`, method, 'text'),
-    blob: infiniteFactory(`${label}.blob`, method, 'blob'),
-    arrayBuffer: infiniteFactory(`${label}.arrayBuffer`, method, 'arrayBuffer'),
+  return /*#__PURE__*/ Object.assign(/*#__PURE__*/ infiniteFactory(label, method, 'json'), {
+    text: /*#__PURE__*/ infiniteFactory(`${label}.text`, method, 'text'),
+    blob: /*#__PURE__*/ infiniteFactory(`${label}.blob`, method, 'blob'),
+    arrayBuffer: /*#__PURE__*/ infiniteFactory(`${label}.arrayBuffer`, method, 'arrayBuffer'),
   });
 }
 
-const GET_JSON = createVariant('createInfiniteRequest', 'GET');
+const GET_JSON = /*#__PURE__*/ createVariant('createInfiniteRequest', 'GET');
 
 /**
  * Creates a paginated handle where each page is a real cache entry.
@@ -626,10 +626,10 @@ const GET_JSON = createVariant('createInfiniteRequest', 'GET');
  * // Now each page is an entry, so a reload *replaces* page N. There is no guard to write.
  * ```
  */
-export const createInfiniteRequest: CreateInfiniteRequest = Object.assign(GET_JSON, {
-  get: createVariant('createInfiniteRequest.get', 'GET'),
-  post: createVariant('createInfiniteRequest.post', 'POST'),
-  put: createVariant('createInfiniteRequest.put', 'PUT'),
-  patch: createVariant('createInfiniteRequest.patch', 'PATCH'),
-  delete: createVariant('createInfiniteRequest.delete', 'DELETE'),
+export const createInfiniteRequest: CreateInfiniteRequest = /*#__PURE__*/ Object.assign(GET_JSON, {
+  get: /*#__PURE__*/ createVariant('createInfiniteRequest.get', 'GET'),
+  post: /*#__PURE__*/ createVariant('createInfiniteRequest.post', 'POST'),
+  put: /*#__PURE__*/ createVariant('createInfiniteRequest.put', 'PUT'),
+  patch: /*#__PURE__*/ createVariant('createInfiniteRequest.patch', 'PATCH'),
+  delete: /*#__PURE__*/ createVariant('createInfiniteRequest.delete', 'DELETE'),
 });

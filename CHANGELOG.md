@@ -297,20 +297,23 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   - **`isRestoring`**, read from `RESTORE_GATE`, and a `(restoring)` header marker
     beside `(offline)`, so the panel cannot disagree with the gate that holds the
     first fetch.
-  - **Core metadata the panel cannot reconstruct.** `CacheEntry` gains
-    `fetchHistory`, `retryHistory`, `seeded` and `observerNames` getters, and
-    `subscribe(gcTime, debugName?)` records one token per handle. The public types
-    `FetchAttempt`, `FetchOutcome` and `RetryEvent` describe the history. The
-    histories are plain capped arrays, not signals: the writes that append to them
-    also move `updatedAt`, `isFetching` or `retryAttempt`, so the existing computed
-    snapshot re-runs without a fifth signal per entry. `observerCount` stays exact;
-    `observerNames` returns a `debugName` or `'anonymous'` per subscriber.
-  - **No polling and no new dependency.** Everything is a signal or history appended
-    from a signal-producing path. The production demo still does not import
-    `/devtools`; a dedicated `devtools` probe renders the panel as the positive
-    control, measured at **+30.85 KB** over the no-library control with a new
-    **32.5 KB** probe budget. The core (20.85 KB) and `/devtools` (4.01 KB) ceilings
-    are unchanged at 21.5 / 15 KB. See `docs/design-0.2.md`, Phase 6.
+  - **History is opt-in and lives outside the core.** The core exposes only the
+    `DevtoolsSink` interface and the `DEVTOOLS_SINK` token. `CacheEntry` keeps an
+    optional sink reference, `seeded`, `observerCount`, and the same
+    `fetchHistory` / `retryHistory` / `observerNames` getters, but no arrays or
+    observer `Set`; without a sink those getters return empty arrays.
+    `provideDevtoolsHistory()` installs the `/devtools` implementation, which owns
+    a `WeakMap<CacheEntry, History>`, caps attempts and retries at ten each, and is
+    collected with the entry. The provider must exist before the first keyed
+    handle; opening the panel later shows history from that point, not before.
+    The public types `FetchAttempt`, `FetchOutcome` and `RetryEvent` still describe
+    the rows.
+  - **No polling, no new dependency, and no per-entry history when unused.** The
+    production demo still does not import `/devtools`; a dedicated `devtools` probe
+    renders the panel with history opted in as the positive control, measured at
+    **+28.2 KB** over the no-library control with a **32.5 KB** probe budget. The core (20.9 KB) and
+    `/devtools` (4.4 KB) ceilings are unchanged at 21.5 / 15 KB. See
+    `docs/design-0.2.md`, Phase 6 and `docs/verification.md` §15.
 
 ### Fixed
 

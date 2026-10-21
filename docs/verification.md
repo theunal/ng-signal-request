@@ -562,3 +562,64 @@ are only known at runtime. The alternatives were rejected rather than silently s
 tighter regression limits of **18.4 / 19.2 / 24 / 28.8 KB**. The limits are the new measurements
 plus about 3%; they exist so the request probe cannot drift back to the old table cost one import at
 a time.
+
+## 15. Step 3 record - opt-in devtools history sink (2026-10-21)
+
+The history that Phase 6 put on every `CacheEntry` now lives behind a sink that only exists when a
+developer asks for it. The core owns an interface and a token; `/devtools` owns the arrays.
+
+### Shape
+
+- **Core** (`cache/devtools-sink.ts`): `DevtoolsSink` with `recordAttempt` / `recordRetry` /
+  `addObserver` / `removeObserver` and the three read methods, plus `DEVTOOLS_SINK`. `CacheEntry`
+  keeps only the optional `sink`, the in-flight attempt start time, `seeded`, and the observer count.
+  It calls the sink when an attempt settles, a retry is armed, or an observer subscribes/leaves.
+- **`/devtools`**: `DevtoolsHistory` implements the sink over a `WeakMap<CacheEntry, EntryHistory>`,
+  caps attempts and retries at ten each, and is provided by `provideDevtoolsHistory()` through
+  `useExisting`. The `WeakMap` is what makes "history dies with the entry" structural rather than a
+  cleanup step.
+- **Late panel.** The provider records from the moment it exists. A panel opened later reads what
+  was recorded; it cannot backfill entries created before the provider. Without the provider the
+  getters return empty arrays, and `observerCount` still works.
+
+### Tests and sizes
+
+| Check                                                | Result                              |
+| ---------------------------------------------------- | ----------------------------------- |
+| `pnpm test`                                          | **596 passed** (24 files)           |
+| Coverage (statements / branches / functions / lines) | 97.68 / 93.33 / 98.65 / 98.82       |
+| `request` probe                                      | **+17.89 KB** gzip over the control |
+| `keyed` probe                                        | **+18.60 KB**                       |
+| `full` probe                                         | **+23.48 KB**                       |
+| `devtools` probe (history opted in)                  | **+28.16 KB**                       |
+| Core FESM                                            | 97.5 KB raw, **20.9 KB** gzip       |
+| `/devtools` FESM                                     | 21.2 KB raw, **4.4 KB** gzip        |
+
+The sink added about 0.4 KB gzip to the `/devtools` entry and nothing measurable to the core probe;
+the core FESM is still 20.9 KB.
+
+### 10,000-entry heap
+
+The same ad-hoc harness as the earlier measurement: create 10,000 `CacheEntry` objects, force a
+major GC, and read `process.memoryUsage().heapUsed` against an empty baseline. The "before" column
+is the previous run with the arrays on the entry; "after" is this tree.
+
+| Scenario                                 | Before                                    | After                       | Change                             |
+| ---------------------------------------- | ----------------------------------------- | --------------------------- | ---------------------------------- |
+| No devtools history                      | 80,939.6 KiB / 8,288 B each               | 80,841.1 KiB / 8,278 B each | -98.5 KiB / -10 B each             |
+| Sink installed, empty history            | 83,445.1 KiB / 8,544 B each               | 80,842.1 KiB / 8,278 B each | -2,603 KiB / -266 B each           |
+| Sink installed, 10 attempts + 10 retries | 97,797-98,134 KiB / ~10,014-10,049 B each | 94,087.1 KiB / 9,635 B each | -3,710-4,047 KiB / -380-414 B each |
+
+The empty-history row is the interesting one: the old entry paid for two empty arrays even when
+nothing recorded. The new entry pays one optional reference; the sink's empty `WeakMap` entry is
+amortised to noise. With full history the saving is about 4%, because the history rows themselves
+still exist - now outside the entry, in the panel's own storage.
+
+### Release test
+
+`devtools.spec.ts` has a `WeakRef` test that records one attempt, drops the entry, forces a major GC
+through the V8 `--expose-gc` flag and asserts `ref.deref()` is `undefined`. That is what proves the
+`WeakMap` does not retain the entry; a test that only removed the entry from the cache would pass
+even if the sink leaked it.
+
+`docs/design-0.2.md` Phase 6 is updated to match this shape.

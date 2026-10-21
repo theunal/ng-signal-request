@@ -14,6 +14,7 @@ import {
 import { ALWAYS_ONLINE, type Connectivity, type NetworkMode } from '../connectivity';
 import { RequestCancelledError, toError } from '../errors';
 import { noop, nextRetryDelay, type NormalizedRetry } from '../utils';
+import type { DevtoolsSink } from './devtools-sink';
 import type { NormalizedKey } from './key';
 import type { StructuralSharingFn } from './structural-sharing';
 
@@ -69,8 +70,10 @@ export interface RetryEvent {
   readonly attempt: number;
 }
 
-/** How many history rows an entry keeps. Enough to see a pattern, small enough to ignore. */
-const HISTORY_LIMIT = 10;
+/** Returned when no devtools sink is installed, so the getters stay allocation-free. */
+const NO_ATTEMPTS: readonly FetchAttempt[] = [];
+const NO_RETRIES: readonly RetryEvent[] = [];
+const NO_OBSERVERS: readonly string[] = [];
 
 /** Fields both kinds of plan share. */
 export interface BaseFetchPlan<T> {
@@ -199,20 +202,14 @@ export class CacheEntry<T = unknown> {
   private destroyed = false;
 
   /**
-   * Devtools history, newest last.
-   *
-   * Plain arrays rather than signals: the snapshot already reads `updatedAt`, `isFetching` and
-   * `retryAttempt`, and every append happens on a path that moves one of them. A signal per entry
-   * would be a per-entry cost paid by applications that never open the panel.
+   * The optional devtools sink. The only devtools field in the entry: history arrays and observer
+   * names belong to the `/devtools` implementation, behind a `WeakMap` keyed by this entry.
    */
-  private readonly attempts: FetchAttempt[] = [];
-  private readonly retries: RetryEvent[] = [];
+  private readonly sink: DevtoolsSink | undefined;
   /** Epoch ms of the attempt in flight, or `0` when nothing is running. */
   private attemptStartedAt = 0;
   /** Whether the current value came from a seed/restore rather than a fetch or a local write. */
   private seededValue: boolean;
-  /** One token per subscribed handle, so `observerNames` can identify them without a back-reference. */
-  private readonly observerTokens = new Set<{ readonly name: string | undefined }>();
 
   /**
    * The held fetch, when the entry is paused before its first attempt.
@@ -274,6 +271,11 @@ export class CacheEntry<T = unknown> {
      * for a feature most applications never enable.
      */
     connectivity: Connectivity = ALWAYS_ONLINE,
+    /**
+     * Devtools history, when `provideDevtoolsHistory()` installed one. Optional for the same reason
+     * as `connectivity`: no sink means no history, not a guaranteed per-entry allocation.
+     */
+    sink?: DevtoolsSink,
   ) {
     this.hash = key.hash;
     this.segments = key.segments;
@@ -282,6 +284,7 @@ export class CacheEntry<T = unknown> {
     this.isBrowser = isBrowser;
     this.onDestroy = onDestroy;
     this.connectivity = connectivity;
+    this.sink = sink;
 
     // A seeded entry starts life already holding its value. Everything else stays at its empty
     // default, so a restored entry is an ordinary entry that happens to have old data: it is not
@@ -316,7 +319,7 @@ export class CacheEntry<T = unknown> {
    * read on the way *down* to zero observers — the moment when there is no handle
    * left to ask for it.
    *
-   * `debugName` is optional and exists only for `observerNames`; it does not affect the count,
+   * `debugName` is optional and goes only to the devtools sink; it does not affect the count,
    * the gc timer or anything the request does.
    *
    * Calling the returned function twice is a no-op, so a handle can hand it to a
@@ -324,8 +327,7 @@ export class CacheEntry<T = unknown> {
    */
   subscribe(gcTime: number, debugName?: string): () => void {
     if (this.destroyed) return noop;
-    const token = { name: debugName };
-    this.observerTokens.add(token);
+    this.sink?.addObserver(this, debugName);
     this.observers += 1;
     this.gcMs = gcTime;
     // A returning subscriber means the entry is wanted again, so the countdown stops.
@@ -336,7 +338,7 @@ export class CacheEntry<T = unknown> {
     return () => {
       if (released) return;
       released = true;
-      this.observerTokens.delete(token);
+      this.sink?.removeObserver(this, debugName);
       this.release();
     };
   }
@@ -390,28 +392,27 @@ export class CacheEntry<T = unknown> {
   /**
    * The `debugName` of every subscribed handle, one entry per handle.
    *
-   * Named handles are identified; anonymous ones appear as `'anonymous'`, because the panel should
-   * say *how many* are watching even when the application named none. This is a plain getter, like
-   * {@link observerCount}: subscription bookkeeping is not something a template should drive change
+   * Named handles are identified; anonymous ones appear as `'anonymous'`. The names live in the
+   * optional devtools sink, so without `provideDevtoolsHistory()` this is empty. A plain getter
+   * rather than a signal: subscription bookkeeping is not something a template should drive change
    * detection from, and the devtools snapshot already re-runs on the entry's signals.
    */
   get observerNames(): readonly string[] {
-    return [...this.observerTokens].map((token) => token.name ?? 'anonymous');
+    return this.sink?.observers(this) ?? NO_OBSERVERS;
   }
 
   /**
-   * The last {@link HISTORY_LIMIT} settled fetches, oldest first.
+   * The last ten settled fetches, oldest first, as held by the devtools sink.
    *
-   * A plain getter for the same reason as {@link observerNames}; read it next to `updatedAt` in a
-   * `computed` to make a panel live. The returned array is the entry's own: treat it as read-only.
+   * Without a sink the array is empty: history is opt-in. Treat the returned array as read-only.
    */
   get fetchHistory(): readonly FetchAttempt[] {
-    return this.attempts;
+    return this.sink?.attempts(this) ?? NO_ATTEMPTS;
   }
 
-  /** The last {@link HISTORY_LIMIT} scheduled retries, oldest first. */
+  /** The last ten scheduled retries, oldest first, as held by the devtools sink. */
   get retryHistory(): readonly RetryEvent[] {
-    return this.retries;
+    return this.sink?.retries(this) ?? NO_RETRIES;
   }
 
   /**
@@ -428,17 +429,15 @@ export class CacheEntry<T = unknown> {
     // Consume the start time: a settled attempt must never be recorded twice, even if a late abort
     // reaches `finish` after a newer fetch has already reset the field.
     this.attemptStartedAt = 0;
-    this.attempts.push({
+    this.sink?.recordAttempt(this, {
       startedAt,
       durationMs: Math.max(0, Date.now() - startedAt),
       outcome,
     });
-    if (this.attempts.length > HISTORY_LIMIT) this.attempts.shift();
   }
 
   private recordRetry(attempt: number): void {
-    this.retries.push({ at: Date.now(), attempt });
-    if (this.retries.length > HISTORY_LIMIT) this.retries.shift();
+    this.sink?.recordRetry(this, { at: Date.now(), attempt });
   }
 
   /** Entries with no observer left, which is when the gc timer is armed. */

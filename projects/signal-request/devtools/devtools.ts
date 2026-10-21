@@ -17,17 +17,21 @@ import {
   inject,
   Injectable,
   Injector,
+  makeEnvironmentProviders,
   runInInjectionContext,
   signal,
+  type EnvironmentProviders,
   type Signal,
   type WritableSignal,
 } from '@angular/core';
 import {
+  DEVTOOLS_SINK,
   QueryCache,
   QueryClient,
   RESTORE_GATE,
   formatKey,
   type CacheEntry,
+  type DevtoolsSink,
   type FetchAttempt,
   type QueryKeyFilter,
   type RetryEvent,
@@ -36,6 +40,94 @@ import { OnlineManager } from 'ng-signal-request';
 
 /** How much of a value the expanded row shows before the preview is cut. */
 const PREVIEW_LIMIT = 200;
+
+/** How many attempts and retries one entry keeps. The panel only needs a pattern, not a log. */
+const HISTORY_LIMIT = 10;
+
+const NO_ATTEMPTS: readonly FetchAttempt[] = [];
+const NO_RETRIES: readonly RetryEvent[] = [];
+const NO_OBSERVERS: readonly string[] = [];
+
+interface EntryHistory {
+  /** Oldest first, so the cap can drop from the front. */
+  readonly attempts: FetchAttempt[];
+  readonly retries: RetryEvent[];
+  readonly observers: string[];
+}
+
+/**
+ * Owns the devtools history that used to live on every `CacheEntry`.
+ *
+ * This is the implementation behind {@link provideDevtoolsHistory}. The `WeakMap` is the point:
+ * the sink never keeps an entry alive, and an entry that leaves the cache takes its history with
+ * it. The cap is per entry, so a busy request cannot grow without bound.
+ */
+@Injectable({ providedIn: 'root' })
+export class DevtoolsHistory implements DevtoolsSink {
+  private readonly histories = new WeakMap<object, EntryHistory>();
+
+  private history(entry: object): EntryHistory {
+    let history = this.histories.get(entry);
+    if (history === undefined) {
+      history = { attempts: [], retries: [], observers: [] };
+      this.histories.set(entry, history);
+    }
+    return history;
+  }
+
+  recordAttempt<T>(entry: CacheEntry<T>, attempt: FetchAttempt): void {
+    const history = this.history(entry);
+    history.attempts.push(attempt);
+    if (history.attempts.length > HISTORY_LIMIT) history.attempts.shift();
+  }
+
+  recordRetry<T>(entry: CacheEntry<T>, retry: RetryEvent): void {
+    const history = this.history(entry);
+    history.retries.push(retry);
+    if (history.retries.length > HISTORY_LIMIT) history.retries.shift();
+  }
+
+  addObserver<T>(entry: CacheEntry<T>, name: string | undefined): void {
+    this.history(entry).observers.push(name ?? 'anonymous');
+  }
+
+  removeObserver<T>(entry: CacheEntry<T>, name: string | undefined): void {
+    const observers = this.histories.get(entry)?.observers;
+    if (observers === undefined) return;
+    const index = observers.indexOf(name ?? 'anonymous');
+    if (index !== -1) observers.splice(index, 1);
+  }
+
+  attempts<T>(entry: CacheEntry<T>): readonly FetchAttempt[] {
+    return this.histories.get(entry)?.attempts ?? NO_ATTEMPTS;
+  }
+
+  retries<T>(entry: CacheEntry<T>): readonly RetryEvent[] {
+    return this.histories.get(entry)?.retries ?? NO_RETRIES;
+  }
+
+  observers<T>(entry: CacheEntry<T>): readonly string[] {
+    return this.histories.get(entry)?.observers ?? NO_OBSERVERS;
+  }
+}
+
+/**
+ * Opts the application into devtools history.
+ *
+ * Add it to the application's root providers, before the first keyed handle is created:
+ *
+ * ```ts
+ * bootstrapApplication(App, {
+ *   providers: [provideHttpClient(), provideDevtoolsHistory()],
+ * });
+ * ```
+ *
+ * The panel can be opened later; the sink records from the moment this provider exists. It cannot
+ * backfill entries that were already created, because those entries never received the sink.
+ */
+export function provideDevtoolsHistory(): EnvironmentProviders {
+  return makeEnvironmentProviders([{ provide: DEVTOOLS_SINK, useExisting: DevtoolsHistory }]);
+}
 
 /**
  * What the panel shows for one entry.

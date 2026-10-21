@@ -2,7 +2,7 @@ import { Component } from '@angular/core';
 import { provideHttpClient } from '@angular/common/http';
 import { bootstrapApplication } from '@angular/platform-browser';
 import { createRequest } from 'ng-signal-request';
-import { DevtoolsPanel } from 'ng-signal-request/devtools';
+import { DevtoolsPanel, provideDevtoolsHistory } from 'ng-signal-request/devtools';
 
 /**
  * The positive control for the `/devtools` entry point.
@@ -28,5 +28,5 @@ class ProbeComponent {
 }
 
 void bootstrapApplication(ProbeComponent, {
-  providers: [provideHttpClient()],
+  providers: [provideHttpClient(), provideDevtoolsHistory()],
 }).catch((error: unknown) => console.error(error));

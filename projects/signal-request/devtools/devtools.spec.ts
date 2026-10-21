@@ -1,16 +1,23 @@
 import { type ComponentFixture, TestBed } from '@angular/core/testing';
 import { describe, expect, expectTypeOf, it, vi } from 'vitest';
 import { inject, signal } from '@angular/core';
+import { runInNewContext } from 'node:vm';
+import { setFlagsFromString } from 'node:v8';
 import {
+  ALWAYS_ONLINE,
+  CacheEntry,
   createRequest,
+  normalizeKey,
   OnlineManager,
   provideSignalRequest,
   QueryClient,
   RESTORE_GATE,
 } from 'ng-signal-request';
 import {
+  DevtoolsHistory,
   DevtoolsPanel,
   QueryDevtools,
+  provideDevtoolsHistory,
   snapshotEntries,
   type DevtoolsEntry,
   type DevtoolsStatus,
@@ -32,9 +39,27 @@ function statusOf(entries: readonly DevtoolsEntry[], key: string): DevtoolsStatu
   return entries.find((entry) => entry.label.includes(key))?.status;
 }
 
+/** Every devtools test opts into history; reading an empty sink is not what these tests cover. */
+function setupDevtools(providers: Parameters<typeof setup>[0] = []) {
+  return setup([provideDevtoolsHistory(), ...providers]);
+}
+
+/**
+ * Forces a collection in the Node process the unit tests run in.
+ *
+ * `--expose-gc` is normally a launch flag, and the Angular test builder controls the process. The
+ * V8 flag plus a fresh context is the standard way to get a callable `gc` after startup; it is only
+ * used by the one test that proves the sink's `WeakMap` does not retain an entry.
+ */
+function forceGc(): void {
+  setFlagsFromString('--expose-gc');
+  const gc = runInNewContext('gc') as (options?: { type: string }) => void;
+  gc({ type: 'major' });
+}
+
 describe('snapshotEntries() — the snapshot', () => {
   it('describes an entry that has not fetched yet', async () => {
-    const { create } = setup();
+    const { create } = setupDevtools();
     // `refetchOnMount: false`, so the entry exists with nothing in flight. That is the only way to
     // see `'empty'` rather than `'loading'` — a mounting handle fetches, which is the point of it.
     const handle = create(() =>
@@ -62,7 +87,7 @@ describe('snapshotEntries() — the snapshot', () => {
   });
 
   it('is loading while the request is in flight, ready once it lands', async () => {
-    const { http, create } = setup();
+    const { http, create } = setupDevtools();
     const handle = keyed<Row[]>(create, ['rows']);
     await settle();
 
@@ -83,7 +108,7 @@ describe('snapshotEntries() — the snapshot', () => {
   });
 
   it('reports invalidation, local writes and failures distinctly', async () => {
-    const { http, create } = setup();
+    const { http, create } = setupDevtools();
     const client = create(() => inject(QueryClient));
     const handle = keyed<Row[]>(create, ['rows']);
     await settle();
@@ -120,7 +145,7 @@ describe('snapshotEntries() — the snapshot', () => {
   });
 
   it('shows invalidation on its own when nobody is watching', async () => {
-    const { http, create } = setup();
+    const { http, create } = setupDevtools();
     const client = create(() => inject(QueryClient));
     const handle = keyed<Row[]>(create, ['rows']);
     await settle();
@@ -142,7 +167,7 @@ describe('snapshotEntries() — the snapshot', () => {
   });
 
   it('carries the raw key, not just its rendering', async () => {
-    const { create } = setup();
+    const { create } = setupDevtools();
     const handle = create(() =>
       createRequest<Row[]>(() => ({ url: '/rows' }), { key: () => ['rows', { page: 2 }] }),
     );
@@ -157,7 +182,7 @@ describe('snapshotEntries() — the snapshot', () => {
   });
 
   it('honours a filter, the same one the client takes', async () => {
-    const { create } = setup();
+    const { create } = setupDevtools();
     const users = create(() =>
       createRequest<Row[]>(() => ({ url: '/users' }), { key: () => ['users'] }),
     );
@@ -177,7 +202,7 @@ describe('snapshotEntries() — the snapshot', () => {
 
 describe('QueryDevtools — the live view', () => {
   it('tracks entries as they are created and collected', async () => {
-    const { create } = setup();
+    const { create } = setupDevtools();
     const devtools = create(() => inject(QueryDevtools));
 
     expect(devtools.entries()).toEqual([]);
@@ -200,7 +225,7 @@ describe('QueryDevtools — the live view', () => {
   });
 
   it('reflects state changes without polling', async () => {
-    const { http, create } = setup();
+    const { http, create } = setupDevtools();
     const devtools = create(() => inject(QueryDevtools));
     const handle = keyed<Row[]>(create, ['rows']);
     await settle();
@@ -216,7 +241,7 @@ describe('QueryDevtools — the live view', () => {
   });
 
   it('opens and closes', () => {
-    const { create } = setup();
+    const { create } = setupDevtools();
     const devtools = create(() => inject(QueryDevtools));
 
     expect(devtools.isOpen()).toBe(false);
@@ -229,7 +254,7 @@ describe('QueryDevtools — the live view', () => {
   });
 
   it('log() prints a table of the current snapshot', async () => {
-    const { create } = setup();
+    const { create } = setupDevtools();
     const devtools = create(() => inject(QueryDevtools));
     const table = vi.spyOn(console, 'table').mockImplementation(() => {});
     try {
@@ -249,7 +274,7 @@ describe('QueryDevtools — the live view', () => {
   });
 
   it('logChanges() reports what changed, and stops when told to', async () => {
-    const { http, create } = setup();
+    const { http, create } = setupDevtools();
     const devtools = create(() => inject(QueryDevtools));
     const lines: string[] = [];
     const log = vi.spyOn(console, 'log').mockImplementation((message: unknown) => {
@@ -291,7 +316,7 @@ describe('QueryDevtools — the live view', () => {
 
 describe('devtools — connectivity', () => {
   it('marks a paused entry in the snapshot without changing its status', async () => {
-    const { create } = setup();
+    const { create } = setupDevtools();
     TestBed.inject(OnlineManager).setOnline(false);
     const handle = create(() =>
       createRequest<Row[]>(() => ({ url: '/rows' }), {
@@ -313,7 +338,7 @@ describe('devtools — connectivity', () => {
   });
 
   it('exposes the same connectivity the library acts on', () => {
-    const { create } = setup();
+    const { create } = setupDevtools();
     const devtools = create(() => inject(QueryDevtools));
     const manager = TestBed.inject(OnlineManager);
 
@@ -325,7 +350,7 @@ describe('devtools — connectivity', () => {
   });
 
   it('shows the offline banner and the per-row paused marker', async () => {
-    const { create } = setup();
+    const { create } = setupDevtools();
     TestBed.inject(OnlineManager).setOnline(false);
     const handle = create(() =>
       createRequest<Row[]>(() => ({ url: '/rows' }), {
@@ -352,7 +377,7 @@ describe('devtools — connectivity', () => {
 
 describe('DevtoolsPanel — the table', () => {
   function mount(): ComponentFixture<DevtoolsPanel> {
-    setup();
+    setupDevtools();
     const fixture = TestBed.createComponent(DevtoolsPanel);
     fixture.detectChanges();
     return fixture;
@@ -372,7 +397,7 @@ describe('DevtoolsPanel — the table', () => {
   });
 
   it('renders a row per entry, with a formatted age', async () => {
-    const { create } = setup();
+    const { create } = setupDevtools();
     const handle = keyed<Row[]>(create, ['rows']);
     await settle();
     // Pin the clock so the age column has one right answer rather than a race with the test runner.
@@ -396,7 +421,7 @@ describe('DevtoolsPanel — the table', () => {
 
   it('shows the entry count against the cap, and flags an overshoot', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    const { create } = setup([provideSignalRequest({ maxEntries: 1 })]);
+    const { create } = setupDevtools([provideSignalRequest({ maxEntries: 1 })]);
     // Two live handles against a cap of one: nothing may be taken, so the cache overshoots and the
     // panel says so rather than silently reporting a number that looks fine.
     const a = keyed<Row[]>(create, ['a']);
@@ -424,7 +449,7 @@ describe('DevtoolsPanel — the table', () => {
   });
 
   it('counts staged persisted values, which have no entry to show', () => {
-    setup([provideSignalRequest({ maxEntries: 2 })]);
+    setupDevtools([provideSignalRequest({ maxEntries: 2 })]);
     // Staged by a persister: no entry exists, but they hold two of the cap's two places. The table
     // cannot list them, so the label has to account for them or the cap readout is a lie.
     cache().seed(['rows', 1], [{ id: 1 }], 1);
@@ -451,7 +476,7 @@ describe('DevtoolsPanel — the table', () => {
 
 describe('devtools — depth', () => {
   it('reports plan kind, seed origin, observer names and newest-first attempts', async () => {
-    const { http, create } = setup();
+    const { http, create } = setupDevtools();
     const handle = keyed<Row[]>(create, ['rows']);
     await settle();
 
@@ -479,7 +504,7 @@ describe('devtools — depth', () => {
   });
 
   it('serializes a preview only when asked, and caps it', async () => {
-    const { create } = setup();
+    const { create } = setupDevtools();
     const handle = create(() =>
       createRequest<{ body: string }>(() => ({ url: '/rows' }), {
         key: () => ['rows'],
@@ -503,7 +528,7 @@ describe('devtools — depth', () => {
   });
 
   it('turns an unserializable value into a label instead of throwing', async () => {
-    const { create } = setup();
+    const { create } = setupDevtools();
     const handle = create(() =>
       createRequest<unknown>(() => ({ url: '/rows' }), {
         key: () => ['rows'],
@@ -539,7 +564,7 @@ describe('devtools — depth', () => {
 
   it('isRestoring() follows the restore gate', () => {
     const restoring = signal(true);
-    const { create } = setup([
+    const { create } = setupDevtools([
       {
         provide: RESTORE_GATE,
         useValue: { isRestoring: restoring.asReadonly(), restored: () => Promise.resolve() },
@@ -553,7 +578,7 @@ describe('devtools — depth', () => {
   });
 
   it('runs the invalidation, refetch and stale actions against the service', async () => {
-    const { http, create } = setup();
+    const { http, create } = setupDevtools();
     const devtools = create(() => inject(QueryDevtools));
     const handle = keyed<Row[]>(create, ['rows']);
     await settle();
@@ -583,7 +608,7 @@ describe('devtools — depth', () => {
   });
 
   it('cancels the in-flight request and removes exactly one row', async () => {
-    const { http, create } = setup();
+    const { http, create } = setupDevtools();
     const devtools = create(() => inject(QueryDevtools));
     const parent = create(() =>
       createRequest<Row[]>(() => ({ url: '/rows' }), {
@@ -618,7 +643,7 @@ describe('devtools — depth', () => {
 
   it('shows the restoring marker, actions and expandable details', async () => {
     const restoring = signal(true);
-    const { http, create } = setup([
+    const { http, create } = setupDevtools([
       {
         provide: RESTORE_GATE,
         useValue: { isRestoring: restoring.asReadonly(), restored: () => Promise.resolve() },
@@ -702,7 +727,7 @@ describe('devtools — depth', () => {
   });
 
   it('expands an empty row to say there is no value', async () => {
-    const { create } = setup();
+    const { create } = setupDevtools();
     const handle = create(() =>
       createRequest<Row[]>(() => ({ url: '/rows' }), {
         key: () => ['rows'],
@@ -730,7 +755,7 @@ describe('devtools — depth', () => {
     vi.useFakeTimers({
       toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'],
     });
-    const { http, create } = setup();
+    const { http, create } = setupDevtools();
     const handle = create(() =>
       createRequest<Row[]>(() => ({ url: '/rows' }), {
         key: () => ['rows'],
@@ -756,5 +781,57 @@ describe('devtools — depth', () => {
     handle.destroy();
     cache().remove(['rows']);
     vi.useRealTimers();
+  });
+
+  it('keeps the history cap at ten attempts and ten retries', () => {
+    const history = new DevtoolsHistory();
+    const entry = new CacheEntry(
+      normalizeKey(['cap']),
+      null as never,
+      undefined,
+      true,
+      undefined,
+      undefined,
+      ALWAYS_ONLINE,
+      history,
+    );
+
+    for (let attempt = 1; attempt <= 11; attempt++) {
+      history.recordAttempt(entry, { startedAt: attempt, durationMs: 1, outcome: 'success' });
+      history.recordRetry(entry, { at: attempt, attempt });
+    }
+
+    expect(history.attempts(entry)).toHaveLength(10);
+    expect(history.retries(entry)).toHaveLength(10);
+    // Oldest first, so the dropped row is attempt 1 and the newest is 11.
+    expect(history.attempts(entry)[0]?.startedAt).toBe(2);
+    expect(history.retries(entry).at(-1)?.attempt).toBe(11);
+  });
+
+  it('does not retain an entry after it leaves the cache', async () => {
+    const history = new DevtoolsHistory();
+    let entry: CacheEntry | undefined = new CacheEntry(
+      normalizeKey(['gc']),
+      null as never,
+      undefined,
+      true,
+      undefined,
+      undefined,
+      ALWAYS_ONLINE,
+      history,
+    );
+    history.recordAttempt(entry, { startedAt: 1, durationMs: 1, outcome: 'success' });
+    expect(history.attempts(entry)).toHaveLength(1);
+
+    const ref = new WeakRef(entry);
+    entry = undefined;
+    expect(entry).toBeUndefined();
+    // A WeakRef target is kept alive until the end of the current job, so collect between turns.
+    for (let round = 0; round < 2; round++) {
+      forceGc();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+
+    expect(ref.deref()).toBeUndefined();
   });
 });

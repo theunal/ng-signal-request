@@ -4,6 +4,7 @@ import { inject, Injectable, isDevMode, PLATFORM_ID, untracked } from '@angular/
 import { SIGNAL_REQUEST_CONFIG } from '../config';
 import { OnlineManager } from '../connectivity';
 import { CacheEntry, type SeedValue } from './cache-entry';
+import { DEVTOOLS_SINK } from './devtools-sink';
 import { matchesFilter, normalizeKey, type QueryKey, type QueryKeyFilter } from './key';
 
 /** Notified whenever an entry is created, written or removed. Devtools subscribe to this. */
@@ -64,6 +65,14 @@ export class QueryCache {
    * answer overrides one token rather than every request.
    */
   private readonly connectivity = inject(OnlineManager);
+  /**
+   * Optional devtools history sink, installed by `provideDevtoolsHistory()`.
+   *
+   * Optional because the core must cost nothing when the separate `/devtools` entry point is not
+   * imported. Entries created before the provider is installed keep no history; that is the
+   * documented late-panel behavior, not a race to paper over.
+   */
+  private readonly sink = inject(DEVTOOLS_SINK, { optional: true }) ?? undefined;
 
   /* --------------------------------------------------------------------- */
   /*  maxEntries                                                             */
@@ -299,6 +308,7 @@ export class QueryCache {
       seed,
       // Trailing, so the positional construction the entry's own tests use keeps working unchanged.
       this.connectivity,
+      this.sink,
     );
     this.entries.set(normalized.hash, entry as CacheEntry);
     this.recency.set(normalized.hash, ++this.useSeq);

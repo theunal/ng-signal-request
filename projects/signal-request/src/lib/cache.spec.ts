@@ -2,6 +2,7 @@ import { computed as computedSignal, signal, type Signal } from '@angular/core';
 import { afterEach, describe, expect, expectTypeOf, it, vi } from 'vitest';
 import { createRequest, RequestCancelledError } from '../public-api';
 import type { CachedRequest, SignalRequest } from '../public-api';
+import { provideDevtoolsHistory } from '../../devtools/devtools';
 import { advanceClock, cache, settle, setup } from '../../testing/testing';
 
 interface User {
@@ -1157,13 +1158,17 @@ describe('cached request — entry lifecycle edges', () => {
  * directly and assert the paths that append to them.
  */
 describe('cached request - entry history', () => {
+  // These assertions are about the opt-in sink, not about core bookkeeping. Without the provider
+  // the same getters return empty arrays, which the last test in this block checks explicitly.
+  const setupHistory = () => setup([provideDevtoolsHistory()]);
+
   afterEach(() => {
     vi.useRealTimers();
     vi.restoreAllMocks();
   });
 
   it('records the duration and outcome of a successful fetch', async () => {
-    const { http, create } = setup();
+    const { http, create } = setupHistory();
     const handle = create(() =>
       createRequest<User[]>('/users', { key: () => ['users'], refetchOnMount: false }),
     );
@@ -1189,7 +1194,7 @@ describe('cached request - entry history', () => {
   });
 
   it('records a failed fetch without turning it into a success', async () => {
-    const { http, create } = setup();
+    const { http, create } = setupHistory();
     const handle = create(() =>
       createRequest<User[]>('/users', { key: () => ['users'], refetchOnMount: false }),
     );
@@ -1210,7 +1215,7 @@ describe('cached request - entry history', () => {
   });
 
   it('records an abort as its own outcome', async () => {
-    const { http, create } = setup();
+    const { http, create } = setupHistory();
     const handle = create(() => createRequest<User[]>('/users', { key: () => ['users'] }));
     await settle();
     const entry = cache().peek<User[]>(['users'])!;
@@ -1226,7 +1231,7 @@ describe('cached request - entry history', () => {
   });
 
   it('keeps the last ten attempts, dropping the oldest', async () => {
-    const { http, create } = setup();
+    const { http, create } = setupHistory();
     const handle = create(() =>
       createRequest<User[]>('/users', { key: () => ['users'], refetchOnMount: false }),
     );
@@ -1251,7 +1256,7 @@ describe('cached request - entry history', () => {
     vi.useFakeTimers({
       toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'],
     });
-    const { http, create } = setup();
+    const { http, create } = setupHistory();
     const handle = create(() =>
       createRequest<User[]>('/users', {
         key: () => ['users'],
@@ -1282,7 +1287,7 @@ describe('cached request - entry history', () => {
   });
 
   it('marks a value as seeded until a fetch or a local write replaces it', async () => {
-    const { http, create } = setup();
+    const { http, create } = setupHistory();
     cache().seed(['users'], [{ id: 1, name: 'Ada' }], 100);
     const handle = create(() =>
       createRequest<User[]>('/users', {
@@ -1311,7 +1316,7 @@ describe('cached request - entry history', () => {
   });
 
   it('lists observers by debugName, including anonymous handles', async () => {
-    const { createChild } = setup();
+    const { createChild } = setupHistory();
     const a = createChild();
     const b = createChild();
     const first = a.create(() =>
@@ -1347,6 +1352,26 @@ describe('cached request - entry history', () => {
 
     anonymous.destroy();
     second.destroy();
+  });
+
+  it('keeps no history unless provideDevtoolsHistory() is installed', async () => {
+    const { create } = setup();
+    const handle = create(() =>
+      createRequest<User[]>('/users', {
+        key: () => ['users'],
+        debugName: 'unobserved',
+        refetchOnMount: false,
+      }),
+    );
+    await settle();
+    const entry = cache().peek<User[]>(['users'])!;
+
+    expect(entry.observerCount).toBe(1);
+    expect(entry.observerNames).toEqual([]);
+    expect(entry.fetchHistory).toEqual([]);
+    expect(entry.retryHistory).toEqual([]);
+
+    handle.destroy();
   });
 
   it('removeExact() removes one entry without taking its children', async () => {

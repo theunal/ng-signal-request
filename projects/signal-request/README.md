@@ -1880,19 +1880,19 @@ report and one you read here is a design decision.
 
 ### Cache
 
-| Export                                                                  | Description                                                                                                                                                                                       |
-| ----------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `QueryClient`                                                           | Injectable: `invalidate` · `refetch` · `cancel` · `getData` · `setData` · `remove` · `evict` · `size` · `isFetching` · `isPaused` · `count` · `clear` · `isMutating` · `mutatingCount`            |
-| `MutationRegistry`                                                      | In-flight mutation counts, globally and per `mutationKey`                                                                                                                                         |
-| `QueryCache`                                                            | The store: `resolve` · `peek` · `matching` · `markInvalidated` · `remove` · `removeExact` · `evictIdle` · `size` · `maxEntries` · `tightenMaxEntries` · `all` · `subscribeChanges` · `clear`      |
-| `CacheEntry`                                                            | One cached resource: `data` · `status` signals, `refetch()` · `subscribe()` · `setData()` · `evict()` · `isStale()`; `fetchHistory` · `retryHistory` · `seeded` · `observerNames` for diagnostics |
-| `QueryKey` / `QueryKeyFactory` / `QueryKeyFilter` / `QueryKeyPredicate` | Key shapes and the matching filter                                                                                                                                                                |
-| `normalizeKey` · `matchesFilter` · `startsWith` · `formatKey`           | Key helpers, exported for devtools and custom stores                                                                                                                                              |
-| `FetchAttempt` / `RetryEvent` / `FetchOutcome`                          | One settled fetch (start, duration, outcome) and one scheduled retry, as recorded on an entry                                                                                                     |
-| `defaultStructuralSharing` · `StructuralSharingFn`                      | The default sharing walk, and its type                                                                                                                                                            |
-| `CachedRequest` / `CachedRequestOptions` / `CacheOptions`               | The cached handle and its options                                                                                                                                                                 |
-| `RefetchOnMount`                                                        | `'stale'` · `'always'` · `false`                                                                                                                                                                  |
-| `RESTORE_GATE` / `RestoreGate` / `IDLE_RESTORE_GATE`                    | How a cached request learns that a restore is in flight, without the core knowing about storage                                                                                                   |
+| Export                                                                  | Description                                                                                                                                                                                                                                    |
+| ----------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `QueryClient`                                                           | Injectable: `invalidate` · `refetch` · `cancel` · `getData` · `setData` · `remove` · `evict` · `size` · `isFetching` · `isPaused` · `count` · `clear` · `isMutating` · `mutatingCount`                                                         |
+| `MutationRegistry`                                                      | In-flight mutation counts, globally and per `mutationKey`                                                                                                                                                                                      |
+| `QueryCache`                                                            | The store: `resolve` · `peek` · `matching` · `markInvalidated` · `remove` · `removeExact` · `evictIdle` · `size` · `maxEntries` · `tightenMaxEntries` · `all` · `subscribeChanges` · `clear`                                                   |
+| `CacheEntry`                                                            | One cached resource: `data` · `status` signals, `refetch()` · `subscribe()` · `setData()` · `evict()` · `isStale()`; `fetchHistory` · `retryHistory` · `seeded` · `observerNames` are empty unless `provideDevtoolsHistory()` installed a sink |
+| `QueryKey` / `QueryKeyFactory` / `QueryKeyFilter` / `QueryKeyPredicate` | Key shapes and the matching filter                                                                                                                                                                                                             |
+| `normalizeKey` · `matchesFilter` · `startsWith` · `formatKey`           | Key helpers, exported for devtools and custom stores                                                                                                                                                                                           |
+| `FetchAttempt` / `RetryEvent` / `FetchOutcome`                          | One settled fetch (start, duration, outcome) and one scheduled retry, as recorded on an entry                                                                                                                                                  |
+| `defaultStructuralSharing` · `StructuralSharingFn`                      | The default sharing walk, and its type                                                                                                                                                                                                         |
+| `CachedRequest` / `CachedRequestOptions` / `CacheOptions`               | The cached handle and its options                                                                                                                                                                                                              |
+| `RefetchOnMount`                                                        | `'stale'` · `'always'` · `false`                                                                                                                                                                                                               |
+| `RESTORE_GATE` / `RestoreGate` / `IDLE_RESTORE_GATE`                    | How a cached request learns that a restore is in flight, without the core knowing about storage                                                                                                                                                |
 
 ### `ng-signal-request/testing`
 
@@ -1900,7 +1900,7 @@ report and one you read here is a design decision.
 
 ### `ng-signal-request/devtools`
 
-`QueryDevtools` · `DevtoolsPanel` · `snapshotEntries` · `DevtoolsEntry` · `DevtoolsStatus` · `SnapshotOptions`
+`QueryDevtools` · `DevtoolsPanel` · `DevtoolsHistory` · `provideDevtoolsHistory` · `snapshotEntries` · `DevtoolsEntry` · `DevtoolsStatus` · `SnapshotOptions`
 
 ### `ng-signal-request/persist`
 
@@ -1917,6 +1917,27 @@ import { QueryDevtools, DevtoolsPanel } from 'ng-signal-request/devtools';
 @Component({ imports: [DevtoolsPanel], template: `<ngsr-devtools />` })
 export class DevShell {}
 ```
+
+History is opt-in, because keeping per-entry attempts, retries and observer
+names is a cost every application would otherwise pay for a panel it may never
+open. Add the provider at the application root, before the first keyed handle is
+created:
+
+```ts
+import { provideDevtoolsHistory } from 'ng-signal-request/devtools';
+
+bootstrapApplication(App, {
+  providers: [provideHttpClient(), provideDevtoolsHistory()],
+});
+```
+
+The panel itself works without it; `fetchHistory`, `retryHistory` and
+`observerNames` are then empty. The sink records from the moment the provider
+exists. Opening the panel later is fine, but it cannot backfill entries that
+were already created before the provider, because those entries never received
+the sink. History lives in a `WeakMap` owned by the `/devtools` entry point, is
+capped at ten attempts and ten retries per entry, and is collected with the
+entry.
 
 `DevtoolsPanel` is a small, unstyled table of the cache, fixed to the bottom
 right and collapsed to a `cache 3` button until clicked. Every row has a
@@ -2070,12 +2091,12 @@ measurement, and until 0.2.0 it was never taken. `projects/probe` contains five
 minimal production apps that differ only in their imports; `check:dist` builds them
 and compares gzip sizes against the one without the library:
 
-| Probe      | What it imports                                             | Over the control |
-| ---------- | ----------------------------------------------------------- | ---------------- |
-| `request`  | one uncached `createRequest`                                | **+17.9 KB**     |
-| `keyed`    | a keyed `createRequest` and `QueryClient`                   | **+18.6 KB**     |
-| `full`     | every core factory and the `/persist` + `/devtools` entries | **+23.5 KB**     |
-| `devtools` | a keyed request with `<ngsr-devtools />` rendered           | **+27.9 KB**     |
+| Probe      | What it imports                                               | Over the control |
+| ---------- | ------------------------------------------------------------- | ---------------- |
+| `request`  | one uncached `createRequest`                                  | **+17.9 KB**     |
+| `keyed`    | a keyed `createRequest` and `QueryClient`                     | **+18.6 KB**     |
+| `full`     | every core factory and the `/persist` + `/devtools` entries   | **+23.5 KB**     |
+| `devtools` | a keyed request with history opted in and `<ngsr-devtools />` | **+28.2 KB**     |
 
 The unkeyed request probe fell from +21.4 KB to +17.9 KB after the module-level
 factory tables were marked `/*#__PURE__*/`. The unused `createInfiniteRequest`

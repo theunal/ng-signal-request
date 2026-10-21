@@ -1765,8 +1765,8 @@ report and one you read here is a design decision.
 - **Importing one factory keeps the whole primary entry point in your bundle.** The
   factories live in one module with module-level tables, so an app that only calls
   `createRequest` still retains the cached path, the infinite path and the mutation
-  queue: measured at about **+21.4 KB gzip** over an app without the library, against
-  about **+23.5 KB** for the full surface. This is a tree-shaking limitation, not a
+  queue: measured at about **+17.9 KB gzip** over an app without the library, against
+  about **+23.7 KB** for the full surface. This is a tree-shaking limitation, not a
   claim that the unused features are free; fixing it needs a module per factory,
   which is a public-API decision for a later release. The measured numbers and the
   budgets are in [Bundle](#bundle).
@@ -1880,19 +1880,19 @@ report and one you read here is a design decision.
 
 ### Cache
 
-| Export                                                                  | Description                                                                                                                                                                                                                                    |
-| ----------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `QueryClient`                                                           | Injectable: `invalidate` · `refetch` · `cancel` · `getData` · `setData` · `remove` · `evict` · `size` · `isFetching` · `isPaused` · `count` · `clear` · `isMutating` · `mutatingCount`                                                         |
-| `MutationRegistry`                                                      | In-flight mutation counts, globally and per `mutationKey`                                                                                                                                                                                      |
-| `QueryCache`                                                            | The store: `resolve` · `peek` · `matching` · `markInvalidated` · `remove` · `removeExact` · `evictIdle` · `size` · `maxEntries` · `tightenMaxEntries` · `all` · `subscribeChanges` · `clear`                                                   |
-| `CacheEntry`                                                            | One cached resource: `data` · `status` signals, `refetch()` · `subscribe()` · `setData()` · `evict()` · `isStale()`; `fetchHistory` · `retryHistory` · `seeded` · `observerNames` are empty unless `provideDevtoolsHistory()` installed a sink |
-| `QueryKey` / `QueryKeyFactory` / `QueryKeyFilter` / `QueryKeyPredicate` | Key shapes and the matching filter                                                                                                                                                                                                             |
-| `normalizeKey` · `matchesFilter` · `startsWith` · `formatKey`           | Key helpers, exported for devtools and custom stores                                                                                                                                                                                           |
-| `FetchAttempt` / `RetryEvent` / `FetchOutcome`                          | One settled fetch (start, duration, outcome) and one scheduled retry, as recorded on an entry                                                                                                                                                  |
-| `defaultStructuralSharing` · `StructuralSharingFn`                      | The default sharing walk, and its type                                                                                                                                                                                                         |
-| `CachedRequest` / `CachedRequestOptions` / `CacheOptions`               | The cached handle and its options                                                                                                                                                                                                              |
-| `RefetchOnMount`                                                        | `'stale'` · `'always'` · `false`                                                                                                                                                                                                               |
-| `RESTORE_GATE` / `RestoreGate` / `IDLE_RESTORE_GATE`                    | How a cached request learns that a restore is in flight, without the core knowing about storage                                                                                                                                                |
+| Export                                                                  | Description                                                                                                                                                                                                                                 |
+| ----------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `QueryClient`                                                           | Injectable: `invalidate` · `refetch` · `cancel` · `getData` · `setData` · `remove` · `evict` · `size` · `isFetching` · `isPaused` · `count` · `clear` · `isMutating` · `mutatingCount`                                                      |
+| `MutationRegistry`                                                      | In-flight mutation counts, globally and per `mutationKey`                                                                                                                                                                                   |
+| `QueryCache`                                                            | The store: `resolve` · `peek` · `matching` · `markInvalidated` · `remove` · `removeExact` · `evictIdle` · `size` · `maxEntries` · `tightenMaxEntries` · `all` · `subscribeChanges` · `clear`                                                |
+| `CacheEntry`                                                            | One cached resource: `data` · `status` signals, `refetch()` · `subscribe()` · `setData()` · `evict()` · `isStale()`, `seeded` · `observerCount` · `hasPlan` · `planKind` diagnostics. History is read from `DevtoolsHistory`, not the entry |
+| `QueryKey` / `QueryKeyFactory` / `QueryKeyFilter` / `QueryKeyPredicate` | Key shapes and the matching filter                                                                                                                                                                                                          |
+| `normalizeKey` · `matchesFilter` · `startsWith` · `formatKey`           | Key helpers, exported for devtools and custom stores                                                                                                                                                                                        |
+| `FetchAttempt` / `RetryEvent` / `FetchOutcome`                          | One settled fetch (start, duration, outcome) and one scheduled retry, as recorded on an entry                                                                                                                                               |
+| `defaultStructuralSharing` · `StructuralSharingFn`                      | The default sharing walk, and its type                                                                                                                                                                                                      |
+| `CachedRequest` / `CachedRequestOptions` / `CacheOptions`               | The cached handle and its options                                                                                                                                                                                                           |
+| `RefetchOnMount`                                                        | `'stale'` · `'always'` · `false`                                                                                                                                                                                                            |
+| `RESTORE_GATE` / `RestoreGate` / `IDLE_RESTORE_GATE`                    | How a cached request learns that a restore is in flight, without the core knowing about storage                                                                                                                                             |
 
 ### `ng-signal-request/testing`
 
@@ -1931,13 +1931,14 @@ bootstrapApplication(App, {
 });
 ```
 
-The panel itself works without it; `fetchHistory`, `retryHistory` and
-`observerNames` are then empty. The sink records from the moment the provider
-exists. Opening the panel later is fine, but it cannot backfill entries that
-were already created before the provider, because those entries never received
-the sink. History lives in a `WeakMap` owned by the `/devtools` entry point, is
-capped at ten attempts and ten retries per entry, and is collected with the
-entry.
+The panel itself works without it; the history columns are then empty. History
+does not live on `CacheEntry`: `DevtoolsHistory` owns a
+`WeakMap<CacheEntry, History>`, caps attempts and retries at ten each, and is
+collected with the entry. The sink records from the moment the provider exists.
+Opening the panel later is fine, but it cannot backfill entries that were
+already created before the provider, because those entries never received the
+sink. A free `snapshotEntries(cache)` call omits history unless you pass the
+reader: `snapshotEntries(cache, { history: inject(DevtoolsHistory) })`.
 
 `DevtoolsPanel` is a small, unstyled table of the cache, fixed to the bottom
 right and collapsed to a `cache 3` button until clicked. Every row has a
@@ -2072,7 +2073,7 @@ than cosmetic. Sizes are the gzipped ESM bundles from a production build:
 
 | Entry point                  | Size        | When it is in an application |
 | ---------------------------- | ----------- | ---------------------------- |
-| `ng-signal-request`          | **20.9 KB** | always                       |
+| `ng-signal-request`          | **20.8 KB** | always                       |
 | `ng-signal-request/devtools` | 4.0 KB      | only if imported             |
 | `ng-signal-request/persist`  | 3.7 KB      | only if imported             |
 | `ng-signal-request/testing`  | 0.8 KB      | only in tests                |
@@ -2095,8 +2096,8 @@ and compares gzip sizes against the one without the library:
 | ---------- | ------------------------------------------------------------- | ---------------- |
 | `request`  | one uncached `createRequest`                                  | **+17.9 KB**     |
 | `keyed`    | a keyed `createRequest` and `QueryClient`                     | **+18.6 KB**     |
-| `full`     | every core factory and the `/persist` + `/devtools` entries   | **+23.5 KB**     |
-| `devtools` | a keyed request with history opted in and `<ngsr-devtools />` | **+28.2 KB**     |
+| `full`     | every core factory and the `/persist` + `/devtools` entries   | **+23.7 KB**     |
+| `devtools` | a keyed request with history opted in and `<ngsr-devtools />` | **+28.1 KB**     |
 
 The unkeyed request probe fell from +21.4 KB to +17.9 KB after the module-level
 factory tables were marked `/*#__PURE__*/`. The unused `createInfiniteRequest`
@@ -2111,7 +2112,7 @@ purpose.
 
 Budgets, so growth is a decision rather than a surprise: the primary entry point
 is not allowed past **21.5 KB gzip** (raised from 20 KB by 0.2.0's `createQuery`;
-the measured 20.9 and the reasoning are in `docs/design-0.2.md`), and any
+the measured 20.8 and the reasoning are in `docs/design-0.2.md`), and any
 secondary entry point past **15 KB gzip**. The probe release budgets are unchanged
 (`request` and `keyed` 22.5 KB over the control, `full` 24 KB, `devtools` 32.5 KB);
 `check:dist` now also enforces tighter regression limits of **18.4 / 19.2 / 24 /

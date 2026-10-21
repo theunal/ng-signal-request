@@ -1,8 +1,9 @@
 import { computed as computedSignal, signal, type Signal } from '@angular/core';
+import { TestBed } from '@angular/core/testing';
 import { afterEach, describe, expect, expectTypeOf, it, vi } from 'vitest';
 import { createRequest, RequestCancelledError } from '../public-api';
 import type { CachedRequest, SignalRequest } from '../public-api';
-import { provideDevtoolsHistory } from '../../devtools/devtools';
+import { DevtoolsHistory, provideDevtoolsHistory } from '../../devtools/devtools';
 import { advanceClock, cache, settle, setup } from '../../testing/testing';
 
 interface User {
@@ -1161,6 +1162,7 @@ describe('cached request - entry history', () => {
   // These assertions are about the opt-in sink, not about core bookkeeping. Without the provider
   // the same getters return empty arrays, which the last test in this block checks explicitly.
   const setupHistory = () => setup([provideDevtoolsHistory()]);
+  const entryHistory = () => TestBed.inject(DevtoolsHistory);
 
   afterEach(() => {
     vi.useRealTimers();
@@ -1182,12 +1184,12 @@ describe('cached request - entry history', () => {
     http.expectOne('/users').flush([{ id: 1, name: 'Ada' }]);
     await settle();
 
-    expect(entry.fetchHistory).toHaveLength(1);
-    expect(entry.fetchHistory[0]).toMatchObject({
+    expect(entryHistory().attempts(entry)).toHaveLength(1);
+    expect(entryHistory().attempts(entry)[0]).toMatchObject({
       durationMs: 250,
       outcome: 'success',
     });
-    expect(entry.fetchHistory[0].startedAt).toBeGreaterThan(0);
+    expect(entryHistory().attempts(entry)[0].startedAt).toBeGreaterThan(0);
     expect(entry.seeded).toBe(false);
 
     handle.destroy();
@@ -1208,8 +1210,8 @@ describe('cached request - entry history', () => {
     http.expectOne('/users').flush({ message: 'boom' }, { status: 500, statusText: 'Error' });
     await settle();
 
-    expect(entry.fetchHistory).toHaveLength(1);
-    expect(entry.fetchHistory[0]).toMatchObject({ durationMs: 40, outcome: 'error' });
+    expect(entryHistory().attempts(entry)).toHaveLength(1);
+    expect(entryHistory().attempts(entry)[0]).toMatchObject({ durationMs: 40, outcome: 'error' });
 
     handle.destroy();
   });
@@ -1225,7 +1227,7 @@ describe('cached request - entry history', () => {
     await settle();
 
     expect(request.cancelled).toBe(true);
-    expect(entry.fetchHistory.at(-1)?.outcome).toBe('aborted');
+    expect(entryHistory().attempts(entry).at(-1)?.outcome).toBe('aborted');
 
     handle.destroy();
   });
@@ -1246,8 +1248,8 @@ describe('cached request - entry history', () => {
     }
 
     // Eleven fetches, ten rows: the panel shows a pattern, not an unbounded log.
-    expect(entry.fetchHistory).toHaveLength(10);
-    expect(entry.fetchHistory.at(-1)?.outcome).toBe('success');
+    expect(entryHistory().attempts(entry)).toHaveLength(10);
+    expect(entryHistory().attempts(entry).at(-1)?.outcome).toBe('success');
 
     handle.destroy();
   });
@@ -1268,8 +1270,8 @@ describe('cached request - entry history', () => {
 
     http.expectOne('/users').flush({}, { status: 503, statusText: 'Unavailable' });
     await settle();
-    expect(entry.retryHistory).toHaveLength(1);
-    expect(entry.retryHistory[0].attempt).toBe(1);
+    expect(entryHistory().retries(entry)).toHaveLength(1);
+    expect(entryHistory().retries(entry)[0].attempt).toBe(1);
     expect(entry.retryAttempt()).toBe(1);
 
     vi.advanceTimersByTime(100);
@@ -1280,8 +1282,8 @@ describe('cached request - entry history', () => {
     // The retry number resets with the attempt, but the history is what happened, not what is
     // pending, so it survives the success.
     expect(entry.retryAttempt()).toBe(0);
-    expect(entry.retryHistory).toHaveLength(1);
-    expect(entry.fetchHistory.at(-1)?.outcome).toBe('success');
+    expect(entryHistory().retries(entry)).toHaveLength(1);
+    expect(entryHistory().attempts(entry).at(-1)?.outcome).toBe('success');
 
     handle.destroy();
   });
@@ -1337,18 +1339,18 @@ describe('cached request - entry history', () => {
 
     const entry = cache().peek<User[]>(['users'])!;
     expect(entry.observerCount).toBe(2);
-    expect([...entry.observerNames].sort()).toEqual(['header', 'list']);
+    expect([...entryHistory().observers(entry)].sort()).toEqual(['header', 'list']);
 
     first.destroy();
     await settle();
-    expect(entry.observerNames).toEqual(['header']);
+    expect(entryHistory().observers(entry)).toEqual(['header']);
 
     // A handle that never chose a name is still visible as an observer.
     const anonymous = b.create(() =>
       createRequest<User[]>('/users', { key: () => ['users'], refetchOnMount: false }),
     );
     await settle();
-    expect(entry.observerNames).toContain('anonymous');
+    expect(entryHistory().observers(entry)).toContain('anonymous');
 
     anonymous.destroy();
     second.destroy();
@@ -1367,9 +1369,9 @@ describe('cached request - entry history', () => {
     const entry = cache().peek<User[]>(['users'])!;
 
     expect(entry.observerCount).toBe(1);
-    expect(entry.observerNames).toEqual([]);
-    expect(entry.fetchHistory).toEqual([]);
-    expect(entry.retryHistory).toEqual([]);
+    expect(entryHistory().observers(entry)).toEqual([]);
+    expect(entryHistory().attempts(entry)).toEqual([]);
+    expect(entryHistory().retries(entry)).toEqual([]);
 
     handle.destroy();
   });

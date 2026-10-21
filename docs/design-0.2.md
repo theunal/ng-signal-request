@@ -1582,10 +1582,11 @@ panel is open. Tests and coverage for the phase are recorded in
 The Phase 6 text above is the design that shipped first, not the current shape. A
 follow-up moved the arrays out of `CacheEntry` without changing the panel's data:
 
-- The core now exports only `DevtoolsSink` and `DEVTOOLS_SINK`. An entry stores an
-  optional sink reference, the attempt start time, `seeded` and the observer count.
-  The `fetchHistory`, `retryHistory` and `observerNames` getters delegate to the sink
-  and return empty arrays when none is installed.
+- The core now exports only the write-only `DevtoolsSink` and `DEVTOOLS_SINK`. An
+  entry stores an optional sink reference, the attempt start time, `seeded` and the
+  observer count. `CacheEntry` has no history getters; `DevtoolsHistory` exposes
+  `attempts()`, `retries()` and `observers()`, and `snapshotEntries` takes the reader
+  as `{ history }`.
 - `/devtools` exports `DevtoolsHistory` and `provideDevtoolsHistory()`. The service
   owns a `WeakMap<CacheEntry, EntryHistory>`, caps attempts and retries at ten, and
   is collected with the entry. The provider must exist before the first keyed handle;
@@ -1594,9 +1595,14 @@ follow-up moved the arrays out of `CacheEntry` without changing the panel's data
   an entry without a sink is 8,278 bytes (was 8,544 with two empty arrays), and the
   sink-only case adds about 0.1 KiB over 10,000 entries. The full 10+10 history case
   is 9,635 bytes per entry, down from about 10,014-10,049.
-- The `/devtools` FESM is 4.4 KB gzip (was 4.01) and core remains 20.9 KB. The
-  `devtools` probe, with `provideDevtoolsHistory()` installed, is +28.16 KB; it is
+- The `/devtools` FESM is 4.5 KB gzip (was 4.01) and core is 20.8 KB. The
+  `devtools` probe, with `provideDevtoolsHistory()` installed, is +28.14 KB; it is
   still under the 32.5 KB release budget and the new 28.8 KB regression limit.
+- The public surface was narrowed after this move: `ALWAYS_ONLINE`,
+  `IDLE_RESTORE_GATE`, `EntryPlan`, `QueryFetchPlan` and `FetchOutcome` are no
+  longer re-exported, and the history getters are gone from `CacheEntry`. Core is
+  now 90 exports, 14 added over 0.1.0 with 0 removed; `FetchAttempt` and
+  `RetryEvent` stay because the core sink contract uses them.
 
 The `WeakRef` test in `devtools.spec.ts` forces a major GC and proves the sink does
 not retain an entry. Measurements and the exact before/after table are in

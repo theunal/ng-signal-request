@@ -4,7 +4,6 @@ import { inject, signal } from '@angular/core';
 import { runInNewContext } from 'node:vm';
 import { setFlagsFromString } from 'node:v8';
 import {
-  ALWAYS_ONLINE,
   CacheEntry,
   createRequest,
   normalizeKey,
@@ -13,6 +12,7 @@ import {
   QueryClient,
   RESTORE_GATE,
 } from 'ng-signal-request';
+import { ALWAYS_ONLINE } from '../src/lib/connectivity';
 import {
   DevtoolsHistory,
   DevtoolsPanel,
@@ -491,7 +491,7 @@ describe('devtools — depth', () => {
     http.expectOne('/rows').flush([{ id: 2 }]);
     await settle();
 
-    const entry = snapshotEntries(cache()).at(-1)!;
+    const entry = snapshotEntries(cache(), { history: TestBed.inject(DevtoolsHistory) }).at(-1)!;
     expect(entry.kind).toBe('http');
     expect(entry.seeded).toBe(false);
     expect(entry.observerNames).toEqual(['rows']);

@@ -9,18 +9,14 @@ import type { CacheEntry, FetchAttempt, RetryEvent } from './cache-entry';
  * attempt settles, a retry is armed, or an observer subscribes. The implementation lives in the
  * separate `/devtools` entry point and owns the arrays and the `WeakMap`.
  *
- * The read methods are here as well because the existing public getters on `CacheEntry` delegate
- * to them. Without a sink they return an empty, frozen array, which is the documented opt-in
- * behavior: no provider, no history.
+ * The sink is write-only. Reads live on the `/devtools` implementation, so the core never exposes
+ * a history shape it would have to keep stable.
  */
 export interface DevtoolsSink {
   recordAttempt<T>(entry: CacheEntry<T>, attempt: FetchAttempt): void;
   recordRetry<T>(entry: CacheEntry<T>, retry: RetryEvent): void;
   addObserver<T>(entry: CacheEntry<T>, name: string | undefined): void;
   removeObserver<T>(entry: CacheEntry<T>, name: string | undefined): void;
-  attempts<T>(entry: CacheEntry<T>): readonly FetchAttempt[];
-  retries<T>(entry: CacheEntry<T>): readonly RetryEvent[];
-  observers<T>(entry: CacheEntry<T>): readonly string[];
 }
 
 /**

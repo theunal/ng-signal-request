@@ -6,8 +6,8 @@ import {
   createRequest,
   OnlineManager,
   provideSignalRequest,
-  type QueryFetchPlan,
 } from '../../public-api';
+import type { QueryFetchPlan } from './cache-entry';
 import { cache, settle, setup } from '../../../testing/testing';
 
 /**

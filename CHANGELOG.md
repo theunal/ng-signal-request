@@ -298,21 +298,22 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
     beside `(offline)`, so the panel cannot disagree with the gate that holds the
     first fetch.
   - **History is opt-in and lives outside the core.** The core exposes only the
-    `DevtoolsSink` interface and the `DEVTOOLS_SINK` token. `CacheEntry` keeps an
-    optional sink reference, `seeded`, `observerCount`, and the same
-    `fetchHistory` / `retryHistory` / `observerNames` getters, but no arrays or
-    observer `Set`; without a sink those getters return empty arrays.
-    `provideDevtoolsHistory()` installs the `/devtools` implementation, which owns
-    a `WeakMap<CacheEntry, History>`, caps attempts and retries at ten each, and is
-    collected with the entry. The provider must exist before the first keyed
-    handle; opening the panel later shows history from that point, not before.
-    The public types `FetchAttempt`, `FetchOutcome` and `RetryEvent` still describe
-    the rows.
+    write-only `DevtoolsSink` interface and the `DEVTOOLS_SINK` token. `CacheEntry`
+    keeps an optional sink reference, `seeded`, `observerCount`, `hasPlan` and
+    `planKind`, but no history arrays, observer `Set`, or history getters.
+    `provideDevtoolsHistory()` installs `DevtoolsHistory` from `/devtools`, which
+    owns a `WeakMap<CacheEntry, History>`, caps attempts and retries at ten each,
+    and is collected with the entry. Read history with
+    `history.attempts(entry)` / `retries(entry)` / `observers(entry)`; pass the
+    service to `snapshotEntries` as `{ history }`. The provider must exist before
+    the first keyed handle; opening the panel later shows history from that point,
+    not before. The public types `FetchAttempt` and `RetryEvent` describe the rows;
+    `FetchOutcome` is now internal to the `outcome` field.
   - **No polling, no new dependency, and no per-entry history when unused.** The
     production demo still does not import `/devtools`; a dedicated `devtools` probe
     renders the panel with history opted in as the positive control, measured at
-    **+28.2 KB** over the no-library control with a **32.5 KB** probe budget. The core (20.9 KB) and
-    `/devtools` (4.4 KB) ceilings are unchanged at 21.5 / 15 KB. See
+    **+28.1 KB** over the no-library control with a **32.5 KB** probe budget. The core (20.8 KB) and
+    `/devtools` (4.5 KB) ceilings are unchanged at 21.5 / 15 KB. See
     `docs/design-0.2.md`, Phase 6 and `docs/verification.md` §15.
 
 ### Fixed
@@ -381,7 +382,13 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   force a value in, which is the method that says so. The one visible consequence: an
   application that called `seed` a second time expecting an older payload to win over
   a fetch that happened in between will see the fetch's value kept instead.
-- No export was removed: `pnpm check:api v0.1.0` reports 0 removed.
+- **0.2-only names stop being public; nothing from 0.1.0 moves.** `ALWAYS_ONLINE`,
+  `IDLE_RESTORE_GATE`, `EntryPlan`, `QueryFetchPlan` and `FetchOutcome` were added during
+  the 0.2 line and are no longer re-exported from the package root. A plan argument is
+  structurally typed, and `FetchOutcome` is the `FetchAttempt['outcome']` union.
+  `CacheEntry` also loses the `fetchHistory` / `retryHistory` / `observerNames` getters
+  that briefly existed in this unreleased line; read them from `DevtoolsHistory`.
+  `pnpm check:api v0.1.0` still reports **0 removed from 0.1.0**.
 
 ### Migration from 0.1.x
 

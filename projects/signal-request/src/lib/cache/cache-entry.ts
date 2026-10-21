@@ -70,11 +70,6 @@ export interface RetryEvent {
   readonly attempt: number;
 }
 
-/** Returned when no devtools sink is installed, so the getters stay allocation-free. */
-const NO_ATTEMPTS: readonly FetchAttempt[] = [];
-const NO_RETRIES: readonly RetryEvent[] = [];
-const NO_OBSERVERS: readonly string[] = [];
-
 /** Fields both kinds of plan share. */
 export interface BaseFetchPlan<T> {
   readonly structuralSharing: StructuralSharingFn<T>;
@@ -387,32 +382,6 @@ export class CacheEntry<T = unknown> {
   /** Observer count. Surfaced by the devtools panel and asserted by the leak tests. */
   get observerCount(): number {
     return this.observers;
-  }
-
-  /**
-   * The `debugName` of every subscribed handle, one entry per handle.
-   *
-   * Named handles are identified; anonymous ones appear as `'anonymous'`. The names live in the
-   * optional devtools sink, so without `provideDevtoolsHistory()` this is empty. A plain getter
-   * rather than a signal: subscription bookkeeping is not something a template should drive change
-   * detection from, and the devtools snapshot already re-runs on the entry's signals.
-   */
-  get observerNames(): readonly string[] {
-    return this.sink?.observers(this) ?? NO_OBSERVERS;
-  }
-
-  /**
-   * The last ten settled fetches, oldest first, as held by the devtools sink.
-   *
-   * Without a sink the array is empty: history is opt-in. Treat the returned array as read-only.
-   */
-  get fetchHistory(): readonly FetchAttempt[] {
-    return this.sink?.attempts(this) ?? NO_ATTEMPTS;
-  }
-
-  /** The last ten scheduled retries, oldest first, as held by the devtools sink. */
-  get retryHistory(): readonly RetryEvent[] {
-    return this.sink?.retries(this) ?? NO_RETRIES;
   }
 
   /**

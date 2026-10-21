@@ -570,17 +570,20 @@ developer asks for it. The core owns an interface and a token; `/devtools` owns 
 
 ### Shape
 
-- **Core** (`cache/devtools-sink.ts`): `DevtoolsSink` with `recordAttempt` / `recordRetry` /
-  `addObserver` / `removeObserver` and the three read methods, plus `DEVTOOLS_SINK`. `CacheEntry`
-  keeps only the optional `sink`, the in-flight attempt start time, `seeded`, and the observer count.
-  It calls the sink when an attempt settles, a retry is armed, or an observer subscribes/leaves.
+- **Core** (`cache/devtools-sink.ts`): a write-only `DevtoolsSink` with `recordAttempt` /
+  `recordRetry` / `addObserver` / `removeObserver`, plus `DEVTOOLS_SINK`. `CacheEntry` keeps only
+  the optional `sink`, the in-flight attempt start time, `seeded`, and the observer count. It calls
+  the sink when an attempt settles, a retry is armed, or an observer subscribes/leaves. There are
+  no history getters on the entry; reads live on `DevtoolsHistory`.
 - **`/devtools`**: `DevtoolsHistory` implements the sink over a `WeakMap<CacheEntry, EntryHistory>`,
   caps attempts and retries at ten each, and is provided by `provideDevtoolsHistory()` through
   `useExisting`. The `WeakMap` is what makes "history dies with the entry" structural rather than a
   cleanup step.
 - **Late panel.** The provider records from the moment it exists. A panel opened later reads what
   was recorded; it cannot backfill entries created before the provider. Without the provider the
-  getters return empty arrays, and `observerCount` still works.
+  history columns are empty, and `observerCount` still works. `snapshotEntries(cache)` omits
+  history unless the caller passes `{ history: TestBed.inject(DevtoolsHistory) }`; the panel always
+  passes its injected service.
 
 ### Tests and sizes
 
@@ -623,3 +626,42 @@ through the V8 `--expose-gc` flag and asserts `ref.deref()` is `undefined`. That
 even if the sink leaked it.
 
 `docs/design-0.2.md` Phase 6 is updated to match this shape.
+
+## 16. Step 4 record - public-surface narrowing (2026-10-21)
+
+The 0.2 line had accumulated names that were either internal plumbing or a second way to read the
+devtools sink. Each was checked against the 0.1.0 surface before removal.
+
+| Name / member                                                | Decision | Why                                                                                                                                        |
+| ------------------------------------------------------------ | -------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| `ALWAYS_ONLINE`                                              | removed  | 0.2-only; the default `Connectivity` for an entry. Applications construct their own or use `OnlineManager`.                                |
+| `IDLE_RESTORE_GATE`                                          | removed  | 0.2-only; the internal gate used when no restore is running. `RESTORE_GATE` / `RestoreGate` remain public.                                 |
+| `EntryPlan`                                                  | removed  | 0.2-only; a public name for the argument `CacheEntry.fetch` / `registerPlan` already accepts structurally.                                 |
+| `QueryFetchPlan`                                             | removed  | 0.2-only; the non-HTTP half of `EntryPlan`, useful only to the query engine.                                                               |
+| `FetchOutcome`                                               | removed  | 0.2-only; the `FetchAttempt['outcome']` union. Keeping it forced consumers to import a name that carried no extra information.             |
+| `FetchAttempt` / `RetryEvent`                                | kept     | Used by the core `DevtoolsSink` contract and by `CacheEntry` diagnostics. Moving them to `/devtools` would make the core import the panel. |
+| `CacheEntry.fetchHistory` / `retryHistory` / `observerNames` | removed  | Devtools-only reads. `DevtoolsHistory.attempts()` / `retries()` / `observers()` own them; `snapshotEntries` takes `{ history }`.           |
+
+`CacheEntry` still exposes `seeded`, `observerCount`, `hasPlan` and `planKind`; the first two are
+asserted by the cache tests and the latter two are what the panel uses to say whether a fetch can
+start. No 0.1.0 export was removed.
+
+### API count and sizes
+
+| Check                                | Result                                            |
+| ------------------------------------ | ------------------------------------------------- |
+| `pnpm check:api v0.1.0`, core        | 76 -> **90** exports; **14 added**, **0 removed** |
+| `pnpm check:api v0.1.0`, `/devtools` | 6 -> **8** exports; 2 added, 0 removed            |
+| `pnpm check:api v0.1.0`, `/persist`  | 21 -> 28; 7 added, 0 removed                      |
+| `pnpm check:api v0.1.0`, `/testing`  | 6 -> 6; 0 added, 0 removed                        |
+| `request` probe                      | **+17.83 KB**                                     |
+| `keyed` probe                        | **+18.54 KB**                                     |
+| `full` probe                         | **+23.71 KB**                                     |
+| `devtools` probe                     | **+28.14 KB**                                     |
+| Core FESM                            | 97.2 KB raw, **20.8 KB** gzip                     |
+| `/devtools` FESM                     | 21.4 KB raw, **4.5 KB** gzip                      |
+
+The expected added count is now **14 in the core** (was 19) and **2 in `/devtools`** (was 0); the
+total over the four entry points is 23. `pnpm test` remained at **596 passed** after the changes.
+The probe budgets were not raised: the largest is `full` at 23.71 against 24 KB, and `devtools` at
+28.14 against 28.8 KB.

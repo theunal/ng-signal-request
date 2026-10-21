@@ -2,7 +2,7 @@
  * Public API surface of ng-signal-request.
  */
 export { provideSignalRequest, SIGNAL_REQUEST_CONFIG } from './lib/config';
-export { ALWAYS_ONLINE, OnlineManager } from './lib/connectivity';
+export { OnlineManager } from './lib/connectivity';
 export type { Connectivity, NetworkMode } from './lib/connectivity';
 export { createRequest } from './lib/create-request';
 export type { CreateRequest, CreateRequestFn } from './lib/create-request';
@@ -72,14 +72,11 @@ export { QueryCache, type CacheChangeListener } from './lib/cache/query-cache';
 export { QueryClient, type Updater } from './lib/cache/query-client';
 export { MutationRegistry } from './lib/cache/mutation-registry';
 export { DEVTOOLS_SINK, type DevtoolsSink } from './lib/cache/devtools-sink';
-export { IDLE_RESTORE_GATE, RESTORE_GATE, type RestoreGate } from './lib/restore-gate';
+export { RESTORE_GATE, type RestoreGate } from './lib/restore-gate';
 export {
   CacheEntry,
-  type EntryPlan,
   type FetchAttempt,
-  type FetchOutcome,
   type FetchPlan,
-  type QueryFetchPlan,
   type RetryEvent,
   type SeedValue,
   type SettleOutcome,

@@ -226,6 +226,12 @@ export interface SnapshotOptions {
    * stringified just because a panel is closed, and the panel asks for this only while it is open.
    */
   readonly preview?: boolean;
+  /**
+   * The history reader to use. `QueryDevtools` passes its injected service; a free-function caller
+   * can pass one too. Omitted means the history columns are empty, which is exactly what an
+   * application that never installed `provideDevtoolsHistory()` should see.
+   */
+  readonly history?: DevtoolsHistory;
 }
 
 /**
@@ -241,10 +247,15 @@ export function snapshotEntries(
 ): readonly DevtoolsEntry[] {
   const now = options.now ?? Date.now();
   const entries = options.filter === undefined ? cache.all() : cache.matching(options.filter);
-  return entries.map((entry) => describe(entry, now, options.preview === true));
+  return entries.map((entry) => describe(entry, now, options.preview === true, options.history));
 }
 
-function describe(entry: CacheEntry, now: number, withPreview: boolean): DevtoolsEntry {
+function describe(
+  entry: CacheEntry,
+  now: number,
+  withPreview: boolean,
+  history: DevtoolsHistory | undefined,
+): DevtoolsEntry {
   const error = entry.error();
   const data = entry.data();
   const local = entry.local();
@@ -291,11 +302,11 @@ function describe(entry: CacheEntry, now: number, withPreview: boolean): Devtool
     paused: entry.paused(),
     kind: entry.planKind,
     seeded: entry.seeded,
-    observerNames: entry.observerNames,
-    // Newest first is what a panel reads: the last attempt is the interesting one. The entry keeps
+    observerNames: history?.observers(entry) ?? [],
+    // Newest first is what a panel reads: the last attempt is the interesting one. The service keeps
     // the history oldest-first so the cap can drop from the front without moving the array.
-    attempts: [...entry.fetchHistory].reverse(),
-    retries: [...entry.retryHistory].reverse(),
+    attempts: history === undefined ? [] : [...history.attempts(entry)].reverse(),
+    retries: history === undefined ? [] : [...history.retries(entry)].reverse(),
     data,
     preview: preview?.text,
     size: preview?.size,
@@ -352,6 +363,8 @@ export class QueryDevtools {
   private readonly cache = inject(QueryCache);
   private readonly client = inject(QueryClient);
   private readonly injector = inject(Injector);
+  /** Empty unless `provideDevtoolsHistory()` installed the sink, which is the opt-in signal. */
+  private readonly history = inject(DevtoolsHistory);
 
   /**
    * Whether persistence is still restoring.
@@ -415,7 +428,7 @@ export class QueryDevtools {
     this.version();
     // Serialization is the one cost that scales with the payload, so it is paid only while somebody
     // is looking at the table. Reading `isOpen` also makes opening the panel recompute the snapshot.
-    return snapshotEntries(this.cache, { preview: this.isOpen() });
+    return snapshotEntries(this.cache, { preview: this.isOpen(), history: this.history });
   });
 
   /** Total number of cached entries. */

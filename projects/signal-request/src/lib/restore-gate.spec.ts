@@ -2,12 +2,12 @@ import { inject, signal } from '@angular/core';
 import { describe, expect, it } from 'vitest';
 import {
   createRequest,
-  IDLE_RESTORE_GATE,
   RequestCancelledError,
   RESTORE_GATE,
   provideSignalRequest,
 } from '../public-api';
 import type { CachedRequest, RestoreGate } from '../public-api';
+import { IDLE_RESTORE_GATE } from './restore-gate';
 import { cache, settle, setup } from '../../testing/testing';
 
 interface User {

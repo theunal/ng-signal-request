@@ -799,3 +799,41 @@ describe, not of this trim.
 `pnpm test` remains **599 passed**, coverage **97.86 / 93.61 / 99.25 / 99.03**
 (statements / branches / functions / lines); `pnpm run typecheck` and
 `pnpm run lint` are clean.
+
+## 19. CI retry, test isolation and Angular 22.2.3 merge (2026-10-21)
+
+The first tag push (`v0.2.0` on `0b4192c`) triggered workflow run #10 and failed at
+`pnpm test`, before the publish step. Two assertions in `dev-warnings.spec.ts` expected
+one `console.warn` and saw none:
+
+- `write-shaped createRequest > warns about a non-lazy write, once`
+- `write-shaped createRequest > warns just the same for a cached write`
+
+`warnedOnce` is module state. `create-request.spec.ts` legitimately makes POST/PATCH
+calls, so in CI the same `(caller, method)` message had already been printed before
+`dev-warnings.spec.ts` installed its spy; the ledger then suppressed the warning. Local
+file order did not expose it. This was a test-isolation defect, not a product defect,
+and no package was published.
+
+`add5e61` adds `resetDevWarningsForTests()` (internal, not re-exported from the public
+API) and clears the ledger before each warning test. The function is absent from the
+FESM and from the full probe, so the bundle numbers are unchanged. Five consecutive
+`CI=true pnpm test` runs passed before the merge, and three more passed after it.
+
+`origin/main` had one independent commit (`84190a2`) that bumped Angular from 22.2.2
+to 22.2.3, updated `pnpm-lock.yaml`, and tracked the working plan file. It was merged
+into the release candidate as `327f071`; `pnpm install --frozen-lockfile` moved
+Angular, Vitest, jsdom and ESLint to their lockfile versions.
+
+After the merge, three consecutive `check:dist` runs were identical:
+
+| Probe      | Delta  | Limit | Headroom |
+| ---------- | ------ | ----- | -------- |
+| `request`  | +17.57 | 18.4  | 0.83     |
+| `keyed`    | +18.33 | 19.2  | 0.87     |
+| `full`     | +23.52 | 24    | **0.48** |
+| `devtools` | +27.89 | 28.8  | 0.91     |
+
+Control is 38.36 KB gzip; core FESM is 20.6 KB, `/devtools` 4.5 KB. `pnpm verify`
+passes with 599 tests and coverage 97.86 / 93.61 / 99.25 / 99.03; `pnpm check:api
+v0.1.0` still reports 0 removed; e2e is 3/3.

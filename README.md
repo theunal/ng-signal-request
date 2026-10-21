@@ -1773,7 +1773,7 @@ report and one you read here is a design decision.
 - **Importing one factory keeps the whole primary entry point in your bundle.** The
   factories live in one module with module-level tables, so an app that only calls
   `createRequest` still retains the cached path, the infinite path and the mutation
-  queue: measured at about **+17.5 KB gzip** over an app without the library, against
+  queue: measured at about **+17.6 KB gzip** over an app without the library, against
   about **+23.5 KB** for the full surface. This is a tree-shaking limitation, not a
   claim that the unused features are free; fixing it needs a module per factory,
   which is a public-API decision for a later release. The measured numbers and the
@@ -2102,12 +2102,12 @@ and compares gzip sizes against the one without the library:
 
 | Probe      | What it imports                                               | Over the control |
 | ---------- | ------------------------------------------------------------- | ---------------- |
-| `request`  | one uncached `createRequest`                                  | **+17.5 KB**     |
+| `request`  | one uncached `createRequest`                                  | **+17.6 KB**     |
 | `keyed`    | a keyed `createRequest` and `QueryClient`                     | **+18.3 KB**     |
 | `full`     | every core factory and the `/persist` + `/devtools` entries   | **+23.5 KB**     |
 | `devtools` | a keyed request with history opted in and `<ngsr-devtools />` | **+27.9 KB**     |
 
-The unkeyed request probe fell from +21.4 KB to +17.5 KB after the module-level
+The unkeyed request probe fell from +21.4 KB to +17.6 KB after the module-level
 factory tables were marked `/*#__PURE__*/`. The unused `createInfiniteRequest`
 and `createMutation` tables - and the injectables only they reached - are now
 dropped. What remains is the cached engine itself: `createRequest` has keyed

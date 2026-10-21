@@ -378,6 +378,18 @@ function warnDevOnce(message: string): void {
 }
 
 /**
+ * Test-only: forget which warnings have already been printed.
+ *
+ * `warnedOnce` is module state, so a spec that asserts on `console.warn` sees any message an
+ * earlier spec in the same worker already printed. Starting the spec from an empty ledger keeps
+ * that assertion about the warning, not about test-file ordering. Not re-exported from the public
+ * API and not called by production code, so the application build tree-shakes it.
+ */
+export function resetDevWarningsForTests(): void {
+  warnedOnce.clear();
+}
+
+/**
  * Dev-mode warning for a write-shaped `createRequest`.
  *
  * `createRequest.post` and friends are **reactive** exactly like the `GET` form: the request re-fires

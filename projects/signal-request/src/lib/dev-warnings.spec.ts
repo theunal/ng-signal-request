@@ -1,7 +1,7 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { createRequest, provideSignalRequest } from '../public-api';
-import { normalizeRetry } from './utils';
+import { normalizeRetry, resetDevWarningsForTests } from './utils';
 import { cache, settle, setup } from '../../testing/testing';
 
 /** A spied `console.warn`, quiet, restored after every test in this file. */
@@ -34,6 +34,13 @@ function withoutDevMode(fn: () => void): void {
  * numbers that exist only here.
  */
 describe('dev warnings', () => {
+  beforeEach(() => {
+    // Spec files share this module in one worker, and `create-request.spec.ts` deliberately makes
+    // POST/PATCH calls. Without this, the warning has already been printed before the spy exists
+    // and the assertion depends on which file ran first.
+    resetDevWarningsForTests();
+  });
+
   afterEach(() => {
     vi.restoreAllMocks();
   });

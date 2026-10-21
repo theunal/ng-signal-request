@@ -461,3 +461,25 @@ opt-in.
    panel state, and no polling. The benchmark is one run on this machine: the
    control and the history code are both at the harness's noise floor, so it supports
    "nothing is flagged", not a claim of a precise constant.
+
+## 13. Step 1 clean-room record (2026-10-21)
+
+The tree was reinstalled from scratch (`node_modules` removed, `pnpm install --frozen-lockfile`,
+pnpm 12.6.0) so the lockfile versions - Angular 22.2.2 and vitest 5.0.4 - were the ones measured.
+
+| Check                                                | Result                                                                                                  |
+| ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| `pnpm verify`                                        | **exit 0** - typecheck, lint, format:check, 24 files / 593 tests, build, check:types-compat, demo, dist |
+| Coverage (statements / branches / functions / lines) | 97.66 / 93.48 / 98.63 / 98.8                                                                            |
+| `pnpm test:e2e`                                      | **3/3 passed** in Playwright Chromium                                                                   |
+| `pnpm check:api v0.1.0`                              | **0 removed**; core 76 -> 93 exports                                                                    |
+| `pnpm check:types-compat`                            | **exit 0**                                                                                              |
+| Probe deltas over the no-library control             | `request` +21.44 KB, `keyed` +21.50 KB, `full` +23.49 KB, `devtools` +30.85 KB                          |
+| Core FESM                                            | 97.1 KB raw, 20.9 KB gzip                                                                               |
+
+The clean install reproduced the previous Phase 6 numbers exactly at two decimals. No dependency
+resolved to a different version, so the report's measurements are still tied to the lockfile.
+
+`84190a2` (".") is still reachable through the reflog after the reset to `e96dea2`. Its tree contains
+three files: `docs/plan.md` (97 added lines), `package.json` and `pnpm-lock.yaml`; the reflog shows
+`commit: .` followed by `reset: moving to e96dea2`. Nothing from that commit was lost.

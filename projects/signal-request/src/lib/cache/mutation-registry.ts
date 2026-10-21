@@ -27,6 +27,12 @@ export class MutationRegistry {
   /** Whether anything is in flight. Reactive. */
   readonly isMutating: Signal<boolean> = computed(() => this.total() > 0);
 
+  /** Calls parked waiting for a connection, across every key. */
+  private readonly pausedTotal = signal(0);
+
+  /** Whether anything is queued behind connectivity. Reactive. */
+  readonly isPaused: Signal<boolean> = computed(() => this.pausedTotal() > 0);
+
   /** Called when a call goes out. */
   begin(mutationKey: QueryKey | undefined): void {
     this.total.update((n) => n + 1);
@@ -77,10 +83,21 @@ export class MutationRegistry {
     });
   }
 
+  /** Called when a call is parked behind connectivity. */
+  hold(): void {
+    this.pausedTotal.update((n) => n + 1);
+  }
+
+  /** Called when a parked call leaves the queue; `count` lets a replay drain a batch at once. */
+  release(count = 1): void {
+    this.pausedTotal.update((n) => Math.max(0, n - count));
+  }
+
   /** Forgets every count. Test-only escape hatch; a live app never needs it. */
   reset(): void {
     this.total.set(0);
     this.byKey.set(new Map());
     this.segments.clear();
+    this.pausedTotal.set(0);
   }
 }

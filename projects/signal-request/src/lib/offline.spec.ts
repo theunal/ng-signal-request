@@ -5,6 +5,7 @@ import {
   createInfiniteRequest,
   createMutation,
   createRequest,
+  MutationRegistry,
   provideSignalRequest,
   QueryClient,
   RequestCancelledError,
@@ -246,6 +247,7 @@ describe('networkMode – cached entries', () => {
     expect(list.status()).toBe('loading');
     expect(cache().all()[0].paused()).toBe(true);
     expect(client.isPaused()).toBe(true);
+    expect(client.isAnythingPaused()).toBe(true);
     expect(client.isPaused(['items'])).toBe(true);
     expect(client.isPaused(['other'])).toBe(false);
 
@@ -253,6 +255,7 @@ describe('networkMode – cached entries', () => {
     http.expectOne('/items').flush(1);
     await settle();
     expect(client.isPaused()).toBe(false);
+    expect(client.isAnythingPaused()).toBe(false);
     expect(list.response()).toBe(1);
   });
 
@@ -665,6 +668,49 @@ describe('networkMode – mutations', () => {
     await expect(p).rejects.toBeInstanceOf(RequestCancelledError);
     await settle();
     expect(client.isMutating()()).toBe(false);
+  });
+
+  it('includes a queued mutation in `isAnythingPaused` but not in `isPaused`', async () => {
+    const { create } = setup();
+    const client = TestBed.inject(QueryClient);
+    goOffline();
+    const save = create(() =>
+      createMutation<number, string>(() => '/todos', {
+        networkMode: 'online',
+        mutationKey: ['todos'],
+      }),
+    );
+
+    expect(client.isAnythingPaused()).toBe(false);
+    const p = save.run('a');
+    await settle();
+
+    expect(save.paused()).toBe(true);
+    expect(client.isPaused()).toBe(false);
+    expect(client.isAnythingPaused()).toBe(true);
+
+    save.cancel();
+    await expect(p).rejects.toBeInstanceOf(RequestCancelledError);
+    await settle();
+    expect(client.isAnythingPaused()).toBe(false);
+  });
+
+  it('MutationRegistry.reset() clears in-flight and paused counts', () => {
+    setup();
+    const registry = TestBed.inject(MutationRegistry);
+
+    registry.begin(['todos']);
+    registry.begin(undefined);
+    registry.hold();
+    expect(registry.isMutating()).toBe(true);
+    expect(registry.isPaused()).toBe(true);
+    expect(registry.countMatching(['todos'])()).toBe(1);
+
+    registry.reset();
+
+    expect(registry.isMutating()).toBe(false);
+    expect(registry.isPaused()).toBe(false);
+    expect(registry.countMatching(['todos'])()).toBe(0);
   });
 
   it('returns the queued promise under `exhaust` instead of queueing a second call', async () => {

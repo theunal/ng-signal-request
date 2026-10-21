@@ -216,6 +216,7 @@ function buildMutation<T, TArgs, TContext>(
     // preserves the order the calls were accepted in, which is the order the application made them.
     const batch = queue.splice(0);
     queuedCount.update((n) => n - batch.length);
+    mutations.release(batch.length);
     for (const call of batch) {
       call.paused = false;
       call.send();
@@ -411,6 +412,7 @@ function buildMutation<T, TArgs, TContext>(
         const index = queue.indexOf(call);
         if (index >= 0) queue.splice(index, 1);
         queuedCount.update((n) => n - 1);
+        mutations.release();
         if (queue.length === 0) {
           detachReplay?.();
           detachReplay = undefined;
@@ -430,6 +432,7 @@ function buildMutation<T, TArgs, TContext>(
         progress.set(undefined);
         queue.push(call);
         queuedCount.update((n) => n + 1);
+        mutations.hold();
         detachReplay ??= online.onReconnect(replay);
       };
 

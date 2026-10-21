@@ -1,7 +1,7 @@
 import { computed as computedSignal, signal, type Signal } from '@angular/core';
 import { TestBed } from '@angular/core/testing';
 import { afterEach, describe, expect, expectTypeOf, it, vi } from 'vitest';
-import { createRequest, RequestCancelledError } from '../public-api';
+import { createRequest, QueryClient, RequestCancelledError } from '../public-api';
 import type { CachedRequest, SignalRequest } from '../public-api';
 import { DevtoolsHistory, provideDevtoolsHistory } from '../../devtools/devtools';
 import { advanceClock, cache, settle, setup } from '../../testing/testing';
@@ -45,8 +45,10 @@ describe('cached request — sharing', () => {
     expect(cache().size).toBe(1);
     http.expectNone(() => true);
 
+    expect(a.isDestroyed).toBe(false);
     a.destroy();
     b.destroy();
+    expect(a.isDestroyed).toBe(true);
   });
 
   it('counts subscribers and returns them to zero when the scopes die', async () => {
@@ -800,15 +802,16 @@ describe('cached request — the rest of the surface', () => {
     users.destroy();
   });
 
-  it('clear() empties the cache', async () => {
+  it('QueryClient.clear() empties the cache', async () => {
     const { http, create } = setup();
+    const client = TestBed.inject(QueryClient);
     const users = create(() => createRequest<User[]>('/users', { key: () => ['users'] }));
     await settle();
     http.expectOne('/users').flush([{ id: 1, name: 'Ada' }]);
     await settle();
     expect(cache().size).toBe(1);
 
-    cache().clear();
+    client.clear();
 
     expect(cache().size).toBe(0);
     expect(cache().peek(['users'])).toBeUndefined();

@@ -336,6 +336,14 @@ describe('createMutation', () => {
     expect(options).toEqual({ reportProgress: true });
   });
 
+  it('rejects `offlineFirst` as a mutation network mode', () => {
+    // A write has no cached value to serve first. The engine already treated the value as
+    // `'always'`, so the type now says what the mutation path actually does.
+    // @ts-expect-error — `offlineFirst` is a query strategy, not a mutation one.
+    const options: MutationOptions<number> = { networkMode: 'offlineFirst' };
+    expect(options.networkMode).toBe('offlineFirst');
+  });
+
   it('leaves progress undefined for a call that did not ask for it', async () => {
     const { http, create } = setup();
     const save = create(() => createMutation<number>(() => '/save'));

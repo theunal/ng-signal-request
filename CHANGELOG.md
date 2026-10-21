@@ -11,6 +11,13 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 >
 > **The public API of `v0.0.4` is a strict subset of 0.1.0**: diffing the export
 > list of `public-api.ts` between the two tags gives 0 removed, 40 added.
+>
+> **One accepted type break in 0.2.0:** `inject(CACHE_PERSISTER).hydrate()` is
+> typed `number | Promise<number>` where 0.1.0 said `number`. A token cannot carry
+> the storage's type and the persister behind it may be asynchronous, so the union
+> is the only honest answer. Write `await inject(CACHE_PERSISTER).hydrate()` (works
+> for both) or use `createPersister({ storage })`, whose return type is inferred.
+> Nothing is removed at runtime; this is compile-time only.
 
 ## [Unreleased]
 
@@ -188,10 +195,11 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   - **`paused` on every handle** (`SignalRequest`, `CachedRequest`,
     `InfiniteRequest`, `SignalMutation`) and **`QueryClient.isPaused(filter?)`** — the
     counterpart of `isFetching`, for a "waiting for a connection" banner. Queries
-    only: a queued mutation reports its own `paused()`. A paused request is not an
-    error and does not settle; its `run()` promise stays pending, `status()` is
-    `'loading'` before it has ever loaded and `'reloading'` when there is a value to
-    keep showing.
+    only: a queued mutation reports its own `paused()`, and the global
+    **`QueryClient.isAnythingPaused()`** combines both sides for an app-wide banner.
+    A paused request is not an error and does not settle; its `run()` promise stays
+    pending, `status()` is `'loading'` before it has ever loaded and `'reloading'`
+    when there is a value to keep showing.
   - **A paused retry burns no attempt and arms no back-off timer.** The retry waits
     for a reconnect through one listener, so a `retry: { count: 3 }` policy cannot be
     spent while offline and a request that reconnects starts with its budget intact.
@@ -215,7 +223,8 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   deferred.
   - `onMutate` and the optimistic write run at `run()`; `onSuccess` and `invalidates`
     run after the replayed call actually succeeds. A queued call counts as in flight,
-    so `isMutating()` is `true` while it waits.
+    so `isMutating()` is `true` while it waits, and it makes
+    `client.isAnythingPaused()` true.
   - `cancel()` (or `destroy()`) rejects a queued call with `RequestCancelledError` and
     rolls its optimistic write back. A replay that fails because the connection
     dropped again goes **back to the queue** rather than reporting a failure: the
@@ -312,7 +321,7 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   - **No polling, no new dependency, and no per-entry history when unused.** The
     production demo still does not import `/devtools`; a dedicated `devtools` probe
     renders the panel with history opted in as the positive control, measured at
-    **+28.1 KB** over the no-library control with a **32.5 KB** probe budget. The core (20.8 KB) and
+    **+28.2 KB** over the no-library control with a **32.5 KB** probe budget. The core (20.9 KB) and
     `/devtools` (4.5 KB) ceilings are unchanged at 21.5 / 15 KB. See
     `docs/design-0.2.md`, Phase 6 and `docs/verification.md` §15.
 
@@ -376,6 +385,12 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   mutation starts reading connectivity on upgrade, so one that used to fire and fail
   loudly still fires and fails loudly. `'online'` is a choice you make per request,
   per mutation, or globally.
+- **`MutationOptions.networkMode` no longer accepts `'offlineFirst'`.** It is typed as
+  `Exclude<NetworkMode, 'offlineFirst'>`. A write has no cached value to serve first,
+  and the mutation engine already treated the value as `'always'`, so this removes a
+  spelling that promised behavior it did not have. Use `'online'` to queue offline or
+  `'always'` to send regardless. A global `networkMode: 'offlineFirst'` still falls
+  back to `'always'` for mutations.
 - **`QueryCache.seed` no longer overwrites an entry whose data is newer than the
   value being staged** (see Added for the rule and why). A seed is a _restore_, and a
   restore means "this is what the last session had"; use `CacheEntry.setData` to
@@ -392,9 +407,10 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Migration from 0.1.x
 
-Nothing here needs a code change to keep working, and the two entries that can change
-behaviour need a storage that cannot answer synchronously — which 0.1.0 had no way to
-configure, so no existing application is in that position.
+Nothing here needs a **runtime** code change to keep working, and the two entries that can change
+behaviour need a storage that cannot answer synchronously - which 0.1.0 had no way to
+configure, so no existing application is in that position. One spelling needs a
+**compile-time** edit: the accepted `CACHE_PERSISTER` type break at the top of this file.
 
 - **Nothing about connectivity changes on upgrade.** `networkMode` defaults to
   `'always'`, which never reads `navigator.onLine`, so every existing request and

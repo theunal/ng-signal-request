@@ -203,6 +203,19 @@ export class QueryClient {
     return matched.some((entry) => entry.paused());
   }
 
+  /**
+   * Whether **queries or mutations** are waiting for a connection.
+   *
+   * The global counterpart of {@link isPaused} and {@link isMutating}, for a banner that should
+   * say "waiting for a connection" without knowing which side is holding. It has no filter: a
+   * query filter cannot describe a mutation key, and a single global indicator is the case that
+   * was missing. Use `isPaused(filter)` or a mutation handle's `paused()` when the distinction
+   * matters.
+   */
+  isAnythingPaused(): boolean {
+    return this.isPaused() || this.mutations.isPaused();
+  }
+
   /** Empties the cache. Mostly for tests and devtools. */
   clear(): void {
     this.cache.clear();

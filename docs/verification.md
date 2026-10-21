@@ -661,7 +661,71 @@ start. No 0.1.0 export was removed.
 | Core FESM                            | 97.2 KB raw, **20.8 KB** gzip                     |
 | `/devtools` FESM                     | 21.4 KB raw, **4.5 KB** gzip                      |
 
-The expected added count is now **14 in the core** (was 19) and **2 in `/devtools`** (was 0); the
-total over the four entry points is 23. `pnpm test` remained at **596 passed** after the changes.
-The probe budgets were not raised: the largest is `full` at 23.71 against 24 KB, and `devtools` at
-28.14 against 28.8 KB.
+At this commit the expected added count is **14 in the core** (was 19) and **2 in `/devtools`**
+(was 0); the total over the four entry points is 23, and `pnpm test` was **596 passed**. Step 5.2
+adds `QueryClient.isAnythingPaused()` as a **method**, not an export, so the final counts stay
+90 / 14 (see §17). The probe
+budgets were not raised: the largest is `full` at 23.71 against 24 KB, and `devtools` at 28.14
+against 28.8 KB.
+
+## 17. Step 5 record - the remaining 0.2 decisions (2026-10-21)
+
+### 5.1 `MutationOptions.networkMode`
+
+`MutationOptions.networkMode` is now `Exclude<NetworkMode, 'offlineFirst'>`. `offlineFirst`
+is a query strategy: a write has no cached value to serve first, and the mutation engine
+already treated the value as `'always'`. The narrowing makes the type say what the engine
+did. A global `networkMode: 'offlineFirst'` still falls back to `'always'` for mutations.
+`create-mutation.spec.ts` pins the rejection with `@ts-expect-error`.
+
+### 5.2 `QueryClient.isAnythingPaused()`
+
+Added because the query-only `isPaused()` and the per-mutation `paused()` left a global
+banner with no single read. `MutationRegistry` now counts parked calls, `createMutation`
+increments/decrements that count on `hold` / `release`, and `isAnythingPaused()` returns
+`isPaused() || mutations.isPaused()`. It takes no filter, because a query key cannot
+describe a mutation key.
+
+Cost, measured on the same probe harness:
+
+| Probe      | Before 5.2 | After 5.2 | Delta    |
+| ---------- | ---------- | --------- | -------- |
+| `request`  | +17.83 KB  | +17.83 KB | 0        |
+| `keyed`    | +18.54 KB  | +18.59 KB | +0.05 KB |
+| `full`     | +23.71 KB  | +23.79 KB | +0.08 KB |
+| `devtools` | +28.14 KB  | +28.21 KB | +0.07 KB |
+
+The core FESM moved from 20.8 to 20.9 KB gzip. That is under 100 bytes on every probe,
+so it was kept; the `full` limit (24 KB) still has 0.2 KB headroom. `pnpm test` is now
+**599 passed**.
+
+### 5.3 Uncovered functions
+
+`pnpm exec ng test --coverage --coverage-reporters=json` followed by
+`node scripts/uncovered-functions.mjs` reports **5 uncovered functions**, one in each of
+`persist/persist.ts`, `combine.ts`, `create-infinite-request.ts`, `create-mutation.ts` and
+`create-request.ts`. All five are the same artifact: the empty inner function returned by
+the local `named()` helper (`const fn = (): void => {}`). Its `name` property is what Angular
+prints in an injection-context error; the function itself is never called by design, so no
+test can reach it without invoking it for coverage's sake. That is the entire list; there
+are no untested reachable functions. `MutationRegistry.reset()` was classified as a
+test-only escape hatch and is now covered directly; `QueryClient.clear()` and the testing
+helper's `isDestroyed` getter gained assertions during the audit.
+
+### 5.4 `CACHE_PERSISTER` token typing
+
+Preserving `const n: number = inject(CACHE_PERSISTER).hydrate()` is not possible without
+lying. A non-generic token cannot carry the storage's type, and the persister behind it may
+have been built over IndexedDB, whose read is a promise. Typing the token as
+`Persister<number>` would make async applications compile a `number` that is a
+`Promise<number>` at runtime. The honest union is kept; the break is foregrounded at the top
+of the CHANGELOG with the two workarounds (`await` the call, or use `createPersister` and
+let inference choose the return type). The compatibility fixture keeps the failing spelling
+behind `@ts-expect-error`.
+
+### Final API count
+
+`pnpm check:api v0.1.0` after 5.2: core 76 -> **90** exports (**14 added**, 0 removed),
+`/devtools` 6 -> 8, `/persist` 21 -> 28, `/testing` 6 -> 6. Total added over the four
+entry points: **23**. `isAnythingPaused()` is a method on the already-exported `QueryClient`,
+so it does not move the export count. No 0.1.0 export was removed.

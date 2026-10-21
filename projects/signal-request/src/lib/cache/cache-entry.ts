@@ -255,7 +255,7 @@ export class CacheEntry<T = unknown> {
     http: HttpClient,
     readonly debugName: string | undefined,
     isBrowser: boolean,
-    onDestroy: () => void = () => {},
+    onDestroy: () => void = noop,
     seed?: SeedValue<T>,
     /**
      * Where connectivity is read from. Defaults to {@link ALWAYS_ONLINE}, so an entry built without

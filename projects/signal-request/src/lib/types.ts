@@ -1057,8 +1057,12 @@ export interface MutationOptions<T, TArgs = void, TContext = undefined> {
    * the optimistic write happen immediately, `paused()` is `true`, and the call is replayed in call
    * order once the connection is back. The queue is in memory only — it does not survive a reload,
    * because replaying a write needs the application's own idempotency story.
+   *
+   * `'offlineFirst'` is a query strategy, not a mutation one: a write has no cached value to serve
+   * first, so the type excludes it. A global `'offlineFirst'` still falls back to `'always'` here;
+   * the option would have no distinct behavior.
    */
-  networkMode?: NetworkMode;
+  networkMode?: Exclude<NetworkMode, 'offlineFirst'>;
   /**
    * Groups this mutation so it can be found without holding a reference to it.
    *

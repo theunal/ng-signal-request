@@ -2,6 +2,7 @@
   "name": "ng-signal-request",
   "version": "0.1.0",
   "description": "Signal-based, type-safe request utilities for Angular",
+  "author": "Yusuf Unal",
   "keywords": [
     "angular",
     "http",

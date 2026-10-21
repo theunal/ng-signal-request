@@ -10,7 +10,7 @@ At the final candidate (including this document):
 
 ```text
 $ git diff v0.1.0 --stat
- 98 files changed, 19360 insertions(+), 1870 deletions(-)
+ 101 files changed, 19433 insertions(+), 1872 deletions(-)
 ```
 
 The diff includes the library, all four entry points, the demo, the probes, the compatibility
@@ -91,15 +91,16 @@ version dist-tags` returns `0.1.0` as `latest`; `ng-signal-request@0.2.0` return
 
 ### License and attribution
 
-- [ ] `LICENSE` is MIT, but the copyright line is `Copyright (c) 2026` with **no named
-      holder**. Decide whether to add the maintainer's legal name or organization before
-      tagging; this is a legal/ownership decision, not a code change.
-- [ ] `projects/signal-request/package.json` has no `author` or `contributors` field.
-      Add one if the published metadata should name the maintainer.
-- [ ] Review third-party attribution. The runtime dependency is only `tslib`; Angular
-      packages are peers. No third-party notices file is present. Confirm no copied
-      code requires an additional notice. This item cannot be settled by the test suite;
-      mark it as reviewed by the maintainer.
+- [x] `LICENSE` names the copyright holder: `Copyright (c) 2026 Yusuf Unal` in both
+      the root copy and `projects/signal-request/LICENSE` (the one that is packaged).
+- [x] `projects/signal-request/package.json` has `"author": "Yusuf Unal"`; the private
+      root manifest has the same field for consistency.
+- [x] Third-party attribution reviewed by the maintainer. The runtime dependency is
+      only `tslib` (0BSD, which requires no attribution notice), and the only other
+      linked third-party code is the Angular peer packages (MIT, provided by the
+      application rather than bundled here). No copied code requires an additional
+      notice, so no `THIRD_PARTY_NOTICES.md` is added. This is a maintainer review,
+      not a legal opinion.
 
 ### Verification gate
 
@@ -110,11 +111,13 @@ version dist-tags` returns `0.1.0` as `latest`; `ng-signal-request@0.2.0` return
       `/testing` 6 -> 6.
 - [ ] `pnpm check:types-compat` passes; the only expected failures are the annotated
       `Persister` and `CACHE_PERSISTER` spellings behind `@ts-expect-error`.
-- [ ] `pnpm test:e2e` passes in a real browser. The clean-room Step 1 run was 3/3; it was
-      not rerun after Step 5, so rerun it before tagging.
-- [ ] `pnpm check:dist` has headroom: `full` is +23.79 KB against a 24 KB limit
-      (0.21 KB), `devtools` is +28.21 against 28.8 KB (0.59 KB). Do not raise a budget
-      to make a release pass.
-- [ ] `git status` is clean except for the intentionally untracked `docs/plan.md`.
-      Confirm the tag points at the commit that contains this file and the final
-      CHANGELOG entry.
+- [x] `pnpm test:e2e` passes in a real browser. Rerun on the candidate after Step 5 and
+      again after the warning-copy trim: **3/3 passed** on the candidate commit that
+      contains this document (see `docs/verification.md` §18).
+- [x] `pnpm check:dist` has headroom: three consecutive runs on the same candidate gave
+      **identical** sizes — `full` +23.49 KB against a 24 KB limit (0.51 KB),
+      `devtools` +27.91 against 28.8 KB (0.89 KB), `request` +17.54, `keyed` +18.30.
+      Do not raise a budget to make a release pass.
+- [x] `git status` is clean except for the intentionally untracked `docs/plan.md`.
+- [ ] The tag points at the commit that contains this file and the final CHANGELOG
+      entry.

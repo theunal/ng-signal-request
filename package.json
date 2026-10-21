@@ -1,6 +1,7 @@
 {
   "name": "ng-signal-request",
   "version": "0.1.0",
+  "author": "Yusuf Unal",
   "scripts": {
     "ng": "ng",
     "build": "ng build signal-request",

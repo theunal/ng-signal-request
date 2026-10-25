@@ -95,6 +95,41 @@
         }
       }
     },
+    "queue-e2e": {
+      "projectType": "application",
+      "root": "projects/queue-e2e",
+      "sourceRoot": "projects/queue-e2e/src",
+      "prefix": "queue-e2e",
+      "architect": {
+        "build": {
+          "builder": "@angular/build:application",
+          "options": {
+            "tsConfig": "projects/queue-e2e/tsconfig.json",
+            "index": "projects/queue-e2e/src/index.html",
+            "browser": "projects/queue-e2e/src/main.ts",
+            "outputPath": "dist/queue-e2e"
+          },
+          "configurations": {
+            "production": {
+              "budgets": [
+                {
+                  "type": "initial",
+                  "maximumWarning": "500kB",
+                  "maximumError": "1MB"
+                }
+              ],
+              "outputHashing": "all"
+            },
+            "development": {
+              "optimization": false,
+              "extractLicenses": false,
+              "sourceMap": true
+            }
+          },
+          "defaultConfiguration": "production"
+        }
+      }
+    },
     "signal-request": {
       "projectType": "library",
       "root": "projects/signal-request",

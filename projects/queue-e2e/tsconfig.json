@@ -1,0 +1,19 @@
+/* The durable-queue e2e application.
+
+   Named `tsconfig.json` (not `tsconfig.app.json`) for the same reason as the demo: the editor's
+   TypeScript server walks up from a file looking for exactly that name, and `projectService` in
+   `eslint.config.mjs` finds it the same way.
+
+   This app exists only to be driven by `e2e/queue.spec.ts`. It is deliberately not part of the
+   demo: `pnpm check:dist` asserts that the production demo contains none of the `/persist/queue`
+   markers, and that assertion is worth more than a sixth demo tab. */
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "outDir": "../../out-tsc/queue-e2e",
+    "types": [],
+    "rootDir": ".."
+  },
+  "files": ["src/main.ts"],
+  "include": ["src/**/*.d.ts"]
+}

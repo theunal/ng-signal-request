@@ -48,13 +48,17 @@ jobs:
       - name: Check the 0.1.0 type compatibility fixture
         run: pnpm run check:types-compat
 
+      - name: Check the durable-queue type fixture
+        run: pnpm run check:types-queue
+
       - name: Build the demo and check the distribution
         run: |
           pnpm run build:demo
           pnpm run check:dist
 
-  # Kept out of `verify` because it needs a browser download. It drives the production demo, so it
-  # runs after a demo build of its own - see e2e/playwright.config.ts.
+  # Kept out of `verify` because it needs a browser download. It drives two production builds - the
+  # demo (offline path) and the durable-queue app - and builds both itself: see
+  # e2e/playwright.config.ts and the two `webServer` entries in it.
   e2e:
     runs-on: ubuntu-latest
 
@@ -73,5 +77,5 @@ jobs:
       - name: Install Chromium
         run: pnpm exec playwright install --with-deps chromium
 
-      - name: Offline checks in a real browser
+      - name: Browser checks (offline path and durable queue)
         run: pnpm run test:e2e

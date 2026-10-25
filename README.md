@@ -1748,16 +1748,19 @@ you give up when you stay inside Angular.
 | SSR                  | `providedIn: 'root'` already means one cache per render, with `TransferState` hydration                                                                      | A `QueryClient` you create per request in the server handler                         |
 | Errors               | A normalized `RequestError` view with per-kind predicates (`http()`, `timeout()`, `network()`, …) and a `message` getter, so templates do not need `@switch` | `Error`, narrowed by hand                                                            |
 | Timeouts             | `timeout` per request, classified as its own kind, and `retryTimeouts: false` to stop a timeout from being retried as a `status: 0` failure                  | No built-in timeout; abandoned by composing an `AbortSignal`                         |
-| Offline              | `networkMode` on queries and mutations, a paused state, and an in-memory mutation queue replayed in call order on reconnect                                  | `onlineManager` + `networkMode`, paused mutations, and persisted mutation resumption |
+| Offline              | `networkMode` on queries and mutations, a paused state, and an opt-in durable mutation queue (`/persist/queue`) that survives a reload                       | `onlineManager` + `networkMode`, paused mutations, and persisted mutation resumption |
 | Framework scope      | Angular 22                                                                                                                                                   | React, Vue, Svelte, Solid, Angular                                                   |
 
 Where TanStack Query is simply ahead, with no clever reframing:
 
 - **Offline mutations that survive a reload.** Both libraries queue a mutation made
-  offline and replay it on reconnect. TanStack's persistence plugins can also write
-  that queue to storage, so the write survives a page close; here the queue is
-  in-memory by design (see Known limitations), and an application that needs more
-  keeps its own outbox.
+  offline and replay it on reconnect, and both can write that queue to storage so
+  the write survives a page close. TanStack's persistence plugins are the mature
+  path and cover more storage shapes; here it is opt-in (`persistence` plus
+  `providePersistedMutationQueue`), experimental until the server-side idempotency
+  contract is proven, single-owner through the Web Locks API, and it has no
+  background replay - a service worker with Background Sync is still the answer for
+  delivery while the tab is closed.
 - **Persistence breadth.** `/persist` has `localStorage`-shaped storages plus
   `indexedDbStorage()`, with `maxAge`, `buster`, `migrate` and key/state filters.
   `persistQueryClient` still has more storage adapters, and a broader

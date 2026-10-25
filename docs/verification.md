@@ -48,32 +48,40 @@ restored; `check:dist` later confirmed the working tree was clean.
 Measured from a production build of the library (`pnpm build`), reporting the
 gzip size of each FESM bundle. These are the numbers `pnpm check:dist` prints.
 
-| Entry point                  | Raw     | Gzip        | Budget | Headroom |
-| ---------------------------- | ------- | ----------- | ------ | -------- |
-| `ng-signal-request`          | 74.3 KB | **15.9 KB** | 20 KB  | 4.1 KB   |
-| `ng-signal-request/devtools` | 8.5 KB  | 2.3 KB      | 15 KB  | 12.7 KB  |
-| `ng-signal-request/persist`  | 7.0 KB  | 2.3 KB      | 15 KB  | 12.7 KB  |
-| `ng-signal-request/testing`  | 1.8 KB  | 0.8 KB      | 15 KB  | 14.2 KB  |
+| Entry point                       | Raw      | Gzip        | Budget  | Headroom |
+| --------------------------------- | -------- | ----------- | ------- | -------- |
+| `ng-signal-request`               | 106.5 KB | **23.0 KB** | 23.5 KB | 0.5 KB   |
+| `ng-signal-request/devtools`      | 21.4 KB  | 4.5 KB      | 15 KB   | 10.5 KB  |
+| `ng-signal-request/persist`       | 12.6 KB  | 3.7 KB      | 15 KB   | 11.3 KB  |
+| `ng-signal-request/persist/queue` | 29.9 KB  | 7.2 KB      | 15 KB   | 7.8 KB   |
+| `ng-signal-request/testing`       | 1.8 KB   | 0.8 KB      | 15 KB   | 14.2 KB  |
 
-The demo application's initial bundle after `pnpm build:demo` is 230.91 KB raw /
-66.78 KB over the wire. It is not a budget — it is the number the tree-shaking
+The primary budget moved from 21.5 KB to 23.5 KB for the durable queue's core
+integration (`createMutation` enqueue/replay/idempotency branching), and the queue
+is a new secondary entry point. The core has 0.5 KB of headroom, which is why a
+further addition to the core needs either a measured size reduction or a deliberate
+budget change rather than an accidental overrun.
+
+The demo application's initial bundle after `pnpm build:demo` is 259.86 KB raw /
+75.19 KB over the wire. It is not a budget - it is the number the tree-shaking
 check is run against, and having it recorded makes a leak visible as a delta.
 
 ## 3. The tree-shaking boundary really is measured
 
 `pnpm check:dist` searches the demo's production bundle for strings that only
-exist inside `projects/signal-request/devtools/` and
-`projects/signal-request/persist/`, while asserting that core strings _are_
-present. The second half matters: "no devtools strings found" would also be the
-result of an audit that searched nothing, or an app that does not use the library
-at all.
+exist inside `projects/signal-request/devtools/`,
+`projects/signal-request/persist/` and `projects/signal-request/persist/queue/`,
+while asserting that core strings _are_ present. The second half matters: "no
+devtools strings found" would also be the result of an audit that searched nothing,
+or an app that does not use the library at all.
 
 On a clean tree:
 
 ```
-ok  core markers present: RequestCancelled, httpResource, createInfiniteRequest
+ok  core markers present: RequestCancelled, httpResource, createInfiniteRequest, ng-signal-request: restore gate
 ok  devtools markers absent: ngsr-devtools, no cached queries, [ngsr] +, snapshotEntries
-ok  persist markers absent: providePersistedCache, provideCacheTransfer, dateRevivingCodec
+ok  persist markers absent: providePersistedCache, provideCacheTransfer, dateRevivingCodec, indexedDbStorage
+ok  queue markers absent: ng-signal-request: persisted mutation queue options, ng-signal-request:mutation-queue, noHandlerWarnAfterMs
 ```
 
 ### The check really catches a leak
@@ -854,3 +862,123 @@ hid the problem. The CI workflow and `pnpm verify` now build the library before 
 `dist` removed, `pnpm verify` passes. The follow-up `CI` run #5 on `474d166` passed:
 <https://github.com/theunal/ng-signal-request/actions/runs/39640775656>. This changes no
 shipped code and no bundle number.
+
+## 20. Durable mutation queue record (2026-10-25)
+
+The queue is implemented against `docs/design-offline-mutation-queue.md`; this
+section records what was measured and, more importantly, what the test boundary
+does **not** reach. The feature is experimental and no tag, publish or release
+state is part of this record.
+
+### 20.1 Tests and coverage
+
+Two spec files run against the real `createMutation`, the real cache and a memory
+`CacheStorage`, with a fake clock and a fake `OnlineManager`.
+
+`persist/queue/queue.spec.ts` (18 tests) covers delivery:
+
+- durable write before an in-flight cache restore finishes;
+- reload/hydration and ordered replay through a re-registered handler;
+- success removes the entry, retryable failure keeps it with backoff, permanent
+  failure parks it as `failed`;
+- auth pause and `resume()`;
+- queue-full rejecting the new call before the optimistic write;
+- `409` / `isAlreadyApplied` and the replay-only boundary;
+- `onRestore` ordering;
+- detach (`destroy()` rejects with `MutationDetachedError`, entry remains);
+- corrupted snapshot and unreadable stored args (`MutationQueueQuarantineError`);
+- storage failure degrading to non-durable calls;
+- `switch` + `persistence` rejection;
+- a missing Web Locks API disabling durability;
+- entry/timer cleanup and the no-provider path.
+
+`persist/queue/queue-config.spec.ts` (21 tests) covers the decisions around it:
+
+- `eager` constructing a root service so its handler exists before auto-replay, and
+  a missing handler staying `pending` with the dev warning;
+- envelope `migrate` (including a `null` result), `buster` mismatch and
+  `migrateEntry`, each quarantining without rewriting the stored bytes;
+- per-entry corruption: an unreadable entry becomes `quarantined` while the rest
+  of the queue stays usable, and an entry with no usable `id` quarantines the
+  snapshot;
+- header precedence (configured header, a key the builder already set,
+  `idempotencyHeader: false` plus its no-retry-on-5xx rule);
+- `cancel()` removing the durable entry;
+- `onMutate` and codec failures persisting nothing and sending nothing;
+- replay hooks receiving `context: undefined` and `meta.replayed: true` with no
+  second `onMutate`;
+- `stopOnFailure` blocking a later entry after a permanent failure;
+- `onStorageError: 'fail'` rejecting with `MutationQueueDisabledError` before the
+  send;
+- the stored backoff deadline surviving without an immediate resend;
+- SSR: no storage read, no replay, and a persisted mutation degrading to a normal
+  call;
+- Web Locks ownership: the first tab owns, the second reports `owner: false`.
+
+Two defects were found by these tests and fixed before the record was written:
+replay could dispatch an entry before its version migration ran (replay is
+scheduled from hydration, registration and reconnect, so the review now runs
+synchronously and marks the entry as `reviewing`), and `migrateEntry` received the
+handler's version instead of the entry's stored version.
+
+`pnpm test` is **638 passed**. Coverage is **93.99 / 87.92 / 98.21 / 95.48**
+(statements / branches / functions / lines), above the configured floors of
+90 / 85 / 90 / 90. The branch figure is lower than the core-only records in
+sections 8-19 because the queue's storage, ownership, migration and retry paths
+include defensive branches that jsdom cannot produce.
+
+### 20.2 Bundle and type checks
+
+`pnpm build` produces the fifth entry point and `pnpm check:dist` now measures it:
+
+| Entry point                       | Gzip    | Budget |
+| --------------------------------- | ------- | ------ |
+| `ng-signal-request`               | 23.0 KB | 23.5   |
+| `ng-signal-request/persist/queue` | 7.2 KB  | 15     |
+
+The queue grew from 6.3 KB to 7.2 KB when per-entry validation and the review
+ordering landed; the headroom against its 15 KB budget is unchanged in practice.
+
+The demo bundle contains core strings and none of the `/devtools`, `/persist` or
+`/persist/queue` strings. Each FESM is scanned for the other entry points' markers;
+the one documented exception is that `/persist/queue` imports `/persist` for
+`indexedDbStorage`. Probe deltas after the core growth are +17.57 (`request`),
++18.33 (`keyed`), +25.22 (`full`) and +27.89 (`devtools`); `full` moved from a
+24 KB budget to 26.5 KB (regression limit 26 KB) deliberately, and the other
+budgets are unchanged.
+
+`pnpm check:types-queue` compiles `compat/queue/usage.ts` against the built
+declarations. It covers `persistence`, `onRestore`, `isAlreadyApplied`, the optional
+`meta` argument, the queue service and the queue events. `switch` + `persistence`
+is a runtime rejection, so it is documented rather than written as a negative type
+fixture.
+
+### 20.3 What is not covered
+
+The unit suite owns the state machine; it does not prove the browser APIs:
+
+- **Real IndexedDB is not exercised.** jsdom has no IndexedDB, and the tests use an
+  in-memory `CacheStorage`. The default storage selection, `indexedDbStorage()`'s
+  schema/upgrade path, transaction failure and quota errors only run in a real
+  browser. The `localStorage` fallback is selected by the same code path but is not
+  separately driven here.
+- **Real Web Locks are not exercised.** Ownership is tested through the adapter's
+  `owner`/`enabled` states and a stubbed `navigator.locks`; a second real tab
+  contending for the lock, and a lock released by a closing tab, are browser
+  behaviour.
+- **A real reload is not exercised.** Hydration is reproduced from a stored
+  snapshot string. That proves the restore path, not that a browser survives the
+  reload, quota eviction or a private-mode storage denial.
+- **No queue-specific browser e2e was added.** The existing Playwright demo is the
+  production demo, and `check:dist` requires it not to contain `/persist/queue`
+  markers. Adding the provider there would either disable that boundary check or
+  grow the demo for a feature it does not demonstrate. The reload/replay,
+  ownership and corruption cases therefore stop at the integration boundary above;
+  the design's e2e list remains the acceptance work for the release that removes
+  the experimental label.
+- **The server-side idempotency contract is unverified by construction.** The tests
+  prove the same key is sent on the first attempt and every replay; they cannot
+  prove a server deduplicates it.
+
+These are cross-browser and server-contract limits, not open questions in the
+implementation. Stating them is what keeps "tested" from becoming "proven".

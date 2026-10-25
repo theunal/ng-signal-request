@@ -19,6 +19,32 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 > for both) or use `createPersister({ storage })`, whose return type is inferred.
 > Nothing is removed at runtime; this is compile-time only.
 
+## [Unreleased]
+
+### Added
+
+- **An opt-in durable mutation queue (`ng-signal-request/persist/queue`), experimental.**
+  A mutation that sets `persistence: { key }` and opts into `networkMode: 'online'`
+  is stored before its first send and replayed after a reload, instead of dying
+  with the page. The provider is `providePersistedMutationQueue`; the queue is
+  global FIFO with `stopOnFailure`, bounded by `maxEntries`, owned through the Web
+  Locks API, and backed by IndexedDB with a `localStorage` fallback.
+  - Idempotency keys are minted before the first send and reused verbatim on every
+    replay, in an `Idempotency-Key` header by default. The library cannot verify
+    that a server honours it; the endpoint has to be idempotent.
+  - `persistence.onRestore` runs after hydration and the cache restore gate and
+    before replay. Hydrated writes settle with `context: undefined` and a final
+    `meta: { replayed: true }`; `onMutate` is not re-run.
+  - `isAlreadyApplied(error)` is a replay-only `409` policy. Queue-full rejects the
+    new call instead of evicting accepted work; a failed entry is kept, never
+    silently dropped.
+  - `destroy()` rejects a current-page queued promise with `MutationDetachedError`
+    and leaves the durable entry for the next page. `concurrency: 'switch'` is
+    incompatible with `persistence`.
+  - The queue is a separate entry point so an application that only persists the
+    read cache does not pay for it. It is labelled experimental until the
+    server-side idempotency contract has been proven in practice.
+
 ## [0.2.0] - 2026-10-21
 
 Published to npm as `ng-signal-request@0.2.0` with provenance from release commit

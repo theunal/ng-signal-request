@@ -12,7 +12,7 @@ triggering with `run()`, method variants (`createRequest.post`,
 `baseUrl` / `:path` parameters, reactive global headers, normalized errors, a
 `key`-based shared cache with invalidation, mutations with optimistic writes, a
 `select()` projection, `combine` / `createRequests`, and separate `/testing`,
-`/devtools` and `/persist` entry points.
+`/devtools`, `/persist` and `/persist/queue` entry points.
 
 ```ts
 import {
@@ -1142,9 +1142,128 @@ add.run('Buy milk'); // offline: queued, list already shows it, promise pending
 add.cancel(); // rejects with RequestCancelledError, list rolls back
 ```
 
-The queue lives in memory and **does not survive a reload** — see Known limitations.
+The queue lives in memory and **does not survive a reload** unless the mutation
+opts into persistence - see [A queue that survives a reload](#a-queue-that-survives-a-reload).
 `'offlineFirst'` is query-only: a mutation has no cached value to show first, so
 `MutationOptions.networkMode` is typed as `Exclude<NetworkMode, 'offlineFirst'>`.
+
+### A queue that survives a reload
+
+The in-memory queue above is still the default and still needs no setup. The
+durable queue is **opt-in twice**: install the provider, and mark each mutation
+definition that is allowed to be stored.
+
+```ts
+import { providePersistedMutationQueue } from 'ng-signal-request/persist/queue';
+
+bootstrapApplication(App, {
+  providers: [
+    provideHttpClient(),
+    // Eagerly construct the services that own the mutating definitions, so their
+    // handlers are registered before a stored entry is replayed.
+    providePersistedMutationQueue({ eager: [TodoStore] }),
+  ],
+});
+
+@Injectable({ providedIn: 'root' })
+export class TodoStore {
+  readonly add = createMutation<Todo, { title: string }, { previous: Todo[] }>(
+    (args) => ({ url: '/todos', body: args }),
+    {
+      networkMode: 'online',
+      persistence: {
+        key: 'todos.add', // identity across deploys - not mutationKey
+        idempotencyKey: (args) => `todos.add:${args.title}`,
+        onRestore: (args) => this.list.set((rows) => [{ title: args.title }, ...(rows ?? [])]),
+      },
+      optimistic: (rows, args) => [{ title: args.title }, ...(rows ?? [])],
+      invalidates: () => [this.list],
+    },
+  );
+}
+```
+
+`persistence.key` is required and is the mutation **definition's** identity. It is
+not `mutationKey`: a mutation key is an optional grouping key for introspection,
+while this one is the contract a stored entry uses to find its builder after a
+reload. Bump `persistence.version` when the args shape changes. Stored args are
+serialized with the `codec` (JSON by default), so a `Date`, `Map` or class
+instance needs a codec - otherwise it will not round-trip. An entry whose stored
+args the codec can no longer read is **quarantined**, not deleted and not sent.
+
+What is stored is the definition key, the serialized args and the idempotency
+key. Auth headers, closures, `onMutate` context and the built request are **not**
+stored: replay rebuilds the request from the current builder, so a refreshed token
+is used and a changed URL takes effect.
+
+#### Idempotency
+
+Every persistent entry gets an idempotency key **before the first send** and reuses
+it verbatim on every replay. The default header is `Idempotency-Key`; change it
+with `idempotencyHeader`, or pass `false` to send none. Without a header the queue
+will not retry a timeout or a `5xx`, because a duplicate write is worse than a
+failed one.
+
+The library **cannot verify that your server honours the header**. A server that
+ignores it will apply a replayed write twice. `persistence.idempotencyKey(args)`
+is the place to supply a key your server already understands; the generated UUID
+is the fallback. Treat the whole queue as an at-least-once delivery mechanism and
+make the endpoint idempotent.
+
+A `409 Conflict` on replay can mean "this write already landed". Return `true`
+from `persistence.isAlreadyApplied(error)` to treat that entry as applied: it is
+removed and the mutation invalidates as if it had succeeded. The hook is consulted
+**only on replay** - a first attempt that returns `409` is a normal failure.
+
+#### Replay, retries and `onRestore`
+
+Replay is global FIFO. `stopOnFailure` defaults to `true`, so a permanently failed
+entry stops the ones behind it instead of letting them overtake it; set it to
+`false` to skip failed entries. A retryable failure is retried with exponential
+backoff (1s, 2s, 4s, 8s, 16s, capped at 30s, with 80-120% jitter) up to
+`retry.maxAttempts`. `Retry-After` is honoured when the error exposes readable
+headers. A `401`/`403` pauses the queue and sets `needsAuth()`; call `resume()`
+after the app has a token.
+
+`onMutate` is **not** re-run for a hydrated entry - the page that made the call is
+gone, and its context was never stored. Settle hooks therefore receive
+`context: undefined` on replay, plus a final `meta` argument whose `replayed` is
+`true`. `onRestore(args, entry)` runs after hydration and after `RESTORE_GATE`,
+before replay, so the application can put its own pending UI back on screen. The
+queue deliberately does not reapply optimistic writes by itself: a restored cache
+snapshot may already contain the optimistic value, and re-applying it would double
+it. `onRestore` is application-owned for exactly that reason.
+
+#### Storage, capacity and the single owner
+
+The queue defaults to **IndexedDB**, falling back to `localStorage`; this differs
+from the cache persister, whose default is `localStorage`. Pass `storage` to choose
+your own, or `null` to disable the queue explicitly. `maxEntries` (default 100)
+caps pending and failed entries together. A full queue rejects the **new** call
+with `MutationQueueFullError` before the optimistic write and never evicts an
+accepted entry.
+
+Replaying in two tabs at once would send the same write twice, so the queue takes a
+**Web Lock** and only the owner replays. `owner()` and `enabled()` say which tab
+that is; a non-owner still runs mutations in memory but does not persist or replay
+them. Without the Web Locks API durable persistence is disabled rather than
+assumed safe; `assumeSingleTab: true` is the explicit opt-in for an environment
+that really has one tab.
+
+`destroy()` rejects a **current-page** queued promise with `MutationDetachedError`
+instead of pretending the write failed. The durable entry stays, so the next page
+can replay it. A true cancellation is `queue.remove(id)`; `queue.clear()` is the
+logout path, and should run next to `CACHE_PERSISTER.clear()` when both are used.
+
+`concurrency: 'switch'` is incompatible with `persistence`: a superseded write may
+already have reached the server, and the durable queue keeps every accepted call.
+The combination throws in development and disables persistence for that mutation
+with a warning in production.
+
+The queue service itself exposes `entries()`, `pendingCount()`, `failedCount()`,
+`isReplaying()`, `needsAuth()`, `owner()`, `enabled()`, `retry(id)`, `retryAll()`,
+`pause()`, `resume()`, `remove(id)`, `clear()`, `export()` and `onEvent(listener)`.
+`providePersistedMutationQueue` is part of the **experimental** 0.4.0 surface.
 
 ## Auth: reactive headers + a refresh interceptor
 
@@ -1395,8 +1514,10 @@ for a request that never arrives.
 
 `pnpm test` runs v8 coverage and fails if the totals drop below the thresholds in
 `angular.json` (`90%` statements, `85%` branches, `90%` functions, `90%` lines).
-Current totals are ~97% statements, ~93% branches, ~98% functions and ~99% lines,
-so the distance to the threshold is the regression margin rather than the target.
+Current totals are ~92% statements, ~87% branches, ~96% functions and ~93% lines
+(the durable queue's defensive paths are the main reason branches sits below the
+core-only figures recorded in `docs/verification.md`), so the distance to the
+threshold is the regression margin rather than the target.
 The gate is verified rather than trusted: raising a threshold above the current
 number fails the run with
 `ERROR: Coverage for lines (…) does not meet global threshold`.
@@ -1549,6 +1670,25 @@ snapshot rather than failing bootstrap. The application that would report such a
 error has not started yet, so a bad migration is a cold first paint, not a broken
 app. A `buster` mismatch drops a migrated snapshot too: a shape migration knows
 nothing about what you put in the responses.
+
+### The cache and the durable mutation queue together
+
+`providePersistedCache` and `providePersistedMutationQueue` are configured
+independently. When both are installed, three ordering rules apply:
+
+- **A replay waits for the restore gate.** The queue does not dispatch a stored
+  write until the cache restore has finished, so a replay's `invalidates` cannot
+  race the snapshot.
+- **`persistence.onRestore` runs after the gate, before replay.** That is the hook
+  for re-applying application-owned pending UI on top of restored data.
+- **An initial enqueue is not gated by the cache restore.** A write made while the
+  cache is still reading is stored durably immediately; only replay and
+  `onRestore` wait.
+
+Both can share one `indexedDbStorage()` factory or use different databases and
+stores. The queue defaults to IndexedDB while the cache persister defaults to
+`localStorage`, so choosing `indexedDbStorage()` for the cache is a deliberate
+step, not something the queue changes for you.
 
 ## SSR
 
@@ -1760,21 +1900,23 @@ enough that the translation is mechanical.
 Stated plainly, because a limitation you find out about in production is a bug
 report and one you read here is a design decision.
 
-- **The offline mutation queue does not survive a reload.** With
-  `networkMode: 'online'`, calls made while offline are replayed on reconnect —
-  but they live in the handle's memory. A user who closes the tab (or reloads) with
-  writes queued loses them, while the optimistic writes they saw are gone with the
-  page. Persisting the queue would need a stable identity for every mutation
-  (`mutationKey` is optional and not unique), a write format the library can migrate,
-  and a decision about replaying a write whose optimistic state no longer exists;
-  those are a storage feature, not a connectivity one, and 0.2.0 does not pretend to
-  have them. If losing a write is unacceptable, disable the form while offline,
-  keep your own outbox in IndexedDB, or use a service worker's background sync.
+- **The durable mutation queue is opt-in and has boundaries.** With
+  `networkMode: 'online'`, calls made while offline are replayed on reconnect -
+  but without `providePersistedMutationQueue(...)` and a `persistence` option
+  they live in the handle's memory, and a reload loses them. Even opted in: only
+  the tab holding the Web Lock persists and replays (`assumeSingleTab` exists for
+  environments without Web Locks); stored args must be codec-serializable; auth
+  headers, closures and `onMutate` context are not stored, so replay gets
+  `context: undefined`; and the library cannot verify that the server honours the
+  `Idempotency-Key` header. A replayed write is still an at-least-once write, and
+  the endpoint has to be idempotent. `concurrency: 'switch'` cannot be combined
+  with persistence. Those are storage and delivery decisions, not connectivity
+  ones; see [A queue that survives a reload](#a-queue-that-survives-a-reload).
 - **Importing one factory keeps the whole primary entry point in your bundle.** The
   factories live in one module with module-level tables, so an app that only calls
   `createRequest` still retains the cached path, the infinite path and the mutation
   queue: measured at about **+17.6 KB gzip** over an app without the library, against
-  about **+23.5 KB** for the full surface. This is a tree-shaking limitation, not a
+  about **+25.2 KB** for the full surface. This is a tree-shaking limitation, not a
   claim that the unused features are free; fixing it needs a module per factory,
   which is a public-API decision for a later release. The measured numbers and the
   budgets are in [Bundle](#bundle).
@@ -1854,37 +1996,45 @@ report and one you read here is a design decision.
 | `toError(value)`                                              | Normalizes an `unknown` into an `Error` without wrapping an `HttpErrorResponse`                                                                                     |
 | `toRequestError(cause, context?)`                             | Normalizes an `unknown` into a `RequestError`                                                                                                                       |
 | `requestErrorOf(error, context)`                              | Builds a `requestError`-style accessor for your own `error` signal                                                                                                  |
+| `MUTATION_QUEUE`                                              | The optional adapter token `providePersistedMutationQueue` implements; core reads it and falls back to the in-memory queue                                          |
+| `MutationDetachedError`                                       | `destroy()` while a durable call is pending: the page's promise rejects, the stored entry stays                                                                     |
+| `MutationQueueFullError` / `MutationQueueDisabledError`       | A full queue rejected the new call / durable persistence is unavailable                                                                                             |
+| `MutationQueueQuarantineError`                                | Stored args could not be deserialized; the entry is parked instead of sent                                                                                          |
 
 ### Types
 
-| Export                                                              | Description                                                        |
-| ------------------------------------------------------------------- | ------------------------------------------------------------------ |
-| `RequestError`                                                      | The discriminated failure union                                    |
-| `RequestErrorView`                                                  | `RequestError` plus the per-kind predicates and `message`          |
-| `RequestErrorKind` / `RequestErrorOf<K>`                            | The five kinds, and one union member by name                       |
-| `RequestErrorContext`                                               | `{ timeout? }` used for timeout classification                     |
-| `SignalRequest<T, R, TParams>`                                      | Query handle                                                       |
-| `CachedRequest<T, R, TParams>`                                      | Query handle backed by a shared cache entry                        |
-| `QueryRequest<T, R, TParams>`                                       | Handle returned by `createQuery` (no HTTP-only state)              |
-| `QuerySource<T, TParams>` / `QueryContext<TParams>`                 | The function a query runs, and its `{ signal, params }` context    |
-| `QueryOptions<T, TParams>`                                          | Options for `createQuery`                                          |
-| `InfiniteRequest<TPage, TParam>`                                    | Paginated handle                                                   |
-| `FlattenedPages<TPage>`                                             | What `response()` yields: items for an array page, pages otherwise |
-| `Combinable<T>` / `Combined<T>` / `RequestSet<T>`                   | The shapes `combine` and `createRequests` accept and return        |
-| `ResponsesOf<TSources>`                                             | Record→responses mapping used by `combine`                         |
-| `SelectOptions<S>`                                                  | `{ equal }` for `select()`                                         |
-| `SignalMutation<T, TArgs>`                                          | Mutation handle                                                    |
-| `RequestOptions<T, TParams, TRaw>` / `MutationOptions<T, TArgs>`    | Option shapes                                                      |
-| `CreateRequest` / `CreateRequestFn`                                 | The callable variants and their shapes                             |
-| `CreateMutation`                                                    | The mutation variant shape                                         |
-| `RequestSource` / `RequestValue` / `RequestConfig` / `ParamsOption` | Source and params description                                      |
-| `QueryParams` / `QueryValue` / `PathParams`                         | Parameter helpers                                                  |
-| `RetryConfig` / `RetryOptions`                                      | Retry policy                                                       |
-| `RequestStatus` / `MutationStatus` / `RunResult<T>`                 | Status and result types                                            |
-| `Reloadable` / `OptimisticTarget<T>` / `InvalidationTarget`         | Invalidation, optimistic-update and key shapes                     |
-| `SignalRequestConfig`                                               | Global config shape                                                |
-| `NetworkMode`                                                       | `'online'` · `'always'` · `'offlineFirst'`                         |
-| `Connectivity`                                                      | `{ online: Signal<boolean>; onReconnect(listener): () => void }`   |
+| Export                                                              | Description                                                                                          |
+| ------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| `RequestError`                                                      | The discriminated failure union                                                                      |
+| `RequestErrorView`                                                  | `RequestError` plus the per-kind predicates and `message`                                            |
+| `RequestErrorKind` / `RequestErrorOf<K>`                            | The five kinds, and one union member by name                                                         |
+| `RequestErrorContext`                                               | `{ timeout? }` used for timeout classification                                                       |
+| `SignalRequest<T, R, TParams>`                                      | Query handle                                                                                         |
+| `CachedRequest<T, R, TParams>`                                      | Query handle backed by a shared cache entry                                                          |
+| `QueryRequest<T, R, TParams>`                                       | Handle returned by `createQuery` (no HTTP-only state)                                                |
+| `QuerySource<T, TParams>` / `QueryContext<TParams>`                 | The function a query runs, and its `{ signal, params }` context                                      |
+| `QueryOptions<T, TParams>`                                          | Options for `createQuery`                                                                            |
+| `InfiniteRequest<TPage, TParam>`                                    | Paginated handle                                                                                     |
+| `FlattenedPages<TPage>`                                             | What `response()` yields: items for an array page, pages otherwise                                   |
+| `Combinable<T>` / `Combined<T>` / `RequestSet<T>`                   | The shapes `combine` and `createRequests` accept and return                                          |
+| `ResponsesOf<TSources>`                                             | Record→responses mapping used by `combine`                                                           |
+| `SelectOptions<S>`                                                  | `{ equal }` for `select()`                                                                           |
+| `SignalMutation<T, TArgs>`                                          | Mutation handle                                                                                      |
+| `RequestOptions<T, TParams, TRaw>` / `MutationOptions<T, TArgs>`    | Option shapes                                                                                        |
+| `CreateRequest` / `CreateRequestFn`                                 | The callable variants and their shapes                                                               |
+| `CreateMutation`                                                    | The mutation variant shape                                                                           |
+| `MutationPersistenceOptions<TArgs>`                                 | `persistence` on `createMutation`: key, version, codec, idempotency, `onRestore`, `isAlreadyApplied` |
+| `MutationHookMeta`                                                  | The optional final settle-hook argument: `{ replayed: boolean }`                                     |
+| `MutationArgsCodec<TArgs>`                                          | `serialize` / `deserialize` for non-JSON args                                                        |
+| `MutationQueueAdapter` / `MutationQueueHandler`                     | The core seam `/persist/queue` implements and `createMutation` registers                             |
+| `RequestSource` / `RequestValue` / `RequestConfig` / `ParamsOption` | Source and params description                                                                        |
+| `QueryParams` / `QueryValue` / `PathParams`                         | Parameter helpers                                                                                    |
+| `RetryConfig` / `RetryOptions`                                      | Retry policy                                                                                         |
+| `RequestStatus` / `MutationStatus` / `RunResult<T>`                 | Status and result types                                                                              |
+| `Reloadable` / `OptimisticTarget<T>` / `InvalidationTarget`         | Invalidation, optimistic-update and key shapes                                                       |
+| `SignalRequestConfig`                                               | Global config shape                                                                                  |
+| `NetworkMode`                                                       | `'online'` · `'always'` · `'offlineFirst'`                                                           |
+| `Connectivity`                                                      | `{ online: Signal<boolean>; onReconnect(listener): () => void }`                                     |
 
 ### Cache
 
@@ -1913,6 +2063,13 @@ report and one you read here is a design decision.
 ### `ng-signal-request/persist`
 
 `providePersistedCache` · `createPersister` · `CACHE_PERSISTER` · `Persister` · `PersistOptions` · `CacheStorage` · `AsyncCacheStorage` · `RestoreOf` · `indexedDbStorage` · `IndexedDbStorageOptions` · `dehydrate` · `defaultDehydrateFilter` · `anyDataDehydrateFilter` · `DehydratePredicate` · `DehydrateOptions` · `hydrate` · `HydrateOptions` · `CacheSnapshot` · `CacheSnapshotEntry` · `SNAPSHOT_VERSION` · `SnapshotCodec` · `dateRevivingCodec` · `provideCacheTransfer` · `CACHE_TRANSFER_KEY` · `CacheTransferOptions` · `prefetch` · `Prefetchable` · `PrefetchReport`
+
+### `ng-signal-request/persist/queue`
+
+`providePersistedMutationQueue` · `PersistedMutationQueue` · `PERSISTED_MUTATION_QUEUE_OPTIONS` · `PersistedMutationQueueOptions` · `PersistedMutationQueueRetryOptions` · `PersistedMutationQueueEvent` · `PersistedMutationQueueListener` · `MUTATION_QUEUE_VERSION` · `MutationQueueSnapshot` · `PersistedMutationEntry` · `PersistedMutationError` · `MutationQueueStorage` · `MUTATION_QUEUE` · `MutationDetachedError` · `MutationQueueFullError` · `MutationQueueDisabledError` · `MutationQueueQuarantineError`
+
+The service signals and methods are listed in
+[A queue that survives a reload](#a-queue-that-survives-a-reload).
 
 ## Devtools
 
@@ -2034,10 +2191,11 @@ pnpm typecheck     # tsc --noEmit over the lib, spec, devtools and demo projects
 pnpm lint          # eslint, type-aware, over every file
 pnpm format        # prettier --write
 pnpm watch         # rebuild on change (development configuration)
-pnpm verify        # typecheck + build + lint + format:check + test + check:types-compat + build:demo + check:dist
+pnpm verify        # typecheck + build + lint + format:check + test + both type checks + build:demo + check:dist
 pnpm check:dist    # post-build assertions (see "Bundle" below)
 pnpm check:api     # export diff against a git ref: `pnpm check:api v0.1.0`
 pnpm check:types-compat  # compile the 0.1.0 compatibility fixture against the build
+pnpm check:types-queue   # compile the durable-queue fixture against the build
 pnpm bench         # the resolve() benchmark at 200k iterations (see docs/perf.md)
 pnpm test:e2e      # Playwright against the production demo (needs `pnpm exec playwright install chromium`)
 ```
@@ -2069,6 +2227,15 @@ part of `pnpm verify`. Where a 0.1.0 spelling could not be kept, it is written b
 a load-bearing `// @ts-expect-error` that names the accepted break, so a later change
 that quietly restores it fails the check and the exception gets removed with it.
 
+A second fixture does the same for the **new** surface rather than the old one:
+`pnpm check:types-queue` compiles [`compat/queue/usage.ts`](compat/queue/usage.ts)
+against `dist/signal-request`, covering `persistence`, `onRestore`,
+`isAlreadyApplied`, the optional final `meta` argument on settle hooks, the queue
+service and its events. `concurrency: 'switch'` + `persistence` is rejected at
+runtime rather than by the type system (a union of option shapes would widen
+inference for every existing call); the fixture says so instead of hiding it
+behind an `@ts-expect-error` the compiler cannot satisfy.
+
 > On Windows, `packageManager` pins a pnpm version newer than the one on
 > `PATH`. If `pnpm install` fails with _"is not recognized as an internal or
 > external command"_, that pnpm self-management shim is broken - run the
@@ -2076,23 +2243,26 @@ that quietly restores it fails the check and the exception gets removed with it.
 
 ## Bundle
 
-The library ships as four entry points, and the split is load-bearing rather
+The library ships as five entry points, and the split is load-bearing rather
 than cosmetic. Sizes are the gzipped ESM bundles from a production build:
 
-| Entry point                  | Size        | When it is in an application |
-| ---------------------------- | ----------- | ---------------------------- |
-| `ng-signal-request`          | **20.6 KB** | always                       |
-| `ng-signal-request/devtools` | 4.5 KB      | only if imported             |
-| `ng-signal-request/persist`  | 3.7 KB      | only if imported             |
-| `ng-signal-request/testing`  | 0.8 KB      | only in tests                |
+| Entry point                       | Size        | When it is in an application |
+| --------------------------------- | ----------- | ---------------------------- |
+| `ng-signal-request`               | **23.0 KB** | always                       |
+| `ng-signal-request/devtools`      | 4.5 KB      | only if imported             |
+| `ng-signal-request/persist`       | 3.7 KB      | only if imported             |
+| `ng-signal-request/persist/queue` | 7.2 KB      | only if imported             |
+| `ng-signal-request/testing`       | 0.8 KB      | only in tests                |
 
-The primary entry point has no imports from the other three and `sideEffects` is
+The primary entry point has no imports from the other four and `sideEffects` is
 `false`, so an application that never writes those imports never links the code.
 `pnpm check:dist` asserts this against a real production build: the demo is
 compiled, and the output is required to contain core strings and none of the
-`/devtools` or `/persist` ones. It also scans each entry point's own bundle for the
-other three's strings, so a cross-entry `import` is caught even when nothing in the
-demo exercises the pair. The reason to test it rather than trust it is that
+`/devtools`, `/persist` or `/persist/queue` ones. It also scans each entry point's
+own bundle for the other entry points' strings, so a cross-entry `import` is
+caught even when nothing in the demo exercises the pair. (`/persist/queue`
+legitimately imports `/persist` for `indexedDbStorage`, so that pair is the one
+documented exception.) The reason to test it rather than trust it is that
 "separate entry point" is an intention and a bundle scan is a fact.
 
 Those numbers are what ships. What an application **retains** is a different
@@ -2104,7 +2274,7 @@ and compares gzip sizes against the one without the library:
 | ---------- | ------------------------------------------------------------- | ---------------- |
 | `request`  | one uncached `createRequest`                                  | **+17.6 KB**     |
 | `keyed`    | a keyed `createRequest` and `QueryClient`                     | **+18.3 KB**     |
-| `full`     | every core factory and the `/persist` + `/devtools` entries   | **+23.5 KB**     |
+| `full`     | every core factory and the `/persist` + `/devtools` entries   | **+25.2 KB**     |
 | `devtools` | a keyed request with history opted in and `<ngsr-devtools />` | **+27.9 KB**     |
 
 The unkeyed request probe fell from +21.4 KB to +17.6 KB after the module-level
@@ -2119,13 +2289,15 @@ secondary entry point, not part of that core comparison: it pays for the panel o
 purpose.
 
 Budgets, so growth is a decision rather than a surprise: the primary entry point
-is not allowed past **21.5 KB gzip** (raised from 20 KB by 0.2.0's `createQuery`;
-the measured 20.6 and the reasoning are in `docs/design-0.2.md`), and any
-secondary entry point past **15 KB gzip**. The probe release budgets are unchanged
-(`request` and `keyed` 22.5 KB over the control, `full` 24 KB, `devtools` 32.5 KB);
-`check:dist` now also enforces tighter regression limits of **18.4 / 19.2 / 24 /
-28.8 KB**. `pnpm attribution` prints the per-module retained bytes behind the
-request probe, and `pnpm check:dist` prints every number on each run.
+is not allowed past **23.5 KB gzip** (raised from 21.5 KB by the durable queue's
+`createMutation` integration, which adds enqueue/replay branching and idempotency
+handling to core), and any secondary entry point past **15 KB gzip**. The probe
+release budgets are `request` and `keyed` 22.5 KB over the control, `full`
+26.5 KB (raised from 24 KB by the same core growth), and `devtools` 32.5 KB;
+`check:dist` now also enforces tighter regression limits of
+**18.4 / 19.2 / 26 / 28.8 KB**. `pnpm attribution` prints the
+per-module retained bytes behind the request probe, and `pnpm check:dist` prints
+every number on each run.
 
 ## Releasing
 

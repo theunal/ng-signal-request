@@ -857,6 +857,13 @@ reload is a duplicate write — and a library that replays one because it was in
 agreed to. The queue lives in memory and dies with the page, like the in-flight
 requests it is made of.
 
+That non-goal was revisited after 0.2.0: an **opt-in** durable queue now lives in
+`ng-signal-request/persist/queue` and is specified in
+[`docs/design-offline-mutation-queue.md`](design-offline-mutation-queue.md). The
+in-memory path described here is unchanged and is still the default; the durable
+path requires the application to supply a mutation identity and an idempotency
+contract, which is exactly the story this paragraph says a library cannot invent.
+
 ### Ordering against the restore gate
 
 A request that is both waiting for a restore and offline resolves **restore

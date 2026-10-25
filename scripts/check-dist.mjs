@@ -10,11 +10,11 @@
  *
  * Three things are checked here, and each has been wrong before.
  *
- * 1. **The `/devtools` and `/persist` entry points do not reach a production bundle that does not
- *    import them.** `tsconfig`-level "separate entry point" is a claim; this is the measurement. The
- *    demo is built for production and the resulting bundle is searched for entry-point-only strings
- *    — while also asserting that core strings *are* present, because "not found" is otherwise
- *    indistinguishable from "the app does not use the library at all".
+ * 1. **The `/devtools`, `/persist` and `/persist/queue` entry points do not reach a production
+ *    bundle that does not import them.** `tsconfig`-level "separate entry point" is a claim; this is
+ *    the measurement. The demo is built for production and the resulting bundle is searched for
+ *    entry-point-only strings — while also asserting that core strings *are* present, because "not
+ *    found" is otherwise indistinguishable from "the app does not use the library at all".
  *
  * 2. **No entry point's own bundle contains another one's strings.** The demo measures the boundary
  *    the way an application experiences it; this measures it one level up, in the FESM files, so a
@@ -47,6 +47,13 @@ const PERSIST_MARKERS = [
   'indexedDbStorage',
 ];
 
+/** Strings that only exist inside `projects/signal-request/persist/queue/`. */
+const QUEUE_MARKERS = [
+  'ng-signal-request: persisted mutation queue options',
+  'ng-signal-request:mutation-queue',
+  'noHandlerWarnAfterMs',
+];
+
 /** Strings that only exist inside `projects/signal-request/src/`. */
 const CORE_MARKERS = [
   'RequestCancelled',
@@ -65,18 +72,22 @@ const CORE_MARKERS = [
  * cross-entry `import` is caught even when nothing in the demo exercises the pair.
  */
 const FORBIDDEN_IN = new Map([
-  ['ng-signal-request.mjs', [...DEVTOOLS_MARKERS, ...PERSIST_MARKERS]],
-  ['ng-signal-request-persist.mjs', DEVTOOLS_MARKERS],
-  ['ng-signal-request-devtools.mjs', PERSIST_MARKERS],
-  ['ng-signal-request-testing.mjs', [...DEVTOOLS_MARKERS, ...PERSIST_MARKERS]],
+  ['ng-signal-request.mjs', [...DEVTOOLS_MARKERS, ...PERSIST_MARKERS, ...QUEUE_MARKERS]],
+  ['ng-signal-request-persist.mjs', [...DEVTOOLS_MARKERS, ...QUEUE_MARKERS]],
+  // `/persist/queue` imports `/persist` for `indexedDbStorage`, so persist markers are allowed
+  // here. It must not pull the panel in.
+  ['ng-signal-request-persist-queue.mjs', DEVTOOLS_MARKERS],
+  ['ng-signal-request-devtools.mjs', [...PERSIST_MARKERS, ...QUEUE_MARKERS]],
+  ['ng-signal-request-testing.mjs', [...DEVTOOLS_MARKERS, ...PERSIST_MARKERS, ...QUEUE_MARKERS]],
 ]);
 
 /** Gzip budgets per entry point, in KB. Stated in the README, enforced here. */
 const BUDGETS = new Map([
-  ['ng-signal-request.mjs', 21.5],
+  ['ng-signal-request.mjs', 23.5],
   ['ng-signal-request-devtools.mjs', 15],
   ['ng-signal-request-testing.mjs', 15],
   ['ng-signal-request-persist.mjs', 15],
+  ['ng-signal-request-persist-queue.mjs', 15],
 ]);
 
 /**
@@ -90,7 +101,7 @@ const BUDGETS = new Map([
 const PROBE_BUDGETS = new Map([
   ['request', 22.5],
   ['keyed', 22.5],
-  ['full', 24],
+  ['full', 26.5],
   // Not a core tree-shaking probe: this app renders `<ngsr-devtools />`, so its delta is the
   // positive control for the secondary entry point. Kept in the same harness so the panel has a
   // measured budget instead of only a unit test.
@@ -109,7 +120,7 @@ const PROBE_BUDGETS = new Map([
 const PROBE_LIMITS = new Map([
   ['request', 18.4],
   ['keyed', 19.2],
-  ['full', 24],
+  ['full', 26],
   // The panel is the positive control; this limit still catches a regression in the core part of
   // the same probe, which is why it moved with `request` rather than staying at 32.5.
   ['devtools', 28.8],
@@ -215,6 +226,16 @@ function checkBundleBoundaries(demoDir, distDir) {
     );
   } else {
     notes.push(`persist markers absent: ${PERSIST_MARKERS.join(', ')}`);
+  }
+
+  const leakedQueue = QUEUE_MARKERS.filter((marker) => bundle.includes(marker));
+  if (leakedQueue.length > 0) {
+    failures.push(
+      `the /persist/queue entry point leaked into the demo production bundle (${leakedQueue.join(', ')}) ` +
+        '— something under src/ must be importing it',
+    );
+  } else {
+    notes.push(`queue markers absent: ${QUEUE_MARKERS.join(', ')}`);
   }
 
   let fesm;

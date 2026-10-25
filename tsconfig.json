@@ -12,7 +12,9 @@
     "isolatedModules": true,
     "experimentalDecorators": true,
     "paths": {
-      "ng-signal-request": ["./projects/signal-request/src/public-api.ts"]
+      "ng-signal-request": ["./projects/signal-request/src/public-api.ts"],
+      "ng-signal-request/persist": ["./projects/signal-request/persist/persist.ts"],
+      "ng-signal-request/persist/queue": ["./projects/signal-request/persist/queue/queue.ts"]
     },
     "importHelpers": true,
     "target": "ES2022",

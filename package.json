@@ -15,12 +15,13 @@
     "check:dist": "pnpm run build:probes && node scripts/check-dist.mjs",
     "check:api": "node scripts/api-diff.mjs",
     "check:types-compat": "tsc -p compat/v0.1.0/tsconfig.json",
+    "check:types-queue": "tsc -p compat/queue/tsconfig.json",
     "bench": "node scripts/bench.mjs",
     "test:e2e": "pnpm run build:demo && playwright test --config e2e/playwright.config.ts",
     "lint": "eslint .",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "verify": "pnpm run typecheck && pnpm run build && pnpm run lint && pnpm run format:check && pnpm run test && pnpm run check:types-compat && pnpm run build:demo && pnpm run check:dist"
+    "verify": "pnpm run typecheck && pnpm run build && pnpm run lint && pnpm run format:check && pnpm run test && pnpm run check:types-compat && pnpm run check:types-queue && pnpm run build:demo && pnpm run check:dist"
   },
   "private": true,
   "packageManager": "pnpm@12.14.0",

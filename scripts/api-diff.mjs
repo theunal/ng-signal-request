@@ -16,10 +16,12 @@
  * is the only outcome here that is a breaking change. Added names are reported and are fine — an
  * additive release is the normal case.
  *
- * **All four entry points are compared, not only the core.** "No name was removed" is a claim about
+ * **All five entry points are compared, not only the core.** "No name was removed" is a claim about
  * the published package, and 0.2.0 changed signatures inside `/persist` as well as adding to the
  * core: a diff that only read `src/public-api.ts` would have reported a clean run while quietly not
- * looking at the half of the surface that moved.
+ * looking at the half of the surface that moved. `/persist/queue` is new in this release, so an
+ * older ref legitimately does not have it; that entry is skipped when absent rather than reported
+ * as a parse failure.
  *
  * Resolution is textual, not a TypeScript program. Each file is a list of re-export blocks and
  * declarations and nothing else, so the only thing that can go wrong is a shape this regex does not
@@ -29,12 +31,13 @@
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 
-/** The four entry points, in the order the README lists them. */
+/** The five entry points, in the order the README lists them. */
 const API_PATHS = [
-  'projects/signal-request/src/public-api.ts',
-  'projects/signal-request/devtools/devtools.ts',
-  'projects/signal-request/persist/persist.ts',
-  'projects/signal-request/testing/testing.ts',
+  { path: 'projects/signal-request/src/public-api.ts' },
+  { path: 'projects/signal-request/devtools/devtools.ts' },
+  { path: 'projects/signal-request/persist/persist.ts' },
+  { path: 'projects/signal-request/persist/queue/queue.ts', addedInThisRelease: true },
+  { path: 'projects/signal-request/testing/testing.ts' },
 ];
 
 /** Reads an entry point at a ref, or from disk with `--worktree` / no ref. */
@@ -43,16 +46,25 @@ function readApi(ref, path) {
     return { label: 'working tree', text: readFileSync(path, 'utf8') };
   }
   try {
-    const text = execFileSync('git', ['show', `${ref}:${path}`], { encoding: 'utf8' });
+    const text = execFileSync('git', ['show', `${ref}:${path}`], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
     return { label: ref, text };
   } catch {
-    // A typo in a ref, or a tag that a shallow clone never fetched. Say which, rather than letting
-    // git's stderr surface as an unhandled exception — the fix is usually `git fetch --tags`.
-    console.error(
-      `FAIL  cannot read ${path} at "${ref}". Check the ref exists (git tag --list) and that ` +
-        'tags have been fetched (git fetch --tags).',
-    );
-    process.exit(1);
+    // Distinguish "the ref is wrong" from "this entry point did not exist yet". The first is an
+    // operator error and must fail; the second is the expected shape of an older tag for a subpath
+    // added in this release.
+    try {
+      execFileSync('git', ['rev-parse', '--verify', ref], { stdio: 'ignore' });
+      return { label: ref, text: null };
+    } catch {
+      console.error(
+        `FAIL  cannot read ${path} at "${ref}". Check the ref exists (git tag --list) and that ` +
+          'tags have been fetched (git fetch --tags).',
+      );
+      process.exit(1);
+    }
   }
 }
 
@@ -99,9 +111,29 @@ function exportedNames(text) {
 const [oldRef, newRef] = process.argv.slice(2);
 const removedAll = [];
 
-for (const path of API_PATHS) {
+for (const spec of API_PATHS) {
+  const path = spec.path;
   const oldApi = readApi(oldRef, path);
   const newApi = readApi(newRef, path);
+
+  if (oldApi.text === null) {
+    if (!spec.addedInThisRelease) {
+      console.error(
+        `FAIL  ${path} is missing at "${oldRef}". Only a subpath added in this release may be ` +
+          'absent from an older ref.',
+      );
+      process.exit(1);
+    }
+    console.log(`${path}  did not exist at ${oldRef} (new subpath), skipped`);
+    continue;
+  }
+
+  if (newApi.text === null) {
+    console.error(
+      `FAIL  ${path} is missing at "${newApi.label}". A published entry point may not disappear.`,
+    );
+    process.exit(1);
+  }
 
   const before = exportedNames(oldApi.text);
   const after = exportedNames(newApi.text);

@@ -1,0 +1,33 @@
+{
+  /*
+   * Compiles `compat/queue/usage.ts` against the **built** declarations in `dist/signal-request`.
+   *
+   * Against the build rather than the sources on purpose: the claim being checked is about the
+   * artifact an application installs, and only the build has the entry-point layout `exports` and
+   * the bundled declaration files an application actually resolves. `pnpm verify` runs `build`
+   * before this, so `dist` is always the current tree.
+   *
+   * The `paths` map stands in for `node_modules/ng-signal-request`: a real install resolves the
+   * five subpath exports to these same files.
+   */
+  "compilerOptions": {
+    "strict": true,
+    "noEmit": true,
+    "noUnusedLocals": false,
+    "skipLibCheck": true,
+    "isolatedModules": true,
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "preserve",
+    "moduleResolution": "bundler",
+    "types": [],
+    "paths": {
+      "ng-signal-request": ["../../dist/signal-request/types/ng-signal-request.d.ts"],
+      "ng-signal-request/persist": ["../../dist/signal-request/types/ng-signal-request-persist.d.ts"],
+      "ng-signal-request/persist/queue": ["../../dist/signal-request/types/ng-signal-request-persist-queue.d.ts"],
+      "ng-signal-request/devtools": ["../../dist/signal-request/types/ng-signal-request-devtools.d.ts"],
+      "ng-signal-request/testing": ["../../dist/signal-request/types/ng-signal-request-testing.d.ts"]
+    }
+  },
+  "include": ["**/*.ts"]
+}

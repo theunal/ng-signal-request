@@ -1256,6 +1256,18 @@ Extend `e2e/offline.spec.ts` with a real-browser durable path:
 The e2e mock must count the preflight separately, as the 0.2.0 offline work
 already established (`docs/design-0.2.md:1316-1318`).
 
+**As built (2026-10-25), with three deviations.** The durable path is not in
+`e2e/offline.spec.ts`: `check:dist` requires the production demo to contain none of
+the `/persist/queue` markers, so the queue gets its own app
+(`projects/queue-e2e`) and spec (`e2e/queue.spec.ts`), served on its own port.
+A reload while the context is offline cannot fetch the shell, so the check closes
+the page and opens a new one - which is the stronger case, since nothing survives
+in memory. The app's API is same-origin, so there is no preflight to count; the
+mock counts POSTs exactly. Items 7-9 above (duplicate key, corrupted storage, two
+tabs) are covered by the unit suite instead, and
+`docs/verification.md` §20.3-20.4 records what the browser run does and does not
+prove.
+
 ### 18.4 Static and compatibility checks
 
 - `pnpm verify` (typecheck, lint, unit, coverage, API check, dist check).
@@ -1393,13 +1405,25 @@ These are settled for the design. Implementation details follow.
     `MutationDetachedError`, not a network failure; the durable entry remains. A
     true cancel is `queue.remove(id)`.
 
-### 20.1 Remaining implementation details
+### 20.1 Implementation details, as settled
 
-- Exact TypeScript shape of the `switch` exclusion if the `BaseMutationOptions`
-  union causes inference costs.
-- IndexedDB availability probe and fallback timing.
-- Re-export location for `MutationDetachedError`: it is defined in core and
-  re-exported by `/persist/queue` for consumers of the queue service.
+These were open when the design was written. All three were closed by the
+implementation rather than by a further decision:
+
+- **`switch` exclusion.** Not expressed in the type system. A union of option
+  shapes widens inference for every existing `createMutation` call, which the hard
+  constraints forbid, so `concurrency: 'switch'` is a **runtime** rejection: dev
+  throws, production disables persistence for that definition and warns. Written
+  down in `compat/queue/usage.ts` rather than as a `@ts-expect-error` the compiler
+  cannot satisfy.
+- **IndexedDB probe and fallback timing.** `defaultStorage()` feature-detects
+  `typeof indexedDB !== 'undefined'` when the provider starts, falls back to
+  `localStorage`, and disables the queue when neither exists. No probe at import
+  time, so a server render touches nothing. The e2e in
+  `docs/verification.md` §20.3 proves the IndexedDB default in Chromium.
+- **`MutationDetachedError` location.** Defined in the core (that is where
+  `createMutation` throws it) and re-exported by `/persist/queue`, so an
+  application that injects the queue does not import the core to catch it.
 
 ## 21. Rejected alternatives
 

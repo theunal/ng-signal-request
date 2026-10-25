@@ -44,6 +44,10 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   - The queue is a separate entry point so an application that only persists the
     read cache does not pay for it. It is labelled experimental until the
     server-side idempotency contract has been proven in practice.
+  - A real-browser check (`e2e/queue.spec.ts`) covers what jsdom cannot: the
+    IndexedDB default, the Web Lock, a write that survives the page and replays
+    exactly once, a successful write that is not replayed, and a permanent failure
+    that stays durable and does not resurrect the optimistic row.
 
 ## [0.2.0] - 2026-10-21
 

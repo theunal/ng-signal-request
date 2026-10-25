@@ -953,29 +953,49 @@ declarations. It covers `persistence`, `onRestore`, `isAlreadyApplied`, the opti
 is a runtime rejection, so it is documented rather than written as a negative type
 fixture.
 
-### 20.3 What is not covered
+### 20.3 Browser e2e record (2026-10-25)
 
-The unit suite owns the state machine; it does not prove the browser APIs:
+The unit suite owns the state machine; jsdom has no IndexedDB and no Web Locks, so
+the storage and ownership paths only exist in a real browser. `e2e/queue.spec.ts`
+runs them against `projects/queue-e2e`, a separate application: `check:dist`
+requires the production demo to contain none of the `/persist/queue` markers, so
+the queue cannot be demonstrated in the demo without deleting that boundary check.
 
-- **Real IndexedDB is not exercised.** jsdom has no IndexedDB, and the tests use an
-  in-memory `CacheStorage`. The default storage selection, `indexedDbStorage()`'s
-  schema/upgrade path, transaction failure and quota errors only run in a real
-  browser. The `localStorage` fallback is selected by the same code path but is not
-  separately driven here.
-- **Real Web Locks are not exercised.** Ownership is tested through the adapter's
-  `owner`/`enabled` states and a stubbed `navigator.locks`; a second real tab
-  contending for the lock, and a lock released by a closing tab, are browser
-  behaviour.
-- **A real reload is not exercised.** Hydration is reproduced from a stored
-  snapshot string. That proves the restore path, not that a browser survives the
-  reload, quota eviction or a private-mode storage denial.
-- **No queue-specific browser e2e was added.** The existing Playwright demo is the
-  production demo, and `check:dist` requires it not to contain `/persist/queue`
-  markers. Adding the provider there would either disable that boundary check or
-  grow the demo for a feature it does not demonstrate. The reload/replay,
-  ownership and corruption cases therefore stop at the integration boundary above;
-  the design's e2e list remains the acceptance work for the release that removes
-  the experimental label.
+The app is deliberately three files - a store, a component and a bootstrap - and it
+takes the production defaults: no `storage` option (so IndexedDB, not the
+`localStorage` fallback), real `navigator.locks`, and `eager: [TodoStore]` so the
+handler exists before automatic replay. Its API is same-origin (`/api/todos`), so
+the route mock counts exactly the POSTs; there is no CORS preflight to subtract,
+unlike the demo's cross-origin mock.
+
+Three checks, all Chromium, `pnpm test:e2e`:
+
+1. **A write made offline survives the page and replays once.** Offline submit
+   shows the optimistic row and `pending: 1` with nothing on the wire; the page is
+   closed (a reload cannot fetch the shell while the context is offline, and a tab
+   close is the stronger case); the new page restores the row through `onRestore`
+   while the write is still pending, then replays it with one POST carrying a UUID
+   `Idempotency-Key`, and the entry is gone from the snapshot afterwards.
+2. **A write that reached the server is not replayed after a reload.** One POST,
+   then a reload: no second POST, nothing restored, `pending: 0`.
+3. **A permanent failure keeps the entry and does not resurrect the row.** A `400`
+   rolls the optimistic row back, the entry is `failed` in the UI, and it is still
+   `failed` after a reload - `onRestore` is a pending-entry hook, so the row does
+   not come back.
+
+The replay is held open by a gate in the route mock, so the "restored but not yet
+sent" state is asserted rather than raced.
+
+### 20.4 What the e2e still does not cover
+
+- **One browser.** Chromium only, the same limit as the existing offline e2e.
+- **One tab.** The lock is really acquired, but a second real tab contending for
+  it is still only covered by the stubbed manager in the unit suite.
+- **No quota, private-mode or eviction case.** Storage denial is emulated with a
+  throwing `CacheStorage` in the unit suite, not produced by the browser.
+- **No duplicate-key `409` in the browser.** The `isAlreadyApplied` path is a unit
+  test; the e2e never sends the same key twice because the queue removes the entry
+  on success, which is the behaviour being proven.
 - **The server-side idempotency contract is unverified by construction.** The tests
   prove the same key is sent on the first attempt and every replay; they cannot
   prove a server deduplicates it.

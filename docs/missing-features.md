@@ -89,6 +89,18 @@ Impact is an assessment of the cost when the gap is hit:
 | 54  | Docs        | A source comment shows `isMutating()` as a boolean, while it returns a signal   | Documentation debt  | Low    |
 | 55  | Docs        | Devtools size is stated as both 4.0 KB and 4.5 KB                               | Documentation debt  | Low    |
 
+> **Update, 2026-10-25 — working tree only, not in `0.2.0`.** Item 1 is
+> implemented behind an opt-in provider (`ng-signal-request/persist/queue` plus the
+> `persistence` mutation option) and is covered by a real-browser e2e: IndexedDB,
+> Web Locks, a write that survives the page and replays exactly once, and a
+> permanent failure that stays durable. Item 3 follows from the same provider: the
+> queue exposes `entries`, `pendingCount`, `failedCount`, `retry`, `retryAll`,
+> `resume`, `remove` and `clear`. Neither is in the published release, and the
+> feature stays labelled experimental until the server-side idempotency contract is
+> proven, so the table above still describes `0.2.0` - this note is the only place
+> the inventory is updated ahead of a release. Measurements and limits:
+> `docs/verification.md` §20; design: `docs/design-offline-mutation-queue.md`.
+
 ## 1. Offline and mutation delivery
 
 ### 1.1 The mutation queue is in memory only

@@ -2182,6 +2182,12 @@ It imports the library by its package name and resolves to **source** (via
 first — no `dist/` needed for `pnpm start`, the editor, or `pnpm typecheck`.
 See [`projects/demo/README.md`](projects/demo/README.md).
 
+`projects/queue-e2e` is a second, much smaller app: the durable queue is not in the
+demo because `check:dist` requires the demo not to contain `/persist/queue`, and
+that boundary check is worth more than a demo tab. It is not meant to be browsed —
+`pnpm test:e2e` drives it — and it takes the production defaults (IndexedDB, Web
+Locks) so the browser run exercises them.
+
 ## Development
 
 Requires Node 22+ and pnpm 12 (see `packageManager`).
@@ -2190,7 +2196,7 @@ Requires Node 22+ and pnpm 12 (see `packageManager`).
 pnpm install
 pnpm build         # build the library into dist/signal-request
 pnpm test          # unit tests (vitest, headless, coverage thresholds)
-pnpm typecheck     # tsc --noEmit over the lib, spec, devtools and demo projects
+pnpm typecheck     # tsc --noEmit over the lib, spec, devtools, demo, queue-e2e and e2e projects
 pnpm lint          # eslint, type-aware, over every file
 pnpm format        # prettier --write
 pnpm watch         # rebuild on change (development configuration)
@@ -2200,15 +2206,17 @@ pnpm check:api     # export diff against a git ref: `pnpm check:api v0.1.0`
 pnpm check:types-compat  # compile the 0.1.0 compatibility fixture against the build
 pnpm check:types-queue   # compile the durable-queue fixture against the build
 pnpm bench         # the resolve() benchmark at 200k iterations (see docs/perf.md)
-pnpm test:e2e      # Playwright against the production demo (needs `pnpm exec playwright install chromium`)
+pnpm test:e2e      # Playwright against the production demo and the durable-queue app (needs `pnpm exec playwright install chromium`)
 ```
 
 `pnpm test:e2e` is deliberately outside `pnpm verify`: it downloads a browser and
 takes longer than the rest of the gate together. CI runs it as a separate job. It
-needs a built demo first, which the script does itself; the API is mocked at the
-network layer, so it does not depend on jsonplaceholder being reachable. See
+builds both apps itself: the demo (offline path) and `projects/queue-e2e` (the
+durable queue, which cannot live in the demo because `check:dist` requires the demo
+not to contain `/persist/queue`). The APIs are mocked at the network layer, so it
+does not depend on jsonplaceholder being reachable. See
 [Step B2 in the design notes](docs/design-0.2.md) for what it found that the fake
-`OnlineManager` could not.
+`OnlineManager` could not, and `docs/verification.md` §20.3 for the queue run.
 
 `pnpm lint` and `pnpm format:check` are part of `pnpm verify` and of CI, so a pull
 request cannot land a lint error or a formatting difference. The config is

@@ -13,6 +13,22 @@ export class RequestCancelledError extends Error {
 }
 
 /**
+ * Rejects a durable call whose owning handle was destroyed while the entry stayed in the queue.
+ *
+ * Unlike {@link RequestCancelledError}, this is not a cancellation of the work: the persisted entry
+ * remains and is replayed later. The current page simply no longer has a promise to settle.
+ */
+export class MutationDetachedError extends Error {
+  override readonly name = 'MutationDetachedError';
+  constructor(
+    readonly mutationId: string,
+    message = 'The mutation was detached; its durable entry remains queued.',
+  ) {
+    super(message);
+  }
+}
+
+/**
  * `HttpErrorResponse` implements the `Error` interface but is not `instanceof Error`
  * (Angular itself uses the same duck-typing), so we must not wrap it.
  */

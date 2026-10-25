@@ -9,6 +9,7 @@ import type { NetworkMode } from './connectivity';
 import type { QueryKey, QueryKeyFactory } from './cache/key';
 import type { CacheEntry } from './cache/cache-entry';
 import type { StructuralSharingFn } from './cache/structural-sharing';
+import type { PersistedMutationEntry } from './mutation-queue';
 import type { Observable } from 'rxjs';
 import type {
   Injector,
@@ -1028,6 +1029,62 @@ export interface OptimisticTarget<T> {
   set(value: T): void;
 }
 
+/** What a settle hook learns about the call it is settling. */
+export interface MutationHookMeta {
+  /**
+   * `true` when this call was replayed from the durable queue after a reload, `false` for a call
+   * started by `run()` in this page.
+   */
+  readonly replayed: boolean;
+}
+
+/** Serializes mutation args into the JSON-safe value stored by `/persist/queue`. */
+export interface MutationArgsCodec<TArgs> {
+  serialize(value: TArgs): unknown;
+  deserialize(value: unknown): TArgs;
+}
+
+/**
+ * Opts a mutation into the durable outbox provided by `providePersistedMutationQueue`.
+ *
+ * Persistence is a property of the mutation **definition**, not of a single call: every `run()`
+ * on this handle is one durable entry. The queue stores the args and rebuilds the request from this
+ * same builder on replay, so `persistence.key` has to identify the definition across deploys.
+ */
+export interface MutationPersistenceOptions<TArgs> {
+  /**
+   * Application-unique identity of this mutation definition. Never reuse `mutationKey` here:
+   * a mutation key groups handles for introspection, while this key is the contract a queue entry
+   * uses to find a definition after a reload.
+   */
+  readonly key: string;
+  /** Args shape version. Bump it when the builder expects a different args shape. Default `1`. */
+  readonly version?: number;
+  /** Converts args to and from the stored value. Defaults to a JSON round-trip. */
+  readonly codec?: MutationArgsCodec<TArgs>;
+  /**
+   * Mint the idempotency key from the args. Runs before the request is built, so the server sees
+   * the same key on the first attempt and on every replay.
+   */
+  readonly idempotencyKey?: (args: TArgs) => string;
+  /**
+   * Header that carries the idempotency key. Defaults to `Idempotency-Key`; `false` sends none.
+   *
+   * With no header, retrying a timeout or a 5xx is unsafe and the queue marks it failed instead.
+   */
+  readonly idempotencyHeader?: string | false;
+  /**
+   * Runs after hydration and `RESTORE_GATE`, before replay. Use it to put the optimistic value
+   * back on screen; a rejection is reported and does not block the queue.
+   */
+  readonly onRestore?: (args: TArgs, entry: PersistedMutationEntry) => void | Promise<void>;
+  /**
+   * Replay-only escape hatch for a server that answers a duplicate `POST` with `409 Conflict`.
+   * The first attempt never calls it; a replay that returns `true` is treated as already applied.
+   */
+  readonly isAlreadyApplied?: (error: Error) => boolean;
+}
+
 export interface MutationOptions<T, TArgs = void, TContext = undefined> {
   /**
    * What happens when `run()` is called while another call is in flight.
@@ -1055,14 +1112,22 @@ export interface MutationOptions<T, TArgs = void, TContext = undefined> {
    *
    * With `'online'`, `run()` while offline **queues** the call instead of sending it: `onMutate` and
    * the optimistic write happen immediately, `paused()` is `true`, and the call is replayed in call
-   * order once the connection is back. The queue is in memory only — it does not survive a reload,
-   * because replaying a write needs the application's own idempotency story.
+   * order once the connection is back. The queue is in memory only unless this mutation also opts
+   * into `persistence` and the application installs `providePersistedMutationQueue(...)`.
    *
    * `'offlineFirst'` is a query strategy, not a mutation one: a write has no cached value to serve
    * first, so the type excludes it. A global `'offlineFirst'` still falls back to `'always'` here;
    * the option would have no distinct behavior.
    */
   networkMode?: Exclude<NetworkMode, 'offlineFirst'>;
+  /**
+   * Opts this mutation into the durable outbox.
+   *
+   * Requires `providePersistedMutationQueue(...)` and `networkMode: 'online'`. `concurrency:
+   * 'switch'` is rejected because a superseded write still has to reach the server; the durable
+   * queue keeps every accepted call.
+   */
+  persistence?: MutationPersistenceOptions<TArgs>;
   /**
    * Groups this mutation so it can be found without holding a reference to it.
    *
@@ -1155,14 +1220,24 @@ export interface MutationOptions<T, TArgs = void, TContext = undefined> {
   /**
    * Called once for a settled call that succeeded.
    *
-   * The signature is `(response, args, context)`; the first two arguments are unchanged from
-   * earlier versions, so existing callbacks keep working unchanged.
+   * The signature is `(response, args, context, meta)`; existing callbacks that declare fewer
+   * arguments keep working unchanged. `meta.replayed` distinguishes a replay from a live call.
    */
-  onSuccess?: (response: T, args: TArgs, context: TContext | undefined) => void;
+  onSuccess?: (
+    response: T,
+    args: TArgs,
+    context: TContext | undefined,
+    meta?: MutationHookMeta,
+  ) => void;
   /** Called once for a settled call that failed. Receives whatever `onMutate` returned. */
-  onError?: (error: Error, args: TArgs, context: TContext | undefined) => void;
-  /** Runs after `onSuccess` / `onError`. Also receives the `onMutate` context. */
-  onSettled?: (args: TArgs, context: TContext | undefined) => void;
+  onError?: (
+    error: Error,
+    args: TArgs,
+    context: TContext | undefined,
+    meta?: MutationHookMeta,
+  ) => void;
+  /** Runs after `onSuccess` / `onError`. Also receives the `onMutate` context and replay metadata. */
+  onSettled?: (args: TArgs, context: TContext | undefined, meta?: MutationHookMeta) => void;
   injector?: Injector;
   // `reportProgress` is deliberately absent: it is set on the *builder*
   // (`(args) => ({ url, body, reportProgress: true })`), not here, because one mutation may be the

@@ -48,6 +48,7 @@ describe('createMutation', () => {
       { id: 4, name: 'Ada' },
       { id: 4, name: 'Ada' },
       undefined,
+      { replayed: false },
     );
     expect(onSettled).toHaveBeenCalledTimes(1);
   });
@@ -91,10 +92,13 @@ describe('createMutation', () => {
     await expect(p).rejects.toBeInstanceOf(HttpErrorResponse);
     expect(del.status()).toBe('error');
     expect(del.error()).toBeInstanceOf(HttpErrorResponse);
-    // The trailing `context` is `undefined` when no `onMutate` was given. It is passed
-    // unconditionally — `toHaveBeenCalledWith` compares the whole argument list, so a callback
-    // that grows an optional trailing parameter is observable even to a caller that ignores it.
-    expect(onError).toHaveBeenCalledWith(expect.any(HttpErrorResponse), 1, undefined);
+    // The trailing `context` is `undefined` when no `onMutate` was given, and `meta` reports
+    // whether this is a live call or a replay. Both are passed unconditionally -
+    // `toHaveBeenCalledWith` compares the whole argument list, so a callback that grows an optional
+    // trailing parameter is observable even to a caller that ignores it.
+    expect(onError).toHaveBeenCalledWith(expect.any(HttpErrorResponse), 1, undefined, {
+      replayed: false,
+    });
     expect(global).toHaveBeenCalledWith(expect.any(HttpErrorResponse), {
       url: '/users/1',
       method: 'DELETE',

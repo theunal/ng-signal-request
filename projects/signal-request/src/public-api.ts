@@ -16,6 +16,24 @@ export { createMutation } from './lib/create-mutation';
 export type { CreateMutation } from './lib/create-mutation';
 export { combine, createRequests } from './lib/combine';
 export { RequestCancelledError, requestErrorOf, toError, toRequestError } from './lib/errors';
+export { MutationDetachedError } from './lib/errors';
+export {
+  MUTATION_QUEUE,
+  MutationQueueDisabledError,
+  MutationQueueFullError,
+  MutationQueueQuarantineError,
+} from './lib/mutation-queue';
+export type {
+  MutationQueueAdapter,
+  MutationQueueDecision,
+  MutationQueueEnqueueInput,
+  MutationQueueEnqueueResult,
+  MutationQueueFailureContext,
+  MutationQueueHandler,
+  MutationQueueSnapshot,
+  PersistedMutationEntry,
+  PersistedMutationError,
+} from './lib/mutation-queue';
 export type {
   RequestError,
   RequestErrorContext,
@@ -33,7 +51,10 @@ export type {
   InfiniteRequest,
   InfiniteRequestOptions,
   InvalidationTarget,
+  MutationArgsCodec,
+  MutationHookMeta,
   MutationOptions,
+  MutationPersistenceOptions,
   MutationStatus,
   OptimisticTarget,
   ParamsOption,

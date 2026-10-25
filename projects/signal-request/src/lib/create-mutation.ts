@@ -1,8 +1,10 @@
 import {
   HttpClient,
   HttpEventType,
+  HttpHeaders,
   type HttpEvent,
   type HttpProgressEvent,
+  type HttpResourceRequest,
 } from '@angular/common/http';
 import {
   assertInInjectionContext,
@@ -11,6 +13,7 @@ import {
   ErrorHandler,
   inject,
   Injector,
+  isDevMode,
   runInInjectionContext,
   signal,
   untracked,
@@ -21,9 +24,23 @@ import { reportedOffline, resolveConnectivity, type NetworkMode } from './connec
 import { QueryCache } from './cache/query-cache';
 import { MutationRegistry } from './cache/mutation-registry';
 import { QueryClient } from './cache/query-client';
-import { RequestCancelledError, toError, toRequestError, type RequestErrorView } from './errors';
+import {
+  MutationDetachedError,
+  RequestCancelledError,
+  toError,
+  toRequestError,
+  type RequestErrorView,
+} from './errors';
+import {
+  MUTATION_QUEUE,
+  MutationQueueQuarantineError,
+  type MutationQueueHandler,
+  type PersistedMutationEntry,
+} from './mutation-queue';
 import type { QueryKey } from './cache/key';
 import {
+  type MutationArgsCodec,
+  type MutationHookMeta,
   type MutationOptions,
   type MutationStatus,
   type OptimisticTarget,
@@ -58,6 +75,82 @@ interface MutationFactory {
     request: (args: TArgs) => RequestValue,
     options?: MutationOptions<T, TArgs, TContext>,
   ): SignalMutation<T, TArgs, TContext>;
+}
+
+/** What a call that belongs to the durable outbox needs beyond an ordinary accepted call. */
+interface DurableCall {
+  readonly entry: PersistedMutationEntry;
+  readonly replayed: boolean;
+  /**
+   * `true` when the queue, not the `run()` stack, awaits the promise. A replay has no caller to
+   * settle and lets the queue classify the rejection.
+   */
+  readonly queueManaged: boolean;
+  /** The queue had older work, so this call waits for the queue's retry hook. */
+  readonly deferred: boolean;
+}
+
+const JSON_ARGS_CODEC: MutationArgsCodec<unknown> = {
+  serialize(value) {
+    if (value === undefined) return undefined;
+    const raw = JSON.stringify(value) as string | undefined;
+    if (raw === undefined) {
+      throw new Error(
+        'Mutation persistence needs JSON-serializable args; pass `persistence.codec` for anything else.',
+      );
+    }
+    return JSON.parse(raw) as unknown;
+  },
+  deserialize(value) {
+    return value;
+  },
+};
+
+function newIdempotencyKey(): string {
+  const crypto = (
+    globalThis as {
+      crypto?: {
+        randomUUID?: () => string;
+        getRandomValues?: (array: Uint8Array) => Uint8Array;
+      };
+    }
+  ).crypto;
+  if (crypto?.randomUUID) return crypto.randomUUID();
+  if (crypto?.getRandomValues) {
+    const bytes = crypto.getRandomValues(new Uint8Array(16));
+    // RFC 4122 version 4, so the value is a UUID rather than 16 random bytes with a prefix.
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    const hex = [...bytes].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(
+      16,
+      20,
+    )}-${hex.slice(20)}`;
+  }
+  return `m-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-${Math.random()
+    .toString(36)
+    .slice(2)}`;
+}
+
+function readHeader(headers: HttpResourceRequest['headers'], name: string): string | null {
+  if (headers instanceof HttpHeaders) return headers.get(name);
+  if (headers === undefined) return null;
+  const wanted = name.toLowerCase();
+  for (const [key, value] of Object.entries(headers as Record<string, string | string[]>)) {
+    if (key.toLowerCase() !== wanted) continue;
+    return Array.isArray(value) ? (value[0] ?? null) : value;
+  }
+  return null;
+}
+
+function withHeader(
+  headers: HttpResourceRequest['headers'],
+  name: string,
+  value: string,
+): HttpHeaders {
+  const normalized =
+    headers instanceof HttpHeaders ? headers : new HttpHeaders(headers as Record<string, string>);
+  return normalized.set(name, value);
 }
 
 /**
@@ -156,6 +249,48 @@ function buildMutation<T, TArgs, TContext>(
   const networkMode: NetworkMode = options.networkMode ?? config.networkMode ?? 'always';
   const online = resolveConnectivity(networkMode, false);
 
+  const persistedQueue = inject(MUTATION_QUEUE, { optional: true });
+  let persistence = options.persistence;
+  if (persistence !== undefined) {
+    if (persistence.key.trim() === '') {
+      throw new Error('createMutation: `persistence.key` must be a non-empty string.');
+    }
+    if (concurrency === 'switch') {
+      const message =
+        'createMutation: `concurrency: "switch"` cannot be combined with `persistence`; ' +
+        'a superseded write would still have to reach the server. Persistence is disabled.';
+      if (isDevMode()) throw new Error(message);
+      console.warn(message);
+      persistence = undefined;
+    } else if (networkMode !== 'online') {
+      const message =
+        'createMutation: `persistence` requires `networkMode: "online"`. Persistence is disabled.';
+      if (isDevMode()) console.warn(message);
+      persistence = undefined;
+    } else if (persistedQueue === null) {
+      const message =
+        'createMutation: `persistence` requires `providePersistedMutationQueue(...)`. ' +
+        'Persistence is disabled.';
+      if (isDevMode()) console.warn(message);
+      persistence = undefined;
+    }
+  }
+  const persistenceCodec: MutationArgsCodec<TArgs> | undefined =
+    persistence === undefined
+      ? undefined
+      : ((persistence.codec ?? JSON_ARGS_CODEC) as MutationArgsCodec<TArgs>);
+  const persistenceVersion = persistence?.version ?? 1;
+  const idempotencyHeader =
+    persistence?.idempotencyHeader === undefined
+      ? 'Idempotency-Key'
+      : persistence.idempotencyHeader;
+  if (persistence !== undefined && idempotencyHeader === false && isDevMode()) {
+    console.warn(
+      'createMutation: `persistence.idempotencyHeader: false` cannot protect against a duplicate ' +
+        'write. The queue will not retry a timeout or a 5xx, but the server must deduplicate.',
+    );
+  }
+
   const response = signal<T | undefined>(undefined);
   const error = signal<Error | undefined>(undefined);
   /**
@@ -199,6 +334,7 @@ function buildMutation<T, TArgs, TContext>(
   let detachReplay: (() => void) | undefined;
   let exhausted: Promise<T> | undefined;
   let destroyed = false;
+  let unregisterQueue: (() => void) | undefined;
 
   /**
    * Sends everything that was queued when the reconnect arrived, in call order.
@@ -338,7 +474,277 @@ function buildMutation<T, TArgs, TContext>(
     return await options.onMutate(callArgs);
   };
 
-  const prepare = (callArgs: TArgs, ctx: TContext): Promise<T> => {
+  const launch = (
+    callArgs: TArgs,
+    ctx: TContext,
+    built: NonNullable<ReturnType<typeof resolveRequest>>,
+    timeout: number | undefined,
+    stream: Observable<unknown>,
+    durable?: DurableCall,
+  ): Promise<T> => {
+    const meta: MutationHookMeta = { replayed: durable?.replayed ?? false };
+    const queueManaged = durable?.queueManaged ?? false;
+    const activeQueue =
+      persistedQueue !== null && persistence !== undefined && durable !== undefined && !queueManaged
+        ? persistedQueue
+        : undefined;
+    const activeEntryId = durable?.entry.id;
+
+    inFlight.update((n) => n + 1);
+    args.set(callArgs);
+    context.set(ctx);
+    error.set(undefined);
+    progress.set(undefined);
+    mutations.begin(options.mutationKey);
+
+    // The state flips synchronously on `online`, but the reconnect is announced in a microtask. A
+    // `run()` that lands in that window must not overtake writes that were made earlier, so the
+    // queue is drained before this call is sent.
+    if (queue.length > 0 && online.online()) replay();
+
+    const promise = new Promise<T>((resolve, reject) => {
+      let settled = false;
+      // Read by `call.cancel`, assigned by `send`. The initializer is what keeps `prefer-const` from
+      // asking for a binding it cannot have.
+      let subscription: Subscription | undefined = undefined;
+      /** Undoes this call's optimistic write. See `applyOptimistic`. */
+      let undo: () => void = noop;
+      /** The same-page retry hook the durable queue can call while this frame is still alive. */
+      let detachQueueRetry: (() => void) | undefined;
+
+      const clearQueueRetry = (): void => {
+        detachQueueRetry?.();
+        detachQueueRetry = undefined;
+      };
+
+      /** Leaves the local queue, if this call is in it. Idempotent - `finish` and a replay both call it. */
+      const releaseQueued = (): void => {
+        if (!call.paused) return;
+        call.paused = false;
+        const index = queue.indexOf(call);
+        if (index >= 0) queue.splice(index, 1);
+        queuedCount.update((n) => n - 1);
+        mutations.release();
+        if (queue.length === 0) {
+          detachReplay?.();
+          detachReplay = undefined;
+        }
+      };
+
+      /**
+       * Parks the call until the next reconnect.
+       *
+       * A durable call does not join the in-memory queue: the persistent queue owns global FIFO
+       * and replays it on reconnect. The live closure is attached as a retry hook so the original
+       * `run()` promise can still settle without a second copy of the send logic.
+       */
+      const hold = (): void => {
+        progress.set(undefined);
+        if (activeQueue && activeEntryId !== undefined) {
+          attachQueueRetry();
+          return;
+        }
+        call.paused = true;
+        queue.push(call);
+        queuedCount.update((n) => n + 1);
+        mutations.hold();
+        detachReplay ??= online.onReconnect(replay);
+      };
+
+      const attachQueueRetry = (): void => {
+        if (!activeQueue || activeEntryId === undefined || settled) return;
+        clearQueueRetry();
+        activeQueue.inactive(activeEntryId);
+        detachQueueRetry = activeQueue.attachRetry(activeEntryId, () => {
+          if (settled) return;
+          activeQueue.active(activeEntryId);
+          send();
+        });
+      };
+
+      const send = (): void => {
+        subscription = stream.subscribe({ next: onEvent, error: (e) => fail(toError(e)) });
+        // A custom `HttpBackend` may answer synchronously, in which case `settled` is already true
+        // here and the completed subscription must not be handed to `cancel`. The type checker
+        // narrows `settled` to `false` because it cannot see that the callback ran inside `subscribe`.
+        if (settled) subscription.unsubscribe();
+      };
+
+      const call: AcceptedCall = {
+        paused: false,
+        send,
+        cancel: () => {
+          if (settled) return;
+          // A destroyed handle has no observer left to correct, and writing to a dead signal is
+          // pure noise; a plain `cancel()` (or a `switch` superseding this call) does roll back,
+          // because leaving an invented value on screen is the worse outcome.
+          if (!destroyed) undo();
+          releaseQueued();
+          clearQueueRetry();
+          if (activeQueue && activeEntryId !== undefined) {
+            activeQueue.inactive(activeEntryId);
+            // `destroy()` keeps the durable entry for the next page; `cancel()` removes it.
+            if (!destroyed) {
+              void activeQueue
+                .remove(activeEntryId)
+                .catch((e: unknown) => errorHandler.handleError(e));
+            }
+          }
+          finish();
+          subscription?.unsubscribe();
+          reject(
+            destroyed && durable !== undefined
+              ? new MutationDetachedError(durable.entry.id)
+              : new RequestCancelledError(),
+          );
+        },
+        release: releaseQueued,
+      };
+      const finish = (): void => {
+        settled = true;
+        releaseQueued();
+        clearQueueRetry();
+        calls.delete(call);
+        inFlight.update((n) => n - 1);
+        mutations.end(options.mutationKey);
+        // A settled call has no progress left to report, and leaving the last event behind would
+        // pin a `<progress [value]="">` at its final value. Cleared on every settle path - success,
+        // failure and cancel - so `progress()` is `undefined` again until the next call reports.
+        progress.set(undefined);
+      };
+      const isEvent = (raw: unknown): raw is HttpEvent<unknown> =>
+        typeof raw === 'object' && raw !== null && 'type' in raw && raw.type !== undefined;
+
+      const succeed = (raw: unknown): void => {
+        if (settled) return;
+        let value: T;
+        try {
+          value = options.parse ? options.parse(raw) : (raw as T);
+        } catch (e) {
+          fail(toError(e));
+          return;
+        }
+        finish();
+        response.set(value);
+        finished.set('success');
+        if (activeQueue && activeEntryId !== undefined) {
+          activeQueue.inactive(activeEntryId);
+          activeQueue.succeeded(activeEntryId);
+        }
+        // Settle order is fixed and worth stating, because the rollback and the refetch both
+        // touch the same display: invalidate -> onSuccess -> onSettled. So a hook that reads the
+        // refreshed value sees the fresh list, not the one that is about to be replaced.
+        safe(reloadInvalidated);
+        safe(() => options.onSuccess?.(value, callArgs, ctx, meta));
+        safe(() => config.onSuccess?.(value, { url: built.url, method }));
+        safe(() => options.onSettled?.(callArgs, ctx, meta));
+        resolve(value);
+      };
+      const fail = (err: Error): void => {
+        if (settled) return;
+        // A replay that the server already applied is a success for the queue. It has no response
+        // body to hand to `onSuccess`, so only the settle hook runs.
+        if (durable?.replayed && persistence?.isAlreadyApplied) {
+          let applied = false;
+          try {
+            applied = persistence.isAlreadyApplied(err);
+          } catch (e) {
+            errorHandler.handleError(e);
+          }
+          if (applied) {
+            finish();
+            finished.set('success');
+            safe(reloadInvalidated);
+            safe(() => options.onSettled?.(callArgs, ctx, meta));
+            resolve(undefined as T);
+            return;
+          }
+        }
+        // A live replay that died because the connection dropped again is not a final failure - the
+        // durable queue still owns it. A replay from a previous page rejects instead: the queue
+        // catches it and keeps the entry pending.
+        if (
+          !queueManaged &&
+          networkMode === 'online' &&
+          !online.online() &&
+          toRequestError(err).kind === 'network'
+        ) {
+          hold();
+          return;
+        }
+        if (activeQueue && activeEntryId !== undefined) {
+          const decision = activeQueue.failed(activeEntryId, err, {
+            ...(timeout === undefined ? {} : { timeout }),
+            replay: false,
+            idempotencyHeader: idempotencyHeader !== false,
+          });
+          if (decision !== 'failed') {
+            attachQueueRetry();
+            return;
+          }
+        }
+        // The optimistic value never became real, so it must not stay on screen. `undo` is a
+        // compare-and-swap, so a value another call wrote in the meantime survives.
+        undo();
+        finish();
+        errorTimeout.set(timeout);
+        error.set(err);
+        finished.set('error');
+        safe(() => options.onError?.(err, callArgs, ctx, meta));
+        safe(() => config.onError?.(err, { url: built.url, method }));
+        safe(() => options.onSettled?.(callArgs, ctx, meta));
+        reject(err);
+      };
+      /**
+       * `observe: 'events'` delivers the body inside a `Response` event, with `Sent` and the
+       * progress events around it. Everything that is not the body updates `progress`.
+       */
+      const onEvent = (raw: unknown): void => {
+        if (!isEvent(raw)) {
+          succeed(raw); // defensive: no `HttpEvent` wrapper
+          return;
+        }
+        switch (raw.type) {
+          case HttpEventType.UploadProgress:
+          case HttpEventType.DownloadProgress:
+            progress.set(raw);
+            return;
+          case HttpEventType.Response:
+            succeed(raw.body);
+            return;
+          default:
+            return; // `Sent` and anything else carry no body
+        }
+      };
+
+      calls.add(call);
+      // A replay never writes an optimistic value: the original page's `onRestore` is the hook for
+      // putting the row back on screen, and a replay cannot know what the current list looks like.
+      undo = durable?.replayed ? noop : applyOptimistic(callArgs);
+
+      // Older durable work owns dispatch. Attach and let the queue call us when this entry is head.
+      if (durable?.deferred) {
+        attachQueueRetry();
+        return;
+      }
+      // Offline under `'online'`: the write is already prepared and shown, and the persistent queue
+      // sends it on reconnect rather than this stack. A non-durable call uses the in-memory queue.
+      if (networkMode === 'online' && !online.online()) {
+        hold();
+        return;
+      }
+      if (activeQueue && activeEntryId !== undefined) activeQueue.active(activeEntryId);
+      send();
+    });
+    promise.catch(noop);
+    return promise;
+  };
+
+  const prepare = (
+    callArgs: TArgs,
+    ctx: TContext,
+    replayEntry?: PersistedMutationEntry,
+  ): Promise<T> => {
     // `TArgs` doubles as a params bag: its `body` / `path` / `headers` keys fill the
     // matching request slots and the rest become the query string. The verb comes from
     // the variant that was called.
@@ -365,204 +771,134 @@ function buildMutation<T, TArgs, TContext>(
       options.headers === undefined ? built : { ...built, headers: options.headers };
     const { headers } = withGlobalHeaders(withHeaders, config.headers);
 
-    let stream: Observable<unknown> = http.request<unknown>(method, url, {
-      ...rest,
-      headers,
-      // `events` is what makes `reportProgress: true` observable. It is the full
-      // `HttpEvent` stream, so `next` can be a progress event, the body, or a `Sent` event.
-      observe: 'events',
-      responseType: options.responseType ?? 'json',
-      timeout,
-    } as never);
-    if (retryPolicy) {
-      stream = stream.pipe(
-        retry({
-          delay: (err: unknown, attemptNo: number) => {
-            const delay = nextRetryDelay(retryPolicy, attemptNo, toError(err));
-            return delay === undefined ? throwError(() => err) : timer(delay);
-          },
-        }),
-      );
+    const makeStream = (finalHeaders: HttpResourceRequest['headers']): Observable<unknown> => {
+      let stream: Observable<unknown> = http.request<unknown>(method, url, {
+        ...rest,
+        headers: finalHeaders,
+        // `events` is what makes `reportProgress: true` observable. It is the full
+        // `HttpEvent` stream, so `next` can be a progress event, the body, or a `Sent` event.
+        observe: 'events',
+        responseType: options.responseType ?? 'json',
+        timeout,
+      } as never);
+      if (retryPolicy) {
+        stream = stream.pipe(
+          retry({
+            delay: (err: unknown, attemptNo: number) => {
+              const delay = nextRetryDelay(retryPolicy, attemptNo, toError(err));
+              return delay === undefined ? throwError(() => err) : timer(delay);
+            },
+          }),
+        );
+      }
+      return stream;
+    };
+
+    if (replayEntry !== undefined) {
+      const replayHeaders =
+        idempotencyHeader === false
+          ? headers
+          : withHeader(headers, idempotencyHeader, replayEntry.idempotencyKey);
+      return launch(callArgs, ctx, built, timeout, makeStream(replayHeaders), {
+        entry: replayEntry,
+        replayed: true,
+        queueManaged: true,
+        deferred: false,
+      });
     }
 
-    inFlight.update((n) => n + 1);
-    args.set(callArgs);
-    context.set(ctx);
-    error.set(undefined);
-    progress.set(undefined);
-    mutations.begin(options.mutationKey);
+    if (persistence === undefined || persistedQueue === null || persistenceCodec === undefined) {
+      return launch(callArgs, ctx, built, timeout, makeStream(headers));
+    }
 
-    // The state flips synchronously on `online`, but the reconnect is announced in a microtask. A
-    // `run()` that lands in that window must not overtake writes that were made earlier, so the
-    // queue is drained before this call is sent.
-    if (queue.length > 0 && online.online()) replay();
+    let storedArgs: unknown;
+    try {
+      storedArgs = persistenceCodec.serialize(callArgs);
+    } catch (e) {
+      return rejected(toError(e));
+    }
 
-    const promise = new Promise<T>((resolve, reject) => {
-      let settled = false;
-      // Read by `call.cancel`, assigned by `send`. The initializer is what keeps `prefer-const` from
-      // asking for a binding it cannot have.
-      let subscription: Subscription | undefined = undefined;
-      /** Undoes this call's optimistic write. See `applyOptimistic`. */
-      let undo: () => void = noop;
+    let idempotencyKey: string;
+    try {
+      const existing = idempotencyHeader === false ? null : readHeader(headers, idempotencyHeader);
+      idempotencyKey = persistence.idempotencyKey?.(callArgs) ?? existing ?? newIdempotencyKey();
+    } catch (e) {
+      return rejected(toError(e));
+    }
 
-      /** Leaves the queue, if this call is in it. Idempotent — `finish` and a replay both call it. */
-      const releaseQueued = (): void => {
-        if (!call.paused) return;
-        call.paused = false;
-        const index = queue.indexOf(call);
-        if (index >= 0) queue.splice(index, 1);
-        queuedCount.update((n) => n - 1);
-        mutations.release();
-        if (queue.length === 0) {
-          detachReplay?.();
-          detachReplay = undefined;
-        }
-      };
+    const finalHeaders =
+      idempotencyHeader === false
+        ? headers
+        : persistence.idempotencyKey !== undefined
+          ? withHeader(headers, idempotencyHeader, idempotencyKey)
+          : readHeader(headers, idempotencyHeader) === null
+            ? withHeader(headers, idempotencyHeader, idempotencyKey)
+            : headers;
 
-      /**
-       * Parks the call until the next reconnect.
-       *
-       * The optimistic write stays — the call is not failing, it is waiting — and the promise stays
-       * pending, which is what makes `await run()` mean "the write happened", offline included.
-       * Nothing is sent and no timer is armed, so a device that stays offline costs one queue entry
-       * and no work.
-       */
-      const hold = (): void => {
-        call.paused = true;
-        progress.set(undefined);
-        queue.push(call);
-        queuedCount.update((n) => n + 1);
-        mutations.hold();
-        detachReplay ??= online.onReconnect(replay);
-      };
-
-      const send = (): void => {
-        subscription = stream.subscribe({ next: onEvent, error: (e) => fail(toError(e)) });
-        // A custom `HttpBackend` may answer synchronously, in which case `settled` is already true
-        // here and the completed subscription must not be handed to `cancel`. The type checker
-        // narrows `settled` to `false` because it cannot see that the callback ran inside `subscribe`.
-        if (settled) subscription.unsubscribe();
-      };
-
-      const call: AcceptedCall = {
-        paused: false,
-        send,
-        cancel: () => {
-          if (settled) return;
-          // A destroyed handle has no observer left to correct, and writing to a dead signal is
-          // pure noise; a plain `cancel()` (or a `switch` superseding this call) does roll back,
-          // because leaving an invented value on screen is the worse outcome.
-          if (!destroyed) undo();
-          releaseQueued();
-          finish();
-          subscription?.unsubscribe();
-          reject(new RequestCancelledError());
+    return persistedQueue
+      .enqueue({
+        key: persistence.key,
+        version: persistenceVersion,
+        args: storedArgs,
+        idempotencyKey,
+      })
+      .then(
+        (result) => {
+          if (result === null) {
+            if (isDevMode()) {
+              console.warn(
+                'createMutation: the persisted mutation queue is unavailable; this call runs without durability.',
+              );
+            }
+            return launch(callArgs, ctx, built, timeout, makeStream(finalHeaders));
+          }
+          return launch(callArgs, ctx, built, timeout, makeStream(finalHeaders), {
+            entry: result.entry,
+            replayed: false,
+            queueManaged: false,
+            deferred: result.deferred,
+          });
         },
-        release: releaseQueued,
-      };
-      const finish = (): void => {
-        settled = true;
-        releaseQueued();
-        calls.delete(call);
-        inFlight.update((n) => n - 1);
-        mutations.end(options.mutationKey);
-        // A settled call has no progress left to report, and leaving the last event behind would
-        // pin a `<progress [value]="…">` at its final value. Cleared on every settle path — success,
-        // failure and cancel — so `progress()` is `undefined` again until the next call reports.
-        progress.set(undefined);
-      };
-      const isEvent = (raw: unknown): raw is HttpEvent<unknown> =>
-        typeof raw === 'object' && raw !== null && 'type' in raw && raw.type !== undefined;
-
-      const succeed = (raw: unknown): void => {
-        if (settled) return;
-        let value: T;
-        try {
-          value = options.parse ? options.parse(raw) : (raw as T);
-        } catch (e) {
-          fail(toError(e));
-          return;
-        }
-        finish();
-        response.set(value);
-        finished.set('success');
-        // Settle order is fixed and worth stating, because the rollback and the refetch both
-        // touch the same display: invalidate → onSuccess → onSettled. So a hook that reads the
-        // refreshed value sees the fresh list, not the one that is about to be replaced.
-        safe(reloadInvalidated);
-        safe(() => options.onSuccess?.(value, callArgs, ctx));
-        safe(() => config.onSuccess?.(value, { url: built.url, method }));
-        safe(() => options.onSettled?.(callArgs, ctx));
-        resolve(value);
-      };
-      const fail = (err: Error): void => {
-        if (settled) return;
-        // A replay that died because the connection dropped again is not a final failure — it is the
-        // same call, still waiting. The heuristic is deliberately narrow: `'online'` mode, the
-        // manager still reports offline, and the failure classifies as `network` (an
-        // `HttpErrorResponse` with `status: 0`, or a raw `TypeError`). So an HTTP status, a timeout
-        // or an abort stays a failure even while the browser is offline, and a status-0 failure
-        // while the browser says it is online is a real one rather than a reason to wait forever.
-        if (
-          networkMode === 'online' &&
-          !online.online() &&
-          toRequestError(err).kind === 'network'
-        ) {
-          hold();
-          return;
-        }
-        // The optimistic value never became real, so it must not stay on screen. `undo` is a
-        // compare-and-swap, so a value another call wrote in the meantime survives.
-        undo();
-        finish();
-        errorTimeout.set(timeout);
-        error.set(err);
-        finished.set('error');
-        safe(() => options.onError?.(err, callArgs, ctx));
-        safe(() => config.onError?.(err, { url: built.url, method }));
-        safe(() => options.onSettled?.(callArgs, ctx));
-        reject(err);
-      };
-      /**
-       * `observe: 'events'` delivers the body inside a `Response` event, with `Sent` and the
-       * progress events around it. Everything that is not the body updates `progress`.
-       */
-      const onEvent = (raw: unknown): void => {
-        if (!isEvent(raw)) {
-          succeed(raw); // defensive: no `HttpEvent` wrapper
-          return;
-        }
-        switch (raw.type) {
-          case HttpEventType.UploadProgress:
-          case HttpEventType.DownloadProgress:
-            progress.set(raw);
-            return;
-          case HttpEventType.Response:
-            succeed(raw.body);
-            return;
-          default:
-            return; // `Sent` and anything else carry no body
-        }
-      };
-
-      calls.add(call);
-      // Applied last, so the state above (`args`, cleared `error`, cleared `progress`) is what the
-      // template sees together with the optimistic value rather than before it.
-      undo = applyOptimistic(callArgs);
-
-      // Offline under `'online'`: the write is already prepared and shown, and it is sent by the
-      // reconnect rather than by this stack. Everything else — including `'offlineFirst'`, whose
-      // first attempt always runs — sends now.
-      if (networkMode === 'online' && !online.online()) {
-        hold();
-        return;
-      }
-      send();
-    });
-    promise.catch(noop);
-    return promise;
+        (e: unknown) => rejected(toError(e)),
+      );
   };
 
+  const replayPersisted = (entry: PersistedMutationEntry): Promise<unknown> => {
+    if (persistenceCodec === undefined) {
+      return rejected(new Error('The mutation has no persistence codec for replay.'));
+    }
+    let callArgs: TArgs;
+    try {
+      callArgs = persistenceCodec.deserialize(entry.args);
+    } catch (e) {
+      return rejected(
+        new MutationQueueQuarantineError(
+          `The stored args for "${entry.key}" could not be deserialized.`,
+          e,
+        ),
+      );
+    }
+    return prepare(callArgs, undefined as TContext, entry);
+  };
+
+  if (persistence !== undefined && persistedQueue !== null && persistenceCodec !== undefined) {
+    const activePersistence = persistence;
+    const handler: MutationQueueHandler = {
+      key: activePersistence.key,
+      version: persistenceVersion,
+      idempotencyHeader: idempotencyHeader !== false,
+      replay: replayPersisted,
+      ...(activePersistence.onRestore === undefined
+        ? {}
+        : {
+            restore: async (entry: PersistedMutationEntry): Promise<void> => {
+              const callArgs = persistenceCodec.deserialize(entry.args);
+              await activePersistence.onRestore?.(callArgs, entry);
+            },
+          }),
+    };
+    unregisterQueue = persistedQueue.register(handler);
+  }
   const cancelAll = (): void => {
     for (const call of [...calls]) call.cancel();
   };
@@ -573,6 +909,8 @@ function buildMutation<T, TArgs, TContext>(
     detachReplay?.();
     detachReplay = undefined;
     cancelAll();
+    unregisterQueue?.();
+    unregisterQueue = undefined;
   };
 
   inject(DestroyRef).onDestroy(destroy);
@@ -594,13 +932,14 @@ function buildMutation<T, TArgs, TContext>(
       // failed call — hooks run, the promise rejects, nothing was sent.
       (reason: unknown) => {
         const failure = toError(reason);
+        const meta: MutationHookMeta = { replayed: false };
         args.set(callArgs);
         context.set(undefined);
         error.set(failure);
         finished.set('error');
-        safe(() => options.onError?.(failure, callArgs, undefined));
+        safe(() => options.onError?.(failure, callArgs, undefined, meta));
         safe(() => config.onError?.(failure, { url: undefined, method }));
-        safe(() => options.onSettled?.(callArgs, undefined));
+        safe(() => options.onSettled?.(callArgs, undefined, meta));
         return rejected(failure);
       },
     );

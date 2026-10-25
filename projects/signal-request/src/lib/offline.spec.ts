@@ -796,7 +796,7 @@ describe('networkMode – mutations', () => {
     await goOnline();
     http.expectOne('/todos').flush(9);
     await expect(p).resolves.toBe(9);
-    expect(onSuccess).toHaveBeenCalledWith(9, 'abcd', undefined);
+    expect(onSuccess).toHaveBeenCalledWith(9, 'abcd', undefined, { replayed: false });
   });
 
   it('puts a replay back in the queue when the connection drops again', async () => {

@@ -83,8 +83,21 @@ describe('createMutation — onMutate', () => {
     await settle();
 
     expect(result.ok).toBe(false);
-    expect(onError).toHaveBeenCalledWith(expect.anything(), 'write', { attempted: 'write' });
-    expect(onSettled).toHaveBeenCalledWith('write', { attempted: 'write' });
+    expect(onError).toHaveBeenCalledWith(
+      expect.anything(),
+      'write',
+      { attempted: 'write' },
+      {
+        replayed: false,
+      },
+    );
+    expect(onSettled).toHaveBeenCalledWith(
+      'write',
+      { attempted: 'write' },
+      {
+        replayed: false,
+      },
+    );
     expect(save.context()).toEqual({ attempted: 'write' });
 
     save.destroy();

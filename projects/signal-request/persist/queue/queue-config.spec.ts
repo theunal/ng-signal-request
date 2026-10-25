@@ -125,6 +125,88 @@ function saveTodo(
   );
 }
 
+interface LockRequestOptions {
+  readonly mode: 'exclusive';
+  readonly ifAvailable?: boolean;
+  readonly signal?: AbortSignal;
+}
+
+interface FakeLockManager {
+  request(
+    name: string,
+    options: LockRequestOptions,
+    callback: (lock: unknown) => unknown,
+  ): Promise<unknown>;
+  readonly held: Set<string>;
+}
+
+/**
+ * A Web Locks stand-in that actually queues.
+ *
+ * jsdom has no `navigator.locks`, and a fake that only answers `ifAvailable` cannot test a handoff:
+ * the whole point is that a *waiting* request is granted when the holder goes away. `held` is
+ * exposed so a test can assert the lock really moved rather than being re-acquired by accident.
+ */
+function fakeLockManager(): FakeLockManager {
+  const held = new Set<string>();
+  const waiting: Array<{ name: string; start: () => void }> = [];
+
+  const run = (name: string, callback: (lock: unknown) => unknown): Promise<unknown> => {
+    held.add(name);
+    return Promise.resolve(callback({ name })).then(() => {
+      held.delete(name);
+      const index = waiting.findIndex((candidate) => candidate.name === name);
+      if (index === -1) return;
+      const [next] = waiting.splice(index, 1);
+      next.start();
+    });
+  };
+
+  return {
+    held,
+    request(name, options, callback) {
+      if (options.ifAvailable) {
+        return held.has(name) ? Promise.resolve(callback(null)) : run(name, callback);
+      }
+      if (!held.has(name)) return run(name, callback);
+      return new Promise((resolve, reject) => {
+        const entry = {
+          name,
+          start: () => {
+            resolve(run(name, callback));
+          },
+        };
+        waiting.push(entry);
+        options.signal?.addEventListener(
+          'abort',
+          () => {
+            const index = waiting.indexOf(entry);
+            if (index !== -1) waiting.splice(index, 1);
+            reject(new Error('AbortError'));
+          },
+          { once: true },
+        );
+      });
+    },
+  };
+}
+
+/** Installs a fake lock manager for one test and restores the descriptor afterwards. */
+async function withFakeLocks(run: (locks: FakeLockManager) => Promise<void>): Promise<void> {
+  const locks = fakeLockManager();
+  const original = Object.getOwnPropertyDescriptor(globalThis.navigator, 'locks');
+  Object.defineProperty(globalThis.navigator, 'locks', { configurable: true, value: locks });
+  try {
+    await run(locks);
+  } finally {
+    if (original === undefined) {
+      delete (globalThis.navigator as { locks?: unknown }).locks;
+    } else {
+      Object.defineProperty(globalThis.navigator, 'locks', original);
+    }
+  }
+}
+
 describe('persisted mutation queue configuration', () => {
   it('constructs eager services so their handler exists before automatic replay', async () => {
     const storage = memoryStorage(snapshotWith([entry()]));
@@ -548,28 +630,13 @@ describe('persisted mutation queue configuration', () => {
 
   it('takes the Web Lock and reports a second tab as a non-owner', async () => {
     const storage = memoryStorage();
-    const held = new Set<string>();
-    const original = Object.getOwnPropertyDescriptor(globalThis.navigator, 'locks');
-    Object.defineProperty(globalThis.navigator, 'locks', {
-      configurable: true,
-      value: {
-        request(
-          name: string,
-          _options: { mode: 'exclusive'; ifAvailable?: boolean },
-          callback: (lock: unknown) => unknown,
-        ): Promise<unknown> {
-          if (held.has(name)) return Promise.resolve(callback(null));
-          held.add(name);
-          return Promise.resolve(callback({ name }));
-        },
-      },
-    });
-    try {
+    await withFakeLocks(async (locks) => {
       setup([providePersistedMutationQueue({ storage })]);
       const first = TestBed.inject(PersistedMutationQueue);
       await settle();
       expect(first.owner()).toBe(true);
       expect(first.enabled()).toBe(true);
+      expect(locks.held.size).toBe(1);
 
       const parent = TestBed.inject(EnvironmentInjector);
       const secondScope = createEnvironmentInjector(
@@ -581,12 +648,67 @@ describe('persisted mutation queue configuration', () => {
       expect(second.owner()).toBe(false);
       expect(second.enabled()).toBe(false);
       secondScope.destroy();
-    } finally {
-      if (original === undefined) {
-        delete (globalThis.navigator as { locks?: unknown }).locks;
-      } else {
-        Object.defineProperty(globalThis.navigator, 'locks', original);
-      }
-    }
+    });
+  });
+
+  it('hands the queue to a waiting tab when the owner goes away', async () => {
+    const storage = memoryStorage();
+    await withFakeLocks(async (locks) => {
+      setup();
+      const parent = TestBed.inject(EnvironmentInjector);
+      const online = TestBed.inject(OnlineManager);
+
+      // Tab A owns the queue and accepts a write while offline.
+      const tabA = createEnvironmentInjector([providePersistedMutationQueue({ storage })], parent);
+      const queueA = tabA.get(PersistedMutationQueue);
+      await settle();
+      expect(queueA.owner()).toBe(true);
+
+      online.setOnline(false);
+      const saveA = runInInjectionContext(tabA, () =>
+        createMutation.post<Todo, SaveArgs>((args) => ({ url: '/todos', body: args.body }), {
+          networkMode: 'online',
+          persistence: { key: 'todo.create' },
+        }),
+      );
+      const pending = saveA.run({ body: { title: 'handover' } });
+      pending.catch(() => undefined);
+      await settle();
+      expect(entriesIn(storage)).toHaveLength(1);
+
+      // Tab B is a non-owner, and is queued behind A's lock rather than merely refused.
+      const tabB = createEnvironmentInjector([providePersistedMutationQueue({ storage })], parent);
+      const queueB = tabB.get(PersistedMutationQueue);
+      runInInjectionContext(tabB, () =>
+        createMutation.post<Todo, SaveArgs>((args) => ({ url: '/todos', body: args.body }), {
+          networkMode: 'online',
+          persistence: { key: 'todo.create' },
+        }),
+      );
+      await settle();
+      expect(queueB.owner()).toBe(false);
+      expect(queueB.enabled()).toBe(false);
+      expect(queueB.pendingCount()).toBe(0);
+
+      // A closes. The browser grants the queued request, so delivery moves instead of dying.
+      tabA.destroy();
+      await settle();
+      expect(queueB.owner()).toBe(true);
+      expect(queueB.enabled()).toBe(true);
+      expect(queueB.pendingCount()).toBe(1);
+
+      online.setOnline(true);
+      await settle();
+      TestBed.inject(HttpTestingController)
+        .expectOne('/todos')
+        .flush({ id: 11, title: 'handover' });
+      await settle();
+
+      expect(queueB.pendingCount()).toBe(0);
+      expect(entriesIn(storage)).toEqual([]);
+      tabB.destroy();
+      await settle();
+      expect(locks.held.size).toBe(0);
+    });
   });
 });

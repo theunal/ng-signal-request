@@ -137,6 +137,39 @@ test('a write that reached the server is not replayed after a reload', async ({
   expect(posts).toHaveLength(1);
 });
 
+test('a waiting tab takes the queue over when the owner goes away', async ({ context }) => {
+  const posts: Post[] = [];
+  await mockApi(context, posts, () => ({ status: 201, json: { id: 3, title: 'handover' } }));
+
+  const owner = await context.newPage();
+  await owner.goto('/');
+  await expect(owner.getByTestId('owner')).toHaveText('true');
+
+  // The second tab is a non-owner, but it is queued behind the lock rather than merely refused.
+  const second = await context.newPage();
+  await second.goto('/');
+  await expect(second.getByTestId('owner')).toHaveText('false');
+  await expect(second.getByTestId('enabled')).toHaveText('false');
+
+  await context.setOffline(true);
+  await submit(owner, 'handover');
+  await expect(owner.getByTestId('pending')).toHaveText('1');
+  expect(posts).toHaveLength(0);
+
+  // The owner goes away. The browser grants the queued request, so delivery moves to this tab
+  // instead of waiting for a page that will never come back.
+  await owner.close();
+  await context.setOffline(false);
+  await second.bringToFront();
+
+  await expect(second.getByTestId('owner')).toHaveText('true');
+  await expect(second.getByTestId('enabled')).toHaveText('true');
+  await expect(second.getByTestId('todo')).toHaveCount(1);
+  await expect.poll(() => posts.length).toBe(1);
+  await expect(second.getByTestId('pending')).toHaveText('0');
+  await expect(second.getByTestId('todo')).toHaveAttribute('data-state', 'saved');
+});
+
 test('a permanent failure keeps the entry and does not resurrect the row', async ({
   page,
   context,

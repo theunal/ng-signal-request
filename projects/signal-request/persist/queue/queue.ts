@@ -151,7 +151,7 @@ export const PERSISTED_MUTATION_QUEUE_OPTIONS = new InjectionToken<PersistedMuta
 interface LockManagerLike {
   request(
     name: string,
-    options: { mode: 'exclusive'; ifAvailable?: boolean },
+    options: { mode: 'exclusive'; ifAvailable?: boolean; signal?: AbortSignal },
     callback: (lock: unknown) => Promise<void> | void,
   ): Promise<unknown>;
 }
@@ -359,6 +359,8 @@ export class PersistedMutationQueue implements MutationQueueAdapter {
   private noHandlerId: string | undefined;
   private warnedNoHandler = new Set<string>();
   private releaseLock: (() => void) | undefined;
+  /** Aborts the queued lock request a non-owner tab is holding, so it does not take over a dead one. */
+  private lockWait: AbortController | undefined;
   private detachOnline: (() => void) | undefined;
   private writing: Promise<unknown> = Promise.resolve();
 
@@ -699,16 +701,30 @@ export class PersistedMutationQueue implements MutationQueueAdapter {
     if (this.destroyed || this.ownerState()) return;
     try {
       if (!(await this.acquireLock())) return;
-      this.ownerState.set(true);
-      if (!this.hydrated) await this.hydrate();
-      await this.restoreGate?.restored();
-      this.enabledState.set(!this.quarantined);
-      for (const handler of this.handlers.values()) this.reviewHandler(handler);
-      this.allowReplay = true;
-      this.scheduleReplay();
+      await this.becomeOwner();
     } catch (error) {
       this.errorHandler.handleError(error);
     }
+  }
+
+  /**
+   * The work every path that just became the owner has to do.
+   *
+   * `initialize()` is not a caller: it resolves `hydratedReady` between hydration and the cache
+   * restore gate, and that ordering is what lets an offline write land durably while a cache
+   * restore is still running.
+   */
+  private async becomeOwner(): Promise<void> {
+    this.ownerState.set(true);
+    if (!this.hydrated) await this.hydrate();
+    await this.restoreGate?.restored();
+    if (this.destroyed) return;
+    this.enabledState.set(this.hydrated && !this.quarantined);
+    this.allowReplay = this.options.autoReplay ?? true;
+    // A non-owner tab never attached the reconnect listener, because it had nothing to replay.
+    this.detachOnline ??= this.online.onReconnect(() => this.scheduleReplay());
+    for (const handler of this.handlers.values()) this.reviewHandler(handler);
+    this.scheduleReplay();
   }
 
   private async acquireLock(): Promise<boolean> {
@@ -722,6 +738,19 @@ export class PersistedMutationQueue implements MutationQueueAdapter {
       return false;
     }
 
+    const name = `ng-signal-request:mutation-queue:${this.key}`;
+    if (await this.requestLock(locks, name)) return true;
+
+    // Another tab owns the queue. Queue a request behind it: the browser grants it the moment that
+    // tab closes, crashes or navigates away, so delivery moves to this tab instead of dying with
+    // the one that accepted the write. Without this, closing the owner loses nothing (the entry is
+    // on disk) but nothing replays it until a page opens and asks again.
+    this.waitForLock(locks, name);
+    return false;
+  }
+
+  /** Takes the lock if it is free, or reports `false` without waiting for it. */
+  private requestLock(locks: LockManagerLike, name: string): Promise<boolean> {
     return new Promise<boolean>((resolve) => {
       let answered = false;
       const answer = (value: boolean): void => {
@@ -730,27 +759,50 @@ export class PersistedMutationQueue implements MutationQueueAdapter {
         resolve(value);
       };
       void locks
-        .request(
-          `ng-signal-request:mutation-queue:${this.key}`,
-          { mode: 'exclusive', ifAvailable: true },
-          (lock) => {
-            if (lock === null) {
-              answer(false);
-              return;
-            }
-            answer(true);
-            // Hold the lock for as long as this tab owns the queue. The promise is released by
-            // `destroy`, which is also when the browser would release it on navigation.
-            return new Promise<void>((release) => {
-              this.releaseLock = release;
-            });
-          },
-        )
+        .request(name, { mode: 'exclusive', ifAvailable: true }, (lock) => {
+          if (lock === null) {
+            answer(false);
+            return;
+          }
+          answer(true);
+          // Hold the lock for as long as this tab owns the queue. The promise is released by
+          // `destroy`, which is also when the browser would release it on navigation.
+          return new Promise<void>((release) => {
+            this.releaseLock = release;
+          });
+        })
         .catch((error: unknown) => {
           this.errorHandler.handleError(error);
           answer(false);
         });
     });
+  }
+
+  /**
+   * Waits in the browser's lock queue for the current owner to go away.
+   *
+   * This is a *queued* request, not `ifAvailable`: it stays pending until the lock is granted. The
+   * abort signal is what keeps a destroyed tab from taking over a queue it can no longer replay.
+   */
+  private waitForLock(locks: LockManagerLike, name: string): void {
+    if (this.lockWait !== undefined || this.destroyed) return;
+    const controller = new AbortController();
+    this.lockWait = controller;
+    void locks
+      .request(name, { mode: 'exclusive', signal: controller.signal }, () => {
+        this.lockWait = undefined;
+        // Destroyed while the request was queued: release immediately instead of holding a lock
+        // for a tab that will never replay anything.
+        if (this.destroyed) return;
+        void this.becomeOwner();
+        return new Promise<void>((release) => {
+          this.releaseLock = release;
+        });
+      })
+      .catch(() => {
+        // Aborted by `destroy()`, which is the normal way this request ends for a tab that closes.
+        this.lockWait = undefined;
+      });
   }
 
   private async hydrate(): Promise<void> {
@@ -1330,6 +1382,8 @@ export class PersistedMutationQueue implements MutationQueueAdapter {
     }
     this.detachOnline?.();
     this.detachOnline = undefined;
+    this.lockWait?.abort();
+    this.lockWait = undefined;
     this.releaseLock?.();
     this.releaseLock = undefined;
     this.hydratedReady.resolve();

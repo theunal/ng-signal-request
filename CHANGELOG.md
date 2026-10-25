@@ -41,6 +41,11 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   - `destroy()` rejects a current-page queued promise with `MutationDetachedError`
     and leaves the durable entry for the next page. `concurrency: 'switch'` is
     incompatible with `persistence`.
+  - Ownership is handed over. A non-owner tab queues a request behind the Web Lock,
+    so when the owner tab closes the next tab becomes the owner, hydrates the
+    stored queue and replays it - delivery outlives the tab that accepted the
+    write. With no tab open nothing replays: a service worker is still the answer
+    for that, and the library does not register one.
   - The queue is a separate entry point so an application that only persists the
     read cache does not pay for it. It is labelled experimental until the
     server-side idempotency contract has been proven in practice.

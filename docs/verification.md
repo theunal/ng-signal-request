@@ -53,7 +53,7 @@ gzip size of each FESM bundle. These are the numbers `pnpm check:dist` prints.
 | `ng-signal-request`               | 106.5 KB | **23.0 KB** | 23.5 KB | 0.5 KB   |
 | `ng-signal-request/devtools`      | 21.4 KB  | 4.5 KB      | 15 KB   | 10.5 KB  |
 | `ng-signal-request/persist`       | 12.6 KB  | 3.7 KB      | 15 KB   | 11.3 KB  |
-| `ng-signal-request/persist/queue` | 29.9 KB  | 7.2 KB      | 15 KB   | 7.8 KB   |
+| `ng-signal-request/persist/queue` | 30.7 KB  | 7.3 KB      | 15 KB   | 7.7 KB   |
 | `ng-signal-request/testing`       | 1.8 KB   | 0.8 KB      | 15 KB   | 14.2 KB  |
 
 The primary budget moved from 21.5 KB to 23.5 KB for the durable queue's core
@@ -892,7 +892,7 @@ Two spec files run against the real `createMutation`, the real cache and a memor
 - a missing Web Locks API disabling durability;
 - entry/timer cleanup and the no-provider path.
 
-`persist/queue/queue-config.spec.ts` (21 tests) covers the decisions around it:
+`persist/queue/queue-config.spec.ts` (22 tests) covers the decisions around it:
 
 - `eager` constructing a root service so its handler exists before auto-replay, and
   a missing handler staying `pending` with the dev warning;
@@ -913,7 +913,10 @@ Two spec files run against the real `createMutation`, the real cache and a memor
 - the stored backoff deadline surviving without an immediate resend;
 - SSR: no storage read, no replay, and a persisted mutation degrading to a normal
   call;
-- Web Locks ownership: the first tab owns, the second reports `owner: false`.
+- Web Locks ownership: the first tab owns, the second reports `owner: false`, and
+  a second tab that is queued behind the lock **takes the queue over** when the
+  owner's injector is destroyed - it hydrates the owner's snapshot, replays the
+  pending entry and releases the lock on its own destroy.
 
 Two defects were found by these tests and fixed before the record was written:
 replay could dispatch an entry before its version migration ran (replay is
@@ -921,7 +924,7 @@ scheduled from hydration, registration and reconnect, so the review now runs
 synchronously and marks the entry as `reviewing`), and `migrateEntry` received the
 handler's version instead of the entry's stored version.
 
-`pnpm test` is **638 passed**. Coverage is **93.99 / 87.92 / 98.21 / 95.48**
+`pnpm test` is **639 passed**. Coverage is **94.16 / 87.9 / 98.23 / 95.7**
 (statements / branches / functions / lines), above the configured floors of
 90 / 85 / 90 / 90. The branch figure is lower than the core-only records in
 sections 8-19 because the queue's storage, ownership, migration and retry paths
@@ -934,9 +937,9 @@ include defensive branches that jsdom cannot produce.
 | Entry point                       | Gzip    | Budget |
 | --------------------------------- | ------- | ------ |
 | `ng-signal-request`               | 23.0 KB | 23.5   |
-| `ng-signal-request/persist/queue` | 7.2 KB  | 15     |
+| `ng-signal-request/persist/queue` | 7.3 KB  | 15     |
 
-The queue grew from 6.3 KB to 7.2 KB when per-entry validation and the review
+The queue grew from 6.3 KB to 7.3 KB when per-entry validation, the review
 ordering landed; the headroom against its 15 KB budget is unchanged in practice.
 
 The demo bundle contains core strings and none of the `/devtools`, `/persist` or
@@ -968,7 +971,7 @@ handler exists before automatic replay. Its API is same-origin (`/api/todos`), s
 the route mock counts exactly the POSTs; there is no CORS preflight to subtract,
 unlike the demo's cross-origin mock.
 
-Three checks, all Chromium, `pnpm test:e2e`:
+Four checks, all Chromium, `pnpm test:e2e`:
 
 1. **A write made offline survives the page and replays once.** Offline submit
    shows the optimistic row and `pending: 1` with nothing on the wire; the page is
@@ -978,7 +981,13 @@ Three checks, all Chromium, `pnpm test:e2e`:
    `Idempotency-Key`, and the entry is gone from the snapshot afterwards.
 2. **A write that reached the server is not replayed after a reload.** One POST,
    then a reload: no second POST, nothing restored, `pending: 0`.
-3. **A permanent failure keeps the entry and does not resurrect the row.** A `400`
+3. **A waiting tab takes the queue over when the owner goes away.** Two real tabs
+   share the origin; the second reports `owner: false` and `enabled: false` while
+   the first holds the lock. The owner accepts an offline write and is closed; the
+   second tab becomes the owner, restores the row and replays the entry with one
+   POST. This is the handoff design §14.1 specifies, and it is the reason closing
+   the owning tab no longer stops delivery.
+4. **A permanent failure keeps the entry and does not resurrect the row.** A `400`
    rolls the optimistic row back, the entry is `failed` in the UI, and it is still
    `failed` after a reload - `onRestore` is a pending-entry hook, so the row does
    not come back.
@@ -989,8 +998,12 @@ sent" state is asserted rather than raced.
 ### 20.4 What the e2e still does not cover
 
 - **One browser.** Chromium only, the same limit as the existing offline e2e.
-- **One tab.** The lock is really acquired, but a second real tab contending for
-  it is still only covered by the stubbed manager in the unit suite.
+- **No background replay.** Handoff needs a live tab: the lock is handed to a
+  waiting tab, and with no tab open nothing replays. A service worker with
+  Background Sync is the answer for that, and the library does not register one.
+- **No non-owner durability.** A tab that is not the owner falls back to the 0.2.0
+  in-memory queue for its own calls, so its write is lost on reload. The e2e
+  asserts the non-owner state; it does not make that write durable.
 - **No quota, private-mode or eviction case.** Storage denial is emulated with a
   throwing `CacheStorage` in the unit suite, not produced by the browser.
 - **No duplicate-key `409` in the browser.** The `isAlreadyApplied` path is a unit

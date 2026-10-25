@@ -93,7 +93,10 @@ Impact is an assessment of the cost when the gap is hit:
 > implemented behind an opt-in provider (`ng-signal-request/persist/queue` plus the
 > `persistence` mutation option) and is covered by a real-browser e2e: IndexedDB,
 > Web Locks, a write that survives the page and replays exactly once, and a
-> permanent failure that stays durable. Item 3 follows from the same provider: the
+> permanent failure that stays durable. Item 2 is half closed by the same provider:
+> ownership is handed to a waiting tab when the owner goes away (§1.2), so delivery
+> outlives the owning tab; background replay with no tab open is still missing.
+> Item 3 follows from the same provider: the
 > queue exposes `entries`, `pendingCount`, `failedCount`, `retry`, `retryAll`,
 > `resume`, `remove` and `clear`. Neither is in the published release, and the
 > feature stays labelled experimental until the server-side idempotency contract is
@@ -141,6 +144,18 @@ cannot be added by the consumer without its own outbox.
 **Evidence:** queue ownership is per handle (`create-mutation.ts`); the persistence
 module listens only to `pagehide` and `visibilitychange`, not to `storage` or a
 BroadcastChannel (`persist/persist.ts`).
+
+> **Update, 2026-10-25 — working tree only, not in `0.2.0`.** The cross-tab half is
+> implemented for the durable queue. Web Locks elects a single owner, and a
+> non-owner now **queues a request behind the lock** instead of only being refused,
+> so when the owner tab closes or crashes the waiting tab becomes the owner,
+> hydrates the stored queue and replays it. Delivery therefore outlives the tab
+> that accepted the write, which was the high-impact half of this item; it is
+> asserted with two real tabs in `e2e/queue.spec.ts`. The background half is still
+> missing and stays a non-goal: with no tab open nothing replays, and a non-owner's
+> own calls stay in memory. Both need an application-level service worker (or a
+> per-entry claim), which the library does not provide. See
+> `docs/design-offline-mutation-queue.md` §14 and `docs/verification.md` §20.3.
 
 ### 1.3 The queue cannot be listed or manually resumed
 

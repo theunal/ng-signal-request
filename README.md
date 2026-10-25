@@ -1246,9 +1246,13 @@ accepted entry.
 Replaying in two tabs at once would send the same write twice, so the queue takes a
 **Web Lock** and only the owner replays. `owner()` and `enabled()` say which tab
 that is; a non-owner still runs mutations in memory but does not persist or replay
-them. Without the Web Locks API durable persistence is disabled rather than
-assumed safe; `assumeSingleTab: true` is the explicit opt-in for an environment
-that really has one tab.
+them. Ownership is handed over: a non-owner waits in the browser's lock queue, so
+when the owner tab is closed the next tab becomes the owner, hydrates the stored
+queue and replays it. Delivery therefore outlives the tab that accepted the write -
+but not all tabs: with no tab open nothing replays, and a service worker with
+Background Sync is still the answer for that. Without the Web Locks API durable
+persistence is disabled rather than assumed safe; `assumeSingleTab: true` is the
+explicit opt-in for an environment that really has one tab.
 
 `destroy()` rejects a **current-page** queued promise with `MutationDetachedError`
 instead of pretending the write failed. The durable entry stays, so the next page
@@ -1758,9 +1762,10 @@ Where TanStack Query is simply ahead, with no clever reframing:
   the write survives a page close. TanStack's persistence plugins are the mature
   path and cover more storage shapes; here it is opt-in (`persistence` plus
   `providePersistedMutationQueue`), experimental until the server-side idempotency
-  contract is proven, single-owner through the Web Locks API, and it has no
-  background replay - a service worker with Background Sync is still the answer for
-  delivery while the tab is closed.
+  contract is proven, and single-owner through the Web Locks API - ownership is
+  handed to a waiting tab when the owner goes away, but there is no background
+  replay: a service worker with Background Sync is still the answer for delivery
+  with no tab open.
 - **Persistence breadth.** `/persist` has `localStorage`-shaped storages plus
   `indexedDbStorage()`, with `maxAge`, `buster`, `migrate` and key/state filters.
   `persistQueryClient` still has more storage adapters, and a broader
@@ -1907,8 +1912,10 @@ report and one you read here is a design decision.
   `networkMode: 'online'`, calls made while offline are replayed on reconnect -
   but without `providePersistedMutationQueue(...)` and a `persistence` option
   they live in the handle's memory, and a reload loses them. Even opted in: only
-  the tab holding the Web Lock persists and replays (`assumeSingleTab` exists for
-  environments without Web Locks); stored args must be codec-serializable; auth
+  the tab holding the Web Lock persists and replays, and ownership moves to a
+  waiting tab only when the owner goes away (`assumeSingleTab` exists for
+  environments without Web Locks); nothing replays with no tab open; stored args
+  must be codec-serializable; auth
   headers, closures and `onMutate` context are not stored, so replay gets
   `context: undefined`; and the library cannot verify that the server honours the
   `Idempotency-Key` header. A replayed write is still an at-least-once write, and

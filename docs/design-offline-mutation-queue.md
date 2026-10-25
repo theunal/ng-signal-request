@@ -88,10 +88,13 @@ keeps them separate.
 
 - **Exactly-once delivery.** The library cannot provide it without a server
   contract. The idempotency key is the contract; the server must honour it.
-- **Cross-tab live coordination.** Item 2 is separate. This design covers a
-  single owner via Web Locks. Without Web Locks the durable queue is disabled
-  unless the application explicitly opts into `assumeSingleTab: true`; there is
-  no BroadcastChannel or SharedWorker.
+- **Cross-tab live coordination beyond ownership.** The queue elects a single
+  owner through Web Locks and hands ownership to a waiting tab when that owner
+  goes away (§14.1), which is what lets delivery outlive the tab that accepted the
+  write. There is still no BroadcastChannel or SharedWorker: non-owner tabs do not
+  mirror the owner's queue, and their own accepted calls stay in memory. Without
+  Web Locks the durable queue is disabled unless the application explicitly opts
+  into `assumeSingleTab: true`.
 - **Service-worker Background Sync.** The library does not register a service
   worker or a sync tag.
 - **Persisting closures, headers or `onMutate` context.** Those are neither
@@ -895,10 +898,18 @@ navigator.locks.request(`ng-signal-request:mutation-queue:${key}`, async () => {
 ```
 
 The callback must not resolve while the tab owns the queue. The browser releases
-the lock when the tab closes or crashes. A second tab reports `owner: false`
-while the lock is held and disables durable persistence. It may retry
-acquisition on `queue.resume()`; if it acquires the lock later, it re-reads the
-storage snapshot before replaying, because its in-memory view may be stale.
+the lock when the tab closes or crashes. A second tab reports `owner: false` while
+the lock is held, disables durable persistence, and **queues a request behind the
+lock** rather than only refusing to work. The browser grants that request the
+moment the owner goes away, so the waiting tab becomes the owner, re-reads the
+storage snapshot (its in-memory view is stale by definition) and replays. That is
+the difference between "delivery survives a tab" and "delivery survives the tab
+that accepted the write".
+
+`queue.resume()` still retries acquisition eagerly, for the case where this tab
+believes it is a non-owner but the lock is already free. The queued request is
+aborted on `destroy()`, so a tab that is closing cannot take over a queue it will
+never replay.
 
 ### 14.2 Fallback
 
@@ -923,11 +934,12 @@ A non-owner tab, or a tab with no Web Locks and no `assumeSingleTab` opt-in:
 
 Calls this tab accepted while it was a non-owner are in memory only; they are
 not retroactively written when ownership changes. A reload before it acquires
-ownership loses them. This is the cost of keeping a single writer without item
-2's handoff.
-
-A dev warning explains why. Item 2 can add a BroadcastChannel handoff or a
-per-entry IndexedDB claim. Neither is in this design.
+ownership loses them. That is the cost of a single writer, not a missing handoff:
+ownership itself moves automatically (§14.1). What remains application work is a
+replay with **no tab open at all** - a service worker with Background Sync, which
+the library does not register - and a non-owner's own writes, which a
+BroadcastChannel handoff or a per-entry IndexedDB claim could make durable. Neither
+is in this design.
 
 ## 15. Versioning, migration and corruption
 
@@ -1263,10 +1275,11 @@ the `/persist/queue` markers, so the queue gets its own app
 A reload while the context is offline cannot fetch the shell, so the check closes
 the page and opens a new one - which is the stronger case, since nothing survives
 in memory. The app's API is same-origin, so there is no preflight to count; the
-mock counts POSTs exactly. Items 7-9 above (duplicate key, corrupted storage, two
-tabs) are covered by the unit suite instead, and
-`docs/verification.md` §20.3-20.4 records what the browser run does and does not
-prove.
+mock counts POSTs exactly. Item 9 above is covered too, and in its stronger form:
+the second tab takes the queue over when the first one closes, which is the
+handoff §14.1 now specifies. Items 7-8 (duplicate key, corrupted storage) remain
+unit-suite cases, and `docs/verification.md` §20.3-20.4 records what the browser
+run does and does not prove.
 
 ### 18.4 Static and compatibility checks
 
@@ -1367,11 +1380,14 @@ These are settled for the design. Implementation details follow.
    so a permanent failure stops later entries. Entries carry an optional
    `lane?: string`; it is unused in v1 and does not need a migration. When lanes
    ship, a failure blocks only its own lane.
-4. **Cross-tab.** Web Locks single owner is enough for v1. If Web Locks is
-   unavailable, durable persistence is disabled (`enabled: false`) rather than
+4. **Cross-tab.** Web Locks single owner is enough for v1, and ownership is
+   **handed over**: a non-owner queues a request behind the lock, so when the owner
+   goes away the waiting tab takes over, hydrates and replays (§14.1). If Web Locks
+   is unavailable, durable persistence is disabled (`enabled: false`) rather than
    assumed single-tab; `assumeSingleTab: true` is an explicit opt-in. Non-owner
-   writes are in-memory and can be lost on reload. Idempotency is the last line
-   of defence, and `owner` plus a dev warning are mandatory UI signals.
+   writes are in-memory and can be lost on reload, and nothing replays with no tab
+   open at all. Idempotency is the last line of defence, and `owner` plus a dev
+   warning are mandatory UI signals.
 5. **Optimistic restore.** Automatic restore stays out of v1.
    `persistence.onRestore(args, entry)` runs after hydration and the cache
    restore gate, before replay, so the application can reapply its own pending

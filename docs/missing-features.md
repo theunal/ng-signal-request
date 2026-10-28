@@ -3,9 +3,13 @@
 > **Scope.** This document inventories what `ng-signal-request@0.2.0` does not do, or
 > does only with a stated constraint. It is based on the shipped public surface and
 > the repository's own design and verification records. It is **not a roadmap**:
-> an item appearing here is not a promise that it will be implemented.
+> an item appearing here is not a promise that it will be implemented. Rows marked
+> **Partial** include work that exists only in the unreleased working tree; the
+> published 0.2.0 surface is unchanged.
 >
-> **Audited revision.** Repository `d2e6128`; npm release `0.2.0`.
+> **Audited revision.** Repository `d2e6128`; npm release `0.2.0`. Unreleased
+> durable-queue and background-replay work is recorded in §1.1-§1.3, §1.7, §2.15
+> and §9.
 >
 > **Sources.** `README.md` (especially "Known limitations", "Behavior notes and
 > limits", "Devtools" and "Bundle"), `docs/design-0.2.md`,
@@ -33,9 +37,9 @@ Impact is an assessment of the cost when the gap is hit:
 
 | #   | Area        | Gap                                                                             | Status              | Impact |
 | --- | ----------- | ------------------------------------------------------------------------------- | ------------------- | ------ |
-| 1   | Offline     | Mutation queue does not survive a reload                                        | Missing — by design | High   |
-| 2   | Offline     | No cross-tab queue coordination or background replay                            | Missing             | High   |
-| 3   | Offline     | Queue cannot be listed, inspected or manually resumed                           | Missing             | Medium |
+| 1   | Offline     | Durable mutation queue is opt-in, not the default                               | Partial             | High   |
+| 2   | Offline     | Cross-tab coordination is opt-in; background replay needs an app worker         | Partial             | High   |
+| 3   | Offline     | Default queue cannot be listed; the durable queue can                           | Partial             | Medium |
 | 4   | Offline     | `offlineFirst` is not available for mutations                                   | By design           | Low    |
 | 5   | Offline     | Connectivity means "an interface is up", not "the API is reachable"             | Partial             | Medium |
 | 6   | Cache       | One primary entry point; importing one factory retains the whole core           | Partial             | Medium |
@@ -51,7 +55,7 @@ Impact is an assessment of the cost when the gap is hit:
 | 16  | Query       | Query context is only `{ signal, params }`; no client/key/meta context          | Partial             | Low    |
 | 17  | Query       | Observable sources are first-emission-only; no streaming/live cache             | Missing — by design | Medium |
 | 18  | Query       | Cancellation depends on the source honouring `ctx.signal`                       | Partial             | Low    |
-| 19  | Mutations   | No mutation cache, history, global mutation state, or mutation `scope`          | Missing             | Medium |
+| 19  | Mutations   | No general mutation cache, history, global state, or mutation `scope`           | Partial             | Medium |
 | 20  | HTTP        | Non-GET `createRequest` is reactive and can fire on unrelated signal changes    | Partial             | High   |
 | 21  | HTTP        | `progress()` only works with the XHR backend                                    | Partial             | Medium |
 | 22  | HTTP        | `ctx.chain()` is unavailable on cached, lazy and debounced paths                | By design           | Low    |
@@ -89,60 +93,66 @@ Impact is an assessment of the cost when the gap is hit:
 | 54  | Docs        | A source comment shows `isMutating()` as a boolean, while it returns a signal   | Documentation debt  | Low    |
 | 55  | Docs        | Devtools size is stated as both 4.0 KB and 4.5 KB                               | Documentation debt  | Low    |
 
-> **Update, 2026-10-25 — working tree only, not in `0.2.0`.** Item 1 is
+> **Update, 2026-10-25 — durable queue (unreleased, not in `0.2.0`).** Item 1 is
 > implemented behind an opt-in provider (`ng-signal-request/persist/queue` plus the
 > `persistence` mutation option) and is covered by a real-browser e2e: IndexedDB,
 > Web Locks, a write that survives the page and replays exactly once, and a
-> permanent failure that stays durable. Item 2 is half closed by the same provider:
-> ownership is handed to a waiting tab when the owner goes away (§1.2), so delivery
-> outlives the owning tab; background replay with no tab open is still missing.
-> Item 3 follows from the same provider: the
-> queue exposes `entries`, `pendingCount`, `failedCount`, `retry`, `retryAll`,
-> `resume`, `remove` and `clear`. Neither is in the published release, and the
-> feature stays labelled experimental until the server-side idempotency contract is
-> proven, so the table above still describes `0.2.0` - this note is the only place
-> the inventory is updated ahead of a release. Measurements and limits:
-> `docs/verification.md` §20; design: `docs/design-offline-mutation-queue.md`.
+> permanent failure that stays durable. Item 2 is partially closed by the same
+> provider: ownership is handed to a waiting tab when the owner goes away (§1.2), so
+> delivery outlives the owning tab, and an opt-in `backgroundSync` tag plus an
+> application-owned service worker covers replay with no tab open. A non-owner's own
+> calls still stay in memory, and Background Sync is best-effort rather than a
+> library-owned wake-up guarantee. Item 3 follows from the same provider: the queue
+> exposes `entries`, `pendingCount`, `failedCount`, `retry`, `retryAll`, `pause`,
+> `resume`, `remove`, `clear`, `export` and `onEvent`, but only for persisted
+> mutations. The feature stays labelled experimental until the server-side
+> idempotency contract is proven. Measurements and limits:
+> `docs/verification.md` §20-§21; design: `docs/design-offline-mutation-queue.md`.
 
 ## 1. Offline and mutation delivery
 
-### 1.1 The mutation queue is in memory only
+### 1.1 The mutation queue is in memory by default
 
-**Status: Missing — by design. Impact: High.**
+**Status: Partial — opt-in. Impact: High.**
 
 With `networkMode: 'online'`, a mutation made while offline is queued, its
 optimistic write is applied, `paused()` is `true`, and `run()` stays pending until
-the connection returns. The queue lives in the handle's memory. A reload or a tab
-close loses both the queued call and the optimistic value the user saw.
+the connection returns. By default the queue lives in the handle's memory, so a
+reload or a tab close loses both the queued call and the optimistic value the user
+saw.
 
-This is a documented non-goal rather than an oversight: replaying a write after a
-reload needs a stable mutation identity (`mutationKey` is optional and not unique),
-a snapshot format with migrations, and an answer to whether a write that may already
-have reached the server should be replayed. A library cannot invent an
-at-least-once guarantee on behalf of the application.
+The durable queue closes that gap for mutations that opt in: `persistence: { key }`
+plus `providePersistedMutationQueue(...)` stores the entry before the first send and
+replays it after a reload. It is opt-in twice and still experimental, so an
+application that does not install it keeps the original in-memory behaviour. The
+server still has to honour the idempotency key; the library cannot invent an
+at-least-once guarantee on its own.
 
-**Workaround.** Disable the form while offline, keep an application-owned outbox in
-IndexedDB, or use a service worker with Background Sync. The library deliberately
-does not provide any of those.
+**Workaround.** Opt into the durable queue (`ng-signal-request/persist/queue`), or
+keep an application-owned outbox. Background replay with no tab open is covered by
+§1.7.
 
-**Evidence:** `README.md` "Known limitations" (offline queue); `docs/design-0.2.md`
-§Phase 2 (`Persisting the mutation queue across a reload is a non-goal`).
+**Evidence:** `README.md` "A queue that survives a reload" and "Background replay";
+`docs/design-offline-mutation-queue.md`; `docs/verification.md` §20-§21.
 
-### 1.2 No cross-tab queue coordination or background replay
+### 1.2 Cross-tab coordination and background replay are opt-in
 
-**Status: Missing. Impact: High.**
+**Status: Partial. Impact: High.**
 
-Each tab has its own in-memory queue. There is no BroadcastChannel, no storage-event
-listener, and no service-worker handoff. Two tabs can therefore replay the same
-logical work independently, and closing the tab that owns the queue cancels the
-delivery with no other owner taking over.
+The default in-memory queue has no cross-tab identity. Once the durable queue is
+opted in, Web Locks elect a single owner and hand ownership to a waiting tab, so
+two tabs do not replay the same logical work independently. A non-owner's own
+calls still stay in memory. Background replay with no tab open is now an opt-in
+integration, not a missing primitive.
 
-**Workaround.** Use one tab as the writer, a SharedWorker, or an application-level
-service-worker queue. The library has no queue identity to coordinate on, so this
-cannot be added by the consumer without its own outbox.
+**Workaround.** Use `providePersistedMutationQueue` for cross-tab ownership. For
+delivery with no tab open, opt into `backgroundSync` and supply an
+application-owned service worker that calls `drainMutationQueue` from
+`ng-signal-request/persist/queue/sw`. A non-owner tab's own writes still need an
+application-level outbox or a future per-entry claim.
 
-**Evidence:** queue ownership is per handle (`create-mutation.ts`); the persistence
-module listens only to `pagehide` and `visibilitychange`, not to `storage` or a
+**Evidence:** queue ownership is per handle (`create-mutation.ts`); the page queue
+listens only to `pagehide` and `visibilitychange`, not to `storage` or a
 BroadcastChannel (`persist/persist.ts`).
 
 > **Update, 2026-10-25 — working tree only, not in `0.2.0`.** The cross-tab half is
@@ -151,27 +161,45 @@ BroadcastChannel (`persist/persist.ts`).
 > so when the owner tab closes or crashes the waiting tab becomes the owner,
 > hydrates the stored queue and replays it. Delivery therefore outlives the tab
 > that accepted the write, which was the high-impact half of this item; it is
-> asserted with two real tabs in `e2e/queue.spec.ts`. The background half is still
-> missing and stays a non-goal: with no tab open nothing replays, and a non-owner's
-> own calls stay in memory. Both need an application-level service worker (or a
-> per-entry claim), which the library does not provide. See
-> `docs/design-offline-mutation-queue.md` §14 and `docs/verification.md` §20.3.
+> asserted with two real tabs in `e2e/queue.spec.ts`. A non-owner's own calls still
+> stay in memory. See `docs/design-offline-mutation-queue.md` §14 and
+> `docs/verification.md` §20.3.
 
-### 1.3 The queue cannot be listed or manually resumed
+> **Update, 2026-10-28 — background replay is an opt-in integration.** The page
+> registers a Background Sync tag through
+> `providePersistedMutationQueue({ backgroundSync: true })`; the library never
+> registers a service worker. The application's worker imports
+> `ng-signal-request/persist/queue/sw`, supplies one replay function per
+> `persistence.key`, and gets the same snapshot validation, FIFO order, Web Lock,
+> stored idempotency key and retry/backoff bookkeeping as the page. A live page
+> owner wins: the worker requests the lock with `ifAvailable` and returns
+> `blocked: 'locked'` instead of racing it. With no tab open the worker drains. The
+> worker does not run optimistic writes, `onRestore`, `invalidates` or settle hooks;
+> the page reconciles when it opens. Background Sync remains best-effort and
+> browser-controlled, so the guarantee is at-least-once storage, not a wake-up. See
+> `docs/plan-item-2-background-replay.md` and `docs/verification.md` §21.
 
-**Status: Missing. Impact: Medium.**
+### 1.3 The default queue cannot be listed or manually resumed
+
+**Status: Partial. Impact: Medium.**
 
 `MutationRegistry` exposes counts (`isMutating`, `mutatingCount`, `isPaused`) and
-per-key counts, but not the queued calls themselves. There is no public
-`resumePausedMutations()`, no list of pending mutation arguments, and no per-entry
-callback for "this one is about to replay". A UI that wants to show _which_ writes
-are pending has to keep references to every mutation handle itself.
+per-key counts, but not the queued calls themselves. The default in-memory queue
+still has no list of pending mutation arguments and no per-entry callback for "this
+one is about to replay".
 
-**Workaround.** Hold the mutation handles, or maintain an application-level outbox
-that mirrors each `run()`. `isMutating()` is enough for a global "saving…" badge,
-not for a pending-writes list.
+The opt-in durable queue service (`PersistedMutationQueue`) closes part of this:
+`entries()`, `pendingCount()`, `failedCount()`, `retry(id)`, `retryAll()`,
+`pause()`, `resume()`, `remove(id)`, `clear()`, `export()` and
+`onEvent(listener)`. That is enough for a pending-writes UI over persisted
+mutations. There is still no global list of non-persisted in-flight calls.
 
-**Evidence:** `projects/signal-request/src/lib/cache/mutation-registry.ts`;
+**Workaround.** Use `PersistedMutationQueue` for a pending-writes UI on durable
+mutations; hold the handles for non-persisted calls. `isMutating()` is enough for a
+global "saving…" badge, not for a pending-writes list.
+
+**Evidence:** `projects/signal-request/persist/queue/queue.ts`; `README.md`
+"A queue that survives a reload"; `src/lib/cache/mutation-registry.ts`;
 `QueryClient.isMutating()` / `mutatingCount()` in `query-client.ts`.
 
 ### 1.4 `offlineFirst` is not a mutation mode
@@ -224,17 +252,21 @@ perform an explicit health check before replay.
 **Evidence:** `docs/design-0.2.md` Phase 2, "A replay that fails because the
 connection dropped again goes back to the queue"; `README.md` `status: 0` limitation.
 
-### 1.7 No service-worker or background-sync integration
+### 1.7 No service-worker registration or worker lifecycle
 
-**Status: Missing — by design. Impact: Medium.**
+**Status: Partial — by design. Impact: Medium.**
 
-The README recommends a service worker's Background Sync as one alternative to the
-in-memory queue, but the library does not register one, provide a plugin, or expose
-a queue format for one. Background delivery is entirely the application's
-responsibility.
+The library still does not register a service worker, choose its scope, or manage
+its updates; that lifecycle belongs to the application. It now does expose the
+worker-side half: the dependency-free `ng-signal-request/persist/queue/sw` entry
+point (`drainMutationQueue`, `indexedDbQueueStorage`, `registerMutationQueueSync`)
+and the page-side `backgroundSync` option. An application worker therefore drains
+the same snapshot without reimplementing its format, lock or retry rules. Delivery
+is still the application's responsibility because Background Sync is best-effort
+and the worker must supply the request builder.
 
-**Evidence:** `README.md` offline queue limitation; no service-worker entry point in
-`projects/signal-request/package.json`.
+**Evidence:** `README.md` "Background replay"; `projects/signal-request/persist/queue/sw/`;
+the `./persist/queue/sw` export in the built `package.json`.
 
 ## 2. Cache, queries and package shape
 
@@ -477,24 +509,29 @@ be aborted will still burn resources after cancellation.
 **Evidence:** `types.ts` `QueryContext.signal`; `docs/design-0.2.md` "Abort
 lifecycle".
 
-### 2.15 No mutation cache, history, global mutation state or `scope`
+### 2.15 No general mutation cache, history, global mutation state or `scope`
 
-**Status: Missing. Impact: Medium.**
+**Status: Partial. Impact: Medium.**
 
 `MutationRegistry` keeps counts, not mutations. There is no public mutation cache,
 no list of past or in-flight mutations, no `useMutationState` equivalent, and no
 `setMutationDefaults`. `mutationKey` only groups counts for `isMutating`, it does
 not identify, deduplicate or persist a mutation.
 
+The opt-in durable queue (§1.3) keeps persisted mutation entries, events and
+per-entry control, but it is not a general mutation cache: non-persisted calls are
+still invisible, and there is no shared state read like `useMutationState`.
+
 The per-handle `concurrency` option (`parallel` / `exhaust` / `switch`) controls
 calls of **one** mutation. TanStack's mutation `scope` serialises mutations that
 share an id across different handles; there is no equivalent here.
 
 **Workaround.** Keep handles or an application-level registry. Use `mutationKey`
-plus `isMutating` for a global indicator, not for storing state.
+plus `isMutating` for a global indicator, not for storing state. For persisted
+writes, use `PersistedMutationQueue.entries()`.
 
 **Evidence:** `cache/mutation-registry.ts`; `types.ts` `MutationOptions` /
-`SignalMutation`.
+`SignalMutation`; `persist/queue/queue.ts`.
 
 ## 3. HTTP behaviour
 
@@ -993,29 +1030,29 @@ This table is a reference, not a backlog. Several items are deliberate differenc
 several are genuinely absent. TanStack Query is the mature reference implementation
 in this category, and the README says so.
 
-| TanStack Query feature                                       | Here                                                      | Classification         |
-| ------------------------------------------------------------ | --------------------------------------------------------- | ---------------------- |
-| Persisted offline mutation queue                             | In-memory queue only                                      | Missing — by design    |
-| Mutation `scope` across handles                              | Per-handle `concurrency` only                             | Missing                |
-| Mutation cache / `useMutationState` / global mutation state  | Counts only (`isMutating`, `mutatingCount`)               | Missing                |
-| Devtools timeline, route filter, persisted settings, plugins | Compact panel with history and actions                    | Missing — by design    |
-| Typed `queryOptions` helper                                  | `QueryKeyFactory` + plain options                         | Missing                |
-| `placeholderData` callback                                   | `initialValue` / `keepPreviousValue` only                 | Missing                |
-| `initialData` as a function                                  | Static `initialValue`; `seed()` is imperative             | Partial                |
-| `select` option                                              | `handle.select()` method                                  | By design              |
-| `enabled: false`                                             | `params` set to `undefined`                               | By design              |
-| `queryClient.ensureQueryData` / `fetchQuery`                 | Hold a handle and call `run()`                            | Missing                |
-| `queryClient.prefetchQuery` by key                           | `prefetch(handles)` in `/persist`                         | Partial                |
-| `queryClient.getQueryState` / observers                      | `QueryCache.peek()` / `CacheEntry` diagnostics            | Partial                |
-| `queryClient.setQueryDefaults` / `resetQueries`              | Global `provideSignalRequest` / `remove` / `clear`        | Missing                |
-| `resumePausedMutations`                                      | No public queue control                                   | Missing                |
-| `onlineManager.setEventListener`                             | Replace the `OnlineManager` provider; no helper           | Missing                |
-| `injectQueries` / dynamic query arrays                       | `combine` and `createRequests`                            | Partial                |
-| Infinite query with one list-level cache entry               | One cache entry per page                                  | Intentional difference |
-| `persistQueryClient` storage/plugin breadth                  | `/persist` with `localStorage`-shape + `indexedDbStorage` | Partial                |
-| Streaming SSR / live query values                            | Not supported; first emission only                        | Missing — by design    |
-| Normalized/entity cache                                      | Neither library provides one                              | Not a parity gap       |
-| Multi-framework adapters                                     | Angular only                                              | By design              |
+| TanStack Query feature                                       | Here                                                       | Classification         |
+| ------------------------------------------------------------ | ---------------------------------------------------------- | ---------------------- |
+| Persisted offline mutation queue                             | Opt-in `/persist/queue`; in-memory by default              | Partial                |
+| Mutation `scope` across handles                              | Per-handle `concurrency` only                              | Missing                |
+| Mutation cache / `useMutationState` / global mutation state  | Counts only; durable queue adds `entries()` and events     | Partial                |
+| Devtools timeline, route filter, persisted settings, plugins | Compact panel with history and actions                     | Missing — by design    |
+| Typed `queryOptions` helper                                  | `QueryKeyFactory` + plain options                          | Missing                |
+| `placeholderData` callback                                   | `initialValue` / `keepPreviousValue` only                  | Missing                |
+| `initialData` as a function                                  | Static `initialValue`; `seed()` is imperative              | Partial                |
+| `select` option                                              | `handle.select()` method                                   | By design              |
+| `enabled: false`                                             | `params` set to `undefined`                                | By design              |
+| `queryClient.ensureQueryData` / `fetchQuery`                 | Hold a handle and call `run()`                             | Missing                |
+| `queryClient.prefetchQuery` by key                           | `prefetch(handles)` in `/persist`                          | Partial                |
+| `queryClient.getQueryState` / observers                      | `QueryCache.peek()` / `CacheEntry` diagnostics             | Partial                |
+| `queryClient.setQueryDefaults` / `resetQueries`              | Global `provideSignalRequest` / `remove` / `clear`         | Missing                |
+| `resumePausedMutations`                                      | `pause()` / `resume()` / `retryAll()` on the durable queue | Partial                |
+| `onlineManager.setEventListener`                             | Replace the `OnlineManager` provider; no helper            | Missing                |
+| `injectQueries` / dynamic query arrays                       | `combine` and `createRequests`                             | Partial                |
+| Infinite query with one list-level cache entry               | One cache entry per page                                   | Intentional difference |
+| `persistQueryClient` storage/plugin breadth                  | `/persist` with `localStorage`-shape + `indexedDbStorage`  | Partial                |
+| Streaming SSR / live query values                            | Not supported; first emission only                         | Missing — by design    |
+| Normalized/entity cache                                      | Neither library provides one                               | Not a parity gap       |
+| Multi-framework adapters                                     | Angular only                                               | By design              |
 
 ## 10. Documentation debt
 
@@ -1086,14 +1123,17 @@ claimed" tone of the surrounding section.
 
 ## 11. What this means in practice
 
-- **The only intentional data-loss path is the offline queue on reload.** The cache
-  itself is not silently dropping live entries; `maxEntries` refuses to evict
-  subscribed or in-flight entries.
+- **The only intentional data-loss path is the default offline queue on reload.** The
+  cache itself is not silently dropping live entries; `maxEntries` refuses to evict
+  subscribed or in-flight entries. Opting into the durable queue removes that path
+  for persisted mutations.
 - **The highest-risk HTTP footgun is a non-lazy non-GET `createRequest`.** It is a
   query by construction, so it can re-fire reactively. Use `createMutation` or
   `lazy: true`.
-- **The largest missing product feature is a durable offline outbox.** It is a
-  deliberate non-goal, not a half-finished queue.
+- **The durable offline outbox exists but is opt-in and unreleased.** It is a
+  deliberate, twice-opted integration (`persistence` plus the provider), not a
+  default. The remaining gaps are the server-side idempotency contract and a
+  non-owner tab's own writes.
 - **The largest packaging gap is per-factory tree-shaking.** The primary entry
   retains the cached engine even for an uncached request.
 - **The most visible quality gap is e2e breadth.** The offline path is tested in a
@@ -1107,8 +1147,10 @@ claimed" tone of the surrounding section.
 This is not a release commitment and does not change the current release state. A
 sensible order, based only on the impact above:
 
-1. **Persisted mutation queue / outbox** — only if the product needs offline writes
-   to survive a reload; it requires an idempotency and migration design.
+1. **Durable queue rollout** — the implementation and background replay already
+   exist in the working tree behind opt-in entry points. Finishing the item means
+   proving the server-side idempotency contract, covering a non-owner tab's own
+   writes, and shipping it without changing the default in-memory queue.
 2. **Per-factory tree-shaking or a cached subpath** — a public-API decision; it
    improves every application that uses only one factory.
 3. **E2E breadth** — query, devtools and persistence; the offline path already has
@@ -1136,6 +1178,10 @@ sensible order, based only on the impact above:
   mutation cache.
 - `projects/signal-request/persist/persist.ts` — snapshot storage, restore gate,
   IndexedDB, prefetch.
+- `projects/signal-request/persist/queue/queue.ts` and `persist/queue/sw/sw.ts` —
+  durable mutation queue and application-owned background replay.
+- `docs/design-offline-mutation-queue.md` and `docs/verification.md` §20-§21 —
+  durable-queue and background-replay design and measurements.
 - `e2e/offline.spec.ts` and `e2e/playwright.config.ts` — the current browser test
   boundary.
 - `projects/signal-request/package.json` — peer range, runtime dependencies and

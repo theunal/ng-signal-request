@@ -44,8 +44,18 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   - Ownership is handed over. A non-owner tab queues a request behind the Web Lock,
     so when the owner tab closes the next tab becomes the owner, hydrates the
     stored queue and replays it - delivery outlives the tab that accepted the
-    write. With no tab open nothing replays: a service worker is still the answer
-    for that, and the library does not register one.
+    write. A non-owner tab's own calls are still memory-only.
+  - **Background replay through an application-owned service worker, opt-in.**
+    `providePersistedMutationQueue({ backgroundSync: true })` registers a Background
+    Sync tag; the new dependency-free `ng-signal-request/persist/queue/sw` entry
+    point exposes `drainMutationQueue`, `indexedDbQueueStorage`,
+    `registerMutationQueueSync`, `MUTATION_QUEUE_SYNC_TAG` and the handler/result
+    types. The worker reads the same snapshot, validates it, replays FIFO, reuses the
+    stored idempotency key, applies the same retry/backoff and `stopOnFailure` rules,
+    and removes only entries it sent. It asks for the page's Web Lock with
+    `ifAvailable`, so a live page owner wins and the worker returns
+    `blocked: 'locked'`; a corrupt or mismatched snapshot is never overwritten. The
+    library still does not register a worker, and Background Sync is best-effort.
   - The queue is a separate entry point so an application that only persists the
     read cache does not pay for it. It is labelled experimental until the
     server-side idempotency contract has been proven in practice.

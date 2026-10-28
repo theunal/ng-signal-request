@@ -12,7 +12,7 @@ triggering with `run()`, method variants (`createRequest.post`,
 `baseUrl` / `:path` parameters, reactive global headers, normalized errors, a
 `key`-based shared cache with invalidation, mutations with optimistic writes, a
 `select()` projection, `combine` / `createRequests`, and separate `/testing`,
-`/devtools`, `/persist` and `/persist/queue` entry points.
+`/devtools`, `/persist`, `/persist/queue` and `/persist/queue/sw` entry points.
 
 ```ts
 import {
@@ -1248,11 +1248,12 @@ Replaying in two tabs at once would send the same write twice, so the queue take
 that is; a non-owner still runs mutations in memory but does not persist or replay
 them. Ownership is handed over: a non-owner waits in the browser's lock queue, so
 when the owner tab is closed the next tab becomes the owner, hydrates the stored
-queue and replays it. Delivery therefore outlives the tab that accepted the write -
-but not all tabs: with no tab open nothing replays, and a service worker with
-Background Sync is still the answer for that. Without the Web Locks API durable
-persistence is disabled rather than assumed safe; `assumeSingleTab: true` is the
-explicit opt-in for an environment that really has one tab.
+queue and replays it. Delivery therefore outlives the tab that accepted the write.
+With no tab open nothing replays by default; opt into
+[background replay](#background-replay) with an application-owned service worker
+if that gap matters. Without the Web Locks API durable persistence is disabled
+rather than assumed safe; `assumeSingleTab: true` is the explicit opt-in for an
+environment that really has one tab.
 
 `destroy()` rejects a **current-page** queued promise with `MutationDetachedError`
 instead of pretending the write failed. The durable entry stays, so the next page
@@ -1268,6 +1269,85 @@ The queue service itself exposes `entries()`, `pendingCount()`, `failedCount()`,
 `isReplaying()`, `needsAuth()`, `owner()`, `enabled()`, `retry(id)`, `retryAll()`,
 `pause()`, `resume()`, `remove(id)`, `clear()`, `export()` and `onEvent(listener)`.
 `providePersistedMutationQueue` is part of the **experimental** 0.4.0 surface.
+
+#### Background replay
+
+A durable entry still needs a tab to replay it. To close that gap, the queue can
+register a Background Sync tag on a service worker **the application owns**:
+
+```ts
+// app.config.ts
+providePersistedMutationQueue({
+  eager: [TodoStore],
+  backgroundSync: true, // or { tag: 'todos-sync' }
+});
+```
+
+The library never registers a service worker and never imports the worker code
+from the page. `backgroundSync` only calls `registration.sync.register(tag)` once
+the queue is initialized, after an enqueue, and after a retryable failure. If the
+browser has no `ServiceWorker` or `SyncManager`, it warns once in development and
+leaves the queue enabled - background delivery is an extra, not a durability
+requirement.
+
+The worker imports the separate, dependency-free entry point and supplies one
+plain replay function per `persistence.key`:
+
+```ts
+// public/sw.ts - the application's own service worker
+import {
+  MUTATION_QUEUE_SYNC_TAG,
+  drainMutationQueue,
+  indexedDbQueueStorage,
+} from 'ng-signal-request/persist/queue/sw';
+
+self.addEventListener('sync', (event) => {
+  if (event.tag !== MUTATION_QUEUE_SYNC_TAG) return;
+  event.waitUntil(
+    drainMutationQueue({
+      storage: indexedDbQueueStorage(),
+      handlers: {
+        'todos.add': async (args, ctx) => {
+          const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+          if (ctx.idempotencyHeader !== false) {
+            headers[ctx.idempotencyHeader] = ctx.idempotencyKey;
+          }
+          const response = await fetch('/todos', {
+            method: 'POST',
+            headers,
+            body: JSON.stringify(args),
+          });
+          if (!response.ok) {
+            throw Object.assign(new Error(`HTTP ${response.status}`), {
+              status: response.status,
+            });
+          }
+        },
+      },
+    }),
+  );
+});
+```
+
+`drainMutationQueue` reads the same snapshot the page writes, validates it
+without trusting it, replays in `seq` order, reuses the stored idempotency key,
+removes only entries it actually sent, and applies the same retry/backoff and
+`stopOnFailure` rules as the page. A corrupt, future-version or wrong-`buster`
+snapshot is reported as `blocked` and left byte-for-byte untouched.
+
+The worker and the page share the same Web Lock. The worker asks for it with
+`ifAvailable: true`: if a page owns the queue, the drain returns
+`blocked: 'locked'` instead of waiting, because the page can also run
+`invalidates`, `onSuccess` and its handle signals. With no page open the lock is
+free and the worker drains. A `401`/`403` stops the drain and leaves the entry
+pending; a permanent failure marks it `failed`; a retryable one updates
+`attempts` / `nextAttemptAt` and lets the next sync event continue.
+
+The worker does not run `onRestore`, optimistic writes, `invalidates` or settle
+hooks - it has no cache or component tree. The page reconciles when it next
+opens. Background Sync itself is best-effort and browser-controlled, so the
+library guarantees at-least-once storage, not a wake-up. A non-owner tab's own
+calls are still memory-only; that remains a separate follow-up.
 
 ## Auth: reactive headers + a refresh interceptor
 
@@ -1737,23 +1817,23 @@ and Angular. Adopting it is never a mistake, and if you need what is in the list
 below, it is the one to use. The question this table answers is narrower — what
 you give up when you stay inside Angular.
 
-| Concern              | Here                                                                                                                                                         | TanStack Query (Angular)                                                             |
-| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------ |
-| Runtime dependencies | `tslib` and the Angular peers only                                                                                                                           | `@tanstack/query-core` plus the adapter                                              |
-| Describing a request | The request _is_ the options — `url`, `params`, `path`, `headers`, `reportProgress` are routed for you — or, with `createQuery`, a function source           | A `queryFn` you write, plus a `queryKey`                                             |
-| Non-HTTP sources     | `createQuery`: IndexedDB, storage, GraphQL, a WASM call, any promise or observable, on the same cache and handle as an HTTP request                          | `queryFn`, which is the only way a query works                                       |
-| Uncached requests    | First class: no `key` means Angular's `httpResource`, its own lifetime, no cache entry                                                                       | Not a concept — every query has a key and a cache entry                              |
-| Infinite queries     | `createInfiniteRequest`, **one entry per page**, so prefix invalidation and cross-component sharing work on a feed                                           | `injectInfiniteQuery`, one entry per list                                            |
-| `select`             | A **method**: `.select(fn, { equal })`, so the handle's own `response()` is untouched                                                                        | An option on the query observer                                                      |
-| Persistence          | `/persist`: sync or async storage, a codec, `maxAge`, key filters, `buster`/`migrate`, and a `TransferState` path for SSR                                    | `persistQueryClient`: async storages, `maxAge`, busters, migrations                  |
-| Devtools             | `/devtools`, 4.0 KB gzip, per-entry preview, timings, observers, retries and actions, imported in dev only                                                   | A mature panel with a query explorer, timeline and plugins                           |
-| Bounding the cache   | `maxEntries`, LRU over idle entries only, with a per-request value that can tighten it                                                                       | `gcTime` per query, plus explicit removal                                            |
-| Invalidating by key  | `invalidates: [['users']]` refreshes every open `['users', …]` query                                                                                         | `invalidateQueries({ queryKey })`                                                    |
-| SSR                  | `providedIn: 'root'` already means one cache per render, with `TransferState` hydration                                                                      | A `QueryClient` you create per request in the server handler                         |
-| Errors               | A normalized `RequestError` view with per-kind predicates (`http()`, `timeout()`, `network()`, …) and a `message` getter, so templates do not need `@switch` | `Error`, narrowed by hand                                                            |
-| Timeouts             | `timeout` per request, classified as its own kind, and `retryTimeouts: false` to stop a timeout from being retried as a `status: 0` failure                  | No built-in timeout; abandoned by composing an `AbortSignal`                         |
-| Offline              | `networkMode` on queries and mutations, a paused state, and an opt-in durable mutation queue (`/persist/queue`) that survives a reload                       | `onlineManager` + `networkMode`, paused mutations, and persisted mutation resumption |
-| Framework scope      | Angular 22                                                                                                                                                   | React, Vue, Svelte, Solid, Angular                                                   |
+| Concern              | Here                                                                                                                                                                                           | TanStack Query (Angular)                                                             |
+| -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| Runtime dependencies | `tslib` and the Angular peers only                                                                                                                                                             | `@tanstack/query-core` plus the adapter                                              |
+| Describing a request | The request _is_ the options — `url`, `params`, `path`, `headers`, `reportProgress` are routed for you — or, with `createQuery`, a function source                                             | A `queryFn` you write, plus a `queryKey`                                             |
+| Non-HTTP sources     | `createQuery`: IndexedDB, storage, GraphQL, a WASM call, any promise or observable, on the same cache and handle as an HTTP request                                                            | `queryFn`, which is the only way a query works                                       |
+| Uncached requests    | First class: no `key` means Angular's `httpResource`, its own lifetime, no cache entry                                                                                                         | Not a concept — every query has a key and a cache entry                              |
+| Infinite queries     | `createInfiniteRequest`, **one entry per page**, so prefix invalidation and cross-component sharing work on a feed                                                                             | `injectInfiniteQuery`, one entry per list                                            |
+| `select`             | A **method**: `.select(fn, { equal })`, so the handle's own `response()` is untouched                                                                                                          | An option on the query observer                                                      |
+| Persistence          | `/persist`: sync or async storage, a codec, `maxAge`, key filters, `buster`/`migrate`, and a `TransferState` path for SSR                                                                      | `persistQueryClient`: async storages, `maxAge`, busters, migrations                  |
+| Devtools             | `/devtools`, 4.0 KB gzip, per-entry preview, timings, observers, retries and actions, imported in dev only                                                                                     | A mature panel with a query explorer, timeline and plugins                           |
+| Bounding the cache   | `maxEntries`, LRU over idle entries only, with a per-request value that can tighten it                                                                                                         | `gcTime` per query, plus explicit removal                                            |
+| Invalidating by key  | `invalidates: [['users']]` refreshes every open `['users', …]` query                                                                                                                           | `invalidateQueries({ queryKey })`                                                    |
+| SSR                  | `providedIn: 'root'` already means one cache per render, with `TransferState` hydration                                                                                                        | A `QueryClient` you create per request in the server handler                         |
+| Errors               | A normalized `RequestError` view with per-kind predicates (`http()`, `timeout()`, `network()`, …) and a `message` getter, so templates do not need `@switch`                                   | `Error`, narrowed by hand                                                            |
+| Timeouts             | `timeout` per request, classified as its own kind, and `retryTimeouts: false` to stop a timeout from being retried as a `status: 0` failure                                                    | No built-in timeout; abandoned by composing an `AbortSignal`                         |
+| Offline              | `networkMode` on queries and mutations, a paused state, and an opt-in durable mutation queue (`/persist/queue`) that survives a reload and can replay through Background Sync with no tab open | `onlineManager` + `networkMode`, paused mutations, and persisted mutation resumption |
+| Framework scope      | Angular 22                                                                                                                                                                                     | React, Vue, Svelte, Solid, Angular                                                   |
 
 Where TanStack Query is simply ahead, with no clever reframing:
 
@@ -1763,9 +1843,10 @@ Where TanStack Query is simply ahead, with no clever reframing:
   path and cover more storage shapes; here it is opt-in (`persistence` plus
   `providePersistedMutationQueue`), experimental until the server-side idempotency
   contract is proven, and single-owner through the Web Locks API - ownership is
-  handed to a waiting tab when the owner goes away, but there is no background
-  replay: a service worker with Background Sync is still the answer for delivery
-  with no tab open.
+  handed to a waiting tab when the owner goes away, and an opt-in
+  `backgroundSync` tag plus an application-owned service worker covers delivery
+  with no tab open. Background Sync is best-effort and needs that worker; it is
+  not a wake-up guarantee.
 - **Persistence breadth.** `/persist` has `localStorage`-shaped storages plus
   `indexedDbStorage()`, with `maxAge`, `buster`, `migrate` and key/state filters.
   `persistQueryClient` still has more storage adapters, and a broader
@@ -1914,7 +1995,9 @@ report and one you read here is a design decision.
   they live in the handle's memory, and a reload loses them. Even opted in: only
   the tab holding the Web Lock persists and replays, and ownership moves to a
   waiting tab only when the owner goes away (`assumeSingleTab` exists for
-  environments without Web Locks); nothing replays with no tab open; stored args
+  environments without Web Locks); replay with no tab open needs the opt-in
+  Background Sync integration and an application-owned service worker, and is
+  best-effort rather than guaranteed; stored args
   must be codec-serializable; auth
   headers, closures and `onMutate` context are not stored, so replay gets
   `context: undefined`; and the library cannot verify that the server honours the
@@ -2080,6 +2163,13 @@ report and one you read here is a design decision.
 
 The service signals and methods are listed in
 [A queue that survives a reload](#a-queue-that-survives-a-reload).
+
+### `ng-signal-request/persist/queue/sw`
+
+`MUTATION_QUEUE_SYNC_TAG` · `MUTATION_QUEUE_SYNC_VERSION` · `drainMutationQueue` · `registerMutationQueueSync` · `indexedDbQueueStorage` · `MutationQueueSyncOptions` · `MutationQueueSyncHandler` · `MutationQueueSyncContext` · `MutationQueueSyncStorage` · `MutationQueueSyncEvent` · `MutationQueueSyncBlockedReason` · `MutationQueueSyncResult` · `MutationQueueSyncRetryOptions` · `MutationQueueSyncRegistrationOptions` · `IndexedDbQueueStorageOptions`
+
+This entry point has no Angular runtime import. The worker example and the
+lock/retry rules are in [Background replay](#background-replay).
 
 ## Devtools
 
@@ -2249,7 +2339,8 @@ A second fixture does the same for the **new** surface rather than the old one:
 `pnpm check:types-queue` compiles [`compat/queue/usage.ts`](compat/queue/usage.ts)
 against `dist/signal-request`, covering `persistence`, `onRestore`,
 `isAlreadyApplied`, the optional final `meta` argument on settle hooks, the queue
-service and its events. `concurrency: 'switch'` + `persistence` is rejected at
+service and its events, and the worker helper's handler/storage contract.
+`concurrency: 'switch'` + `persistence` is rejected at
 runtime rather than by the type system (a union of option shapes would widen
 inference for every existing call); the fixture says so instead of hiding it
 behind an `@ts-expect-error` the compiler cannot satisfy.
@@ -2261,27 +2352,29 @@ behind an `@ts-expect-error` the compiler cannot satisfy.
 
 ## Bundle
 
-The library ships as five entry points, and the split is load-bearing rather
+The library ships as six entry points, and the split is load-bearing rather
 than cosmetic. Sizes are the gzipped ESM bundles from a production build:
 
-| Entry point                       | Size        | When it is in an application |
-| --------------------------------- | ----------- | ---------------------------- |
-| `ng-signal-request`               | **23.0 KB** | always                       |
-| `ng-signal-request/devtools`      | 4.5 KB      | only if imported             |
-| `ng-signal-request/persist`       | 3.7 KB      | only if imported             |
-| `ng-signal-request/persist/queue` | 7.2 KB      | only if imported             |
-| `ng-signal-request/testing`       | 0.8 KB      | only in tests                |
+| Entry point                          | Size        | When it is in an application     |
+| ------------------------------------ | ----------- | -------------------------------- |
+| `ng-signal-request`                  | **23.0 KB** | always                           |
+| `ng-signal-request/devtools`         | 4.5 KB      | only if imported                 |
+| `ng-signal-request/persist`          | 3.7 KB      | only if imported                 |
+| `ng-signal-request/persist/queue`    | 7.2 KB      | only if imported                 |
+| `ng-signal-request/persist/queue/sw` | 3.8 KB      | only in the application's worker |
+| `ng-signal-request/testing`          | 0.8 KB      | only in tests                    |
 
-The primary entry point has no imports from the other four and `sideEffects` is
+The primary entry point has no imports from the other five and `sideEffects` is
 `false`, so an application that never writes those imports never links the code.
 `pnpm check:dist` asserts this against a real production build: the demo is
 compiled, and the output is required to contain core strings and none of the
-`/devtools`, `/persist` or `/persist/queue` ones. It also scans each entry point's
-own bundle for the other entry points' strings, so a cross-entry `import` is
-caught even when nothing in the demo exercises the pair. (`/persist/queue`
-legitimately imports `/persist` for `indexedDbStorage`, so that pair is the one
-documented exception.) The reason to test it rather than trust it is that
-"separate entry point" is an intention and a bundle scan is a fact.
+`/devtools`, `/persist`, `/persist/queue` or `/persist/queue/sw` ones. It also
+scans each entry point's own bundle for the other entry points' strings, so a
+cross-entry `import` is caught even when nothing in the demo exercises the pair.
+(`/persist/queue` legitimately imports `/persist` for `indexedDbStorage`, so that
+pair is the one documented exception; the worker entry point imports neither.)
+The reason to test it rather than trust it is that "separate entry point" is an
+intention and a bundle scan is a fact.
 
 Those numbers are what ships. What an application **retains** is a different
 measurement, and until 0.2.0 it was never taken. `projects/probe` contains five
@@ -2309,7 +2402,8 @@ purpose.
 Budgets, so growth is a decision rather than a surprise: the primary entry point
 is not allowed past **23.5 KB gzip** (raised from 21.5 KB by the durable queue's
 `createMutation` integration, which adds enqueue/replay branching and idempotency
-handling to core), and any secondary entry point past **15 KB gzip**. The probe
+handling to core), and any secondary entry point past **15 KB gzip** - the
+dependency-free worker helper has its own tighter **4.5 KB** budget. The probe
 release budgets are `request` and `keyed` 22.5 KB over the control, `full`
 26.5 KB (raised from 24 KB by the same core growth), and `devtools` 32.5 KB;
 `check:dist` now also enforces tighter regression limits of

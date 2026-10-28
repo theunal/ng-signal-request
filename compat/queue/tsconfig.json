@@ -8,7 +8,7 @@
    * before this, so `dist` is always the current tree.
    *
    * The `paths` map stands in for `node_modules/ng-signal-request`: a real install resolves the
-   * five subpath exports to these same files.
+   * six subpath exports to these same files.
    */
   "compilerOptions": {
     "strict": true,
@@ -25,6 +25,7 @@
       "ng-signal-request": ["../../dist/signal-request/types/ng-signal-request.d.ts"],
       "ng-signal-request/persist": ["../../dist/signal-request/types/ng-signal-request-persist.d.ts"],
       "ng-signal-request/persist/queue": ["../../dist/signal-request/types/ng-signal-request-persist-queue.d.ts"],
+      "ng-signal-request/persist/queue/sw": ["../../dist/signal-request/types/ng-signal-request-persist-queue-sw.d.ts"],
       "ng-signal-request/devtools": ["../../dist/signal-request/types/ng-signal-request-devtools.d.ts"],
       "ng-signal-request/testing": ["../../dist/signal-request/types/ng-signal-request-testing.d.ts"]
     }

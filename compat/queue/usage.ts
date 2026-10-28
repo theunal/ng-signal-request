@@ -42,6 +42,19 @@ import {
   type PersistedMutationQueueRetryOptions,
 } from 'ng-signal-request/persist/queue';
 import type { MutationQueueStorage } from 'ng-signal-request/persist/queue';
+import {
+  MUTATION_QUEUE_SYNC_TAG,
+  MUTATION_QUEUE_SYNC_VERSION,
+  drainMutationQueue,
+  indexedDbQueueStorage,
+  registerMutationQueueSync,
+  type MutationQueueSyncBlockedReason,
+  type MutationQueueSyncContext,
+  type MutationQueueSyncEvent,
+  type MutationQueueSyncHandler,
+  type MutationQueueSyncResult,
+  type MutationQueueSyncStorage,
+} from 'ng-signal-request/persist/queue/sw';
 import { inject, type EnvironmentProviders, type ProviderToken, type Signal } from '@angular/core';
 
 interface Todo {
@@ -129,6 +142,7 @@ export function queueSetup(eager: readonly ProviderToken<unknown>[]): Environmen
     eager,
     noHandlerWarnAfterMs: 5000,
     onStorageError: 'degrade',
+    backgroundSync: { tag: MUTATION_QUEUE_SYNC_TAG },
     retry,
     migrate: (snapshot, version) => (version === MUTATION_QUEUE_VERSION ? (snapshot as MutationQueueSnapshot) : null),
     migrateEntry: (entry) => entry,
@@ -201,4 +215,56 @@ export function queueErrors(): void {
   const disabled: Error = new MutationQueueDisabledError();
   const quarantined: Error = new MutationQueueQuarantineError('bad args', new Error('cause'));
   void [detached, full, disabled, quarantined];
+}
+
+/**
+ * The worker half, written the way the README documents it.
+ *
+ * The application owns the service worker file; this fixture only proves the built declarations
+ * expose everything that file needs: the tag, the drain helper, the storage adapter and the handler
+ * contract. Nothing here is registered or executed.
+ */
+export function workerReplay(registration: ServiceWorkerRegistration): void {
+  const handler: MutationQueueSyncHandler = {
+    key: 'todos.add',
+    version: 2,
+    idempotencyHeader: 'X-Idempotency-Key',
+    deserialize: (raw) => raw,
+    migrate: (entry, fromVersion) => (fromVersion === 1 ? { ...entry, version: 2 } : null),
+    replay: async (args, context: MutationQueueSyncContext) => {
+      const idempotencyKey: string = context.idempotencyKey;
+      const idempotencyHeader: string | false = context.idempotencyHeader;
+      const entry: PersistedMutationEntry = context.entry;
+      void [args, idempotencyKey, idempotencyHeader, entry];
+    },
+  };
+
+  const storage: MutationQueueSyncStorage = indexedDbQueueStorage({
+    database: 'app',
+    store: 'mutations',
+    version: 1,
+  });
+
+  const result: Promise<MutationQueueSyncResult> = drainMutationQueue({
+    storage,
+    key: 'todos:outbox',
+    buster: 'v2',
+    handlers: [handler],
+    stopOnFailure: true,
+    retry: { maxAttempts: 3, baseDelay: 500, maxDelay: 10_000 },
+    lock: true,
+    now: () => Date.now(),
+    onEvent: (event: MutationQueueSyncEvent) => {
+      const reason: MutationQueueSyncBlockedReason | undefined =
+        event.type === 'blocked' ? event.reason : undefined;
+      void reason;
+    },
+  });
+  void result;
+
+  const registered: Promise<boolean> = registerMutationQueueSync(registration, {
+    tag: MUTATION_QUEUE_SYNC_TAG,
+  });
+  const version: number = MUTATION_QUEUE_SYNC_VERSION;
+  void [registered, version];
 }

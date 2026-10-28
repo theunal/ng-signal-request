@@ -998,9 +998,10 @@ sent" state is asserted rather than raced.
 ### 20.4 What the e2e still does not cover
 
 - **One browser.** Chromium only, the same limit as the existing offline e2e.
-- **No background replay.** Handoff needs a live tab: the lock is handed to a
-  waiting tab, and with no tab open nothing replays. A service worker with
-  Background Sync is the answer for that, and the library does not register one.
+- **No background replay in this e2e.** Handoff needs a live tab: the lock is
+  handed to a waiting tab, and with no tab open nothing replays. The opt-in
+  Background Sync integration is unit-tested (§21) but not exercised here; it needs
+  a custom service-worker build and browser permission.
 - **No non-owner durability.** A tab that is not the owner falls back to the 0.2.0
   in-memory queue for its own calls, so its write is lost on reload. The e2e
   asserts the non-owner state; it does not make that write durable.
@@ -1015,3 +1016,73 @@ sent" state is asserted rather than raced.
 
 These are cross-browser and server-contract limits, not open questions in the
 implementation. Stating them is what keeps "tested" from becoming "proven".
+
+## 21. Background replay record (2026-10-28)
+
+Background replay is the second half of `docs/missing-features.md` item 2,
+implemented against `docs/plan-item-2-background-replay.md`. It is additive and
+opt-in: an application that does not set `backgroundSync` and does not import the
+new entry point behaves exactly as before.
+
+### 21.1 Page-side tests
+
+`persist/queue/queue-config.spec.ts` (26 tests) adds four:
+
+- `backgroundSync: true` registers the default tag once after initialization and
+  again after a durable enqueue;
+- a custom tag is registered verbatim;
+- a browser without `navigator.serviceWorker` warns once, keeps the queue
+  `enabled`, and still persists the entry;
+- a rejected `registration.sync.register()` goes to `ErrorHandler` and does not
+  disable the queue.
+
+The page half is a no-op unless the queue is initialized, enabled and the owner,
+so a non-owner tab does not register a tag for a queue it cannot drain.
+
+### 21.2 Worker-side tests
+
+`persist/queue/sw/sw.spec.ts` (25 tests) runs `drainMutationQueue` against a
+memory `MutationQueueSyncStorage`:
+
+- empty snapshot, FIFO replay by `seq`, per-entry removal after each success;
+- the stored idempotency key passed verbatim, a custom header and the `false`
+  opt-out;
+- permanent `4xx`, `5xx` with and without a header, timeout with and without,
+  `401`/`403`, and `Retry-After`;
+- retry/backoff updates, `maxAttempts`, a future `nextAttemptAt` blocking without
+  a sleep, and `stopOnFailure: false`;
+- missing handler, version mismatch with and without `migrate`, a throwing
+  `deserialize` quarantining the entry;
+- corrupt JSON, an unsupported envelope version, a duplicate id/seq, a wrong
+  `buster`, and storage read/write failures, all leaving the raw snapshot
+  untouched;
+- the Web Lock: a held lock returns `blocked: 'locked'` without calling the
+  handler, a free lock drains;
+- `registerMutationQueueSync` returning `false` without `SyncManager`, registering
+  the default and a custom tag, and propagating a rejection;
+- `indexedDbQueueStorage` rejecting when IndexedDB is unavailable.
+
+The drain helper imports only **types** from `ng-signal-request`, so the built
+`ng-signal-request-persist-queue-sw.mjs` has no Angular runtime import and no other
+entry point's markers. `check:dist` enforces that plus a 4.5 KB gzip budget
+(measured 3.8 KB).
+
+### 21.3 What is not covered
+
+- **No browser e2e for Background Sync.** A real test needs a custom service-worker
+  build, a page registration, and browser permission; none of that is added in this
+  change. The unit suite proves the drain state machine and the page registration,
+  but not that Chromium wakes the worker or that the tag survives a browser restart.
+- **No live page/worker race in a real browser.** The lock behaviour is exercised
+  with a fake `LockManager`; the real `ifAvailable` interaction with a page owner is
+  a browser-only path.
+- **No non-owner durability.** A non-owner tab's own calls remain memory-only; this
+  change does not add a BroadcastChannel handoff or a per-entry IndexedDB claim.
+- **No guarantee of delivery.** Background Sync is best-effort and browser-
+  controlled. The library guarantees at-least-once storage, not a wake-up.
+- **The server-side idempotency contract is still unverified.** The worker sends the
+  stored key, but the library cannot prove a server deduplicates it.
+
+`pnpm test` is **668 passed**. Coverage is **92.8 / 86.51 / 95.86 / 94.53**
+(statements / branches / functions / lines), above the configured floors of
+90 / 85 / 90 / 90.

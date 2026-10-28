@@ -14,7 +14,8 @@
     "paths": {
       "ng-signal-request": ["./projects/signal-request/src/public-api.ts"],
       "ng-signal-request/persist": ["./projects/signal-request/persist/persist.ts"],
-      "ng-signal-request/persist/queue": ["./projects/signal-request/persist/queue/queue.ts"]
+      "ng-signal-request/persist/queue": ["./projects/signal-request/persist/queue/queue.ts"],
+      "ng-signal-request/persist/queue/sw": ["./projects/signal-request/persist/queue/sw/sw.ts"]
     },
     "importHelpers": true,
     "target": "ES2022",

@@ -66,6 +66,7 @@ export type { CacheStorage as MutationQueueStorage } from 'ng-signal-request/per
 export const MUTATION_QUEUE_VERSION = 1;
 
 const DEFAULT_QUEUE_KEY = 'ng-signal-request:mutation-queue';
+const DEFAULT_BACKGROUND_SYNC_TAG = 'ng-signal-request:mutation-queue';
 const DEFAULT_MAX_ENTRIES = 100;
 const DEFAULT_MAX_ATTEMPTS = 5;
 const DEFAULT_BASE_DELAY = 1_000;
@@ -114,6 +115,15 @@ export interface PersistedMutationQueueOptions {
   readonly noHandlerWarnAfterMs?: number;
   /** What to do when a storage write fails. Default `degrade` (fall back to no durability). */
   readonly onStorageError?: 'degrade' | 'fail';
+  /**
+   * Ask an application-owned service worker to replay the queue when no page is open.
+   *
+   * The library does **not** register a service worker. This only registers a Background Sync tag
+   * on the worker the application already has; that worker must call `drainMutationQueue` from
+   * `ng-signal-request/persist/queue/sw`. Default `false`; without a worker the queue still replays
+   * whenever a page is open.
+   */
+  readonly backgroundSync?: boolean | { readonly tag?: string };
   /** Retry clock for pending entries. */
   readonly retry?: PersistedMutationQueueRetryOptions;
   /** Envelope migration. Return `null` to quarantine the snapshot. */
@@ -379,6 +389,13 @@ export class PersistedMutationQueue implements MutationQueueAdapter {
     0,
     this.options.noHandlerWarnAfterMs ?? DEFAULT_NO_HANDLER_WARN_AFTER_MS,
   );
+  private readonly backgroundSyncTag: string | undefined =
+    this.options.backgroundSync === undefined || this.options.backgroundSync === false
+      ? undefined
+      : typeof this.options.backgroundSync === 'object'
+        ? (this.options.backgroundSync.tag ?? DEFAULT_BACKGROUND_SYNC_TAG)
+        : DEFAULT_BACKGROUND_SYNC_TAG;
+  private warnedBackgroundSync = false;
 
   constructor() {
     this.destroyRef.onDestroy(() => this.destroy());
@@ -460,6 +477,8 @@ export class PersistedMutationQueue implements MutationQueueAdapter {
     }
 
     this.emit({ type: 'enqueued', entry });
+    // The entry is durable; ask the worker to wake up even if this page closes before dispatch.
+    this.requestBackgroundSync();
     const deferred = this.isDeferred(entry);
     // A new head is dispatched by the `run()` that created it. A non-head entry is the queue's,
     // and scheduling is how it gets a chance to become head after earlier work settles.
@@ -518,6 +537,7 @@ export class PersistedMutationQueue implements MutationQueueAdapter {
       this.replaceEntry(next);
       this.emit({ type: 'retry', entry: next, error });
       void this.persistQuietly();
+      this.requestBackgroundSync();
       this.scheduleReplay();
       return 'retry';
     }
@@ -599,6 +619,7 @@ export class PersistedMutationQueue implements MutationQueueAdapter {
     };
     this.replaceEntry(next);
     void this.persistQuietly();
+    this.requestBackgroundSync();
     this.scheduleReplay();
   }
 
@@ -618,6 +639,7 @@ export class PersistedMutationQueue implements MutationQueueAdapter {
     );
     this.setEntries(next);
     void this.persistQuietly();
+    this.requestBackgroundSync();
     this.scheduleReplay();
   }
 
@@ -685,6 +707,7 @@ export class PersistedMutationQueue implements MutationQueueAdapter {
       await this.restoreGate?.restored();
       this.allowReplay = this.options.autoReplay ?? true;
       this.detachOnline = this.online.onReconnect(() => this.scheduleReplay());
+      this.requestBackgroundSync();
       if (this.allowReplay) this.scheduleReplay();
     } catch (error) {
       this.errorHandler.handleError(error);
@@ -723,6 +746,7 @@ export class PersistedMutationQueue implements MutationQueueAdapter {
     this.allowReplay = this.options.autoReplay ?? true;
     // A non-owner tab never attached the reconnect listener, because it had nothing to replay.
     this.detachOnline ??= this.online.onReconnect(() => this.scheduleReplay());
+    this.requestBackgroundSync();
     for (const handler of this.handlers.values()) this.reviewHandler(handler);
     this.scheduleReplay();
   }
@@ -1370,6 +1394,59 @@ export class PersistedMutationQueue implements MutationQueueAdapter {
 
   private warn(message: string): void {
     if (isDevMode()) console.warn(`[ng-signal-request/persist/queue] ${message}`);
+  }
+
+  /**
+   * Registers the Background Sync tag on the application's worker.
+   *
+   * Deliberately fire-and-forget: background delivery is an extra, not part of the durability
+   * guarantee. A browser without `SyncManager` only gets a dev warning; a worker that never
+   * registers is the application's configuration, and `ready` simply stays pending.
+   */
+  private requestBackgroundSync(): void {
+    const tag = this.backgroundSyncTag;
+    if (
+      tag === undefined ||
+      !this.isBrowser ||
+      this.destroyed ||
+      !this.enabledState() ||
+      !this.ownerState()
+    ) {
+      return;
+    }
+    const serviceWorker = (
+      globalThis as {
+        navigator?: {
+          serviceWorker?: { ready?: Promise<ServiceWorkerRegistration> };
+        };
+      }
+    ).navigator?.serviceWorker;
+    if (serviceWorker?.ready === undefined) {
+      this.warnBackgroundSyncUnavailable();
+      return;
+    }
+    void serviceWorker.ready
+      .then((registration) => {
+        if (this.destroyed) return;
+        const sync = (registration as { sync?: { register?: (tag: string) => Promise<void> } })
+          .sync;
+        if (sync?.register === undefined) {
+          this.warnBackgroundSyncUnavailable();
+          return;
+        }
+        return sync.register(tag);
+      })
+      .catch((error: unknown) => {
+        this.errorHandler.handleError(error);
+      });
+  }
+
+  private warnBackgroundSyncUnavailable(): void {
+    if (this.warnedBackgroundSync) return;
+    this.warnedBackgroundSync = true;
+    this.warn(
+      'Background Sync is unavailable; durable entries will replay only while a page is open.',
+    );
   }
 
   private destroy(): void {

@@ -10,8 +10,9 @@
  *
  * Three things are checked here, and each has been wrong before.
  *
- * 1. **The `/devtools`, `/persist` and `/persist/queue` entry points do not reach a production
- *    bundle that does not import them.** `tsconfig`-level "separate entry point" is a claim; this is
+ * 1. **The `/devtools`, `/persist`, `/persist/queue` and `/persist/queue/sw` entry points do not
+ *    reach a production bundle that does not import them.** `tsconfig`-level "separate entry point"
+ *    is a claim; this is
  *    the measurement. The demo is built for production and the resulting bundle is searched for
  *    entry-point-only strings — while also asserting that core strings *are* present, because "not
  *    found" is otherwise indistinguishable from "the app does not use the library at all".
@@ -54,6 +55,15 @@ const QUEUE_MARKERS = [
   'noHandlerWarnAfterMs',
 ];
 
+/**
+ * Strings that only exist inside `projects/signal-request/persist/queue/sw/`.
+ *
+ * The sync tag, the storage key and most IndexedDB errors are shared with the page queue, so the
+ * marker has to be a string the worker alone produces. Only the entry-point-prefixed error is
+ * unique; the generic upgrade/request errors also exist in `/persist`.
+ */
+const SW_MARKERS = ['ng-signal-request/persist/queue/sw: IndexedDB is not available.'];
+
 /** Strings that only exist inside `projects/signal-request/src/`. */
 const CORE_MARKERS = [
   'RequestCancelled',
@@ -72,13 +82,24 @@ const CORE_MARKERS = [
  * cross-entry `import` is caught even when nothing in the demo exercises the pair.
  */
 const FORBIDDEN_IN = new Map([
-  ['ng-signal-request.mjs', [...DEVTOOLS_MARKERS, ...PERSIST_MARKERS, ...QUEUE_MARKERS]],
-  ['ng-signal-request-persist.mjs', [...DEVTOOLS_MARKERS, ...QUEUE_MARKERS]],
+  [
+    'ng-signal-request.mjs',
+    [...DEVTOOLS_MARKERS, ...PERSIST_MARKERS, ...QUEUE_MARKERS, ...SW_MARKERS],
+  ],
+  ['ng-signal-request-persist.mjs', [...DEVTOOLS_MARKERS, ...QUEUE_MARKERS, ...SW_MARKERS]],
   // `/persist/queue` imports `/persist` for `indexedDbStorage`, so persist markers are allowed
-  // here. It must not pull the panel in.
-  ['ng-signal-request-persist-queue.mjs', DEVTOOLS_MARKERS],
-  ['ng-signal-request-devtools.mjs', [...PERSIST_MARKERS, ...QUEUE_MARKERS]],
-  ['ng-signal-request-testing.mjs', [...DEVTOOLS_MARKERS, ...PERSIST_MARKERS, ...QUEUE_MARKERS]],
+  // here. It must not pull the panel or the worker helper in.
+  ['ng-signal-request-persist-queue.mjs', [...DEVTOOLS_MARKERS, ...SW_MARKERS]],
+  // The worker helper is deliberately dependency-free: no core, no Angular, no page queue code.
+  [
+    'ng-signal-request-persist-queue-sw.mjs',
+    [...DEVTOOLS_MARKERS, ...PERSIST_MARKERS, ...CORE_MARKERS],
+  ],
+  ['ng-signal-request-devtools.mjs', [...PERSIST_MARKERS, ...QUEUE_MARKERS, ...SW_MARKERS]],
+  [
+    'ng-signal-request-testing.mjs',
+    [...DEVTOOLS_MARKERS, ...PERSIST_MARKERS, ...QUEUE_MARKERS, ...SW_MARKERS],
+  ],
 ]);
 
 /** Gzip budgets per entry point, in KB. Stated in the README, enforced here. */
@@ -88,6 +109,8 @@ const BUDGETS = new Map([
   ['ng-signal-request-testing.mjs', 15],
   ['ng-signal-request-persist.mjs', 15],
   ['ng-signal-request-persist-queue.mjs', 15],
+  // Measured at 3.75 KB gzip; the worker is deliberately small and dependency-free.
+  ['ng-signal-request-persist-queue-sw.mjs', 4.5],
 ]);
 
 /**
@@ -236,6 +259,16 @@ function checkBundleBoundaries(demoDir, distDir) {
     );
   } else {
     notes.push(`queue markers absent: ${QUEUE_MARKERS.join(', ')}`);
+  }
+
+  const leakedSw = SW_MARKERS.filter((marker) => bundle.includes(marker));
+  if (leakedSw.length > 0) {
+    failures.push(
+      `the /persist/queue/sw entry point leaked into the demo production bundle (${leakedSw.join(', ')}) ` +
+        '— the page must never import the worker helper',
+    );
+  } else {
+    notes.push(`service-worker markers absent: ${SW_MARKERS.join(', ')}`);
   }
 
   let fesm;

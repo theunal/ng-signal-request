@@ -95,8 +95,13 @@ keeps them separate.
   mirror the owner's queue, and their own accepted calls stay in memory. Without
   Web Locks the durable queue is disabled unless the application explicitly opts
   into `assumeSingleTab: true`.
-- **Service-worker Background Sync.** The library does not register a service
-  worker or a sync tag.
+- **A library-owned service-worker lifecycle.** The library still does not
+  register a service worker, own its URL/scope or manage its updates. A later
+  additive integration lets an **application-owned** worker drain the same queue:
+  `providePersistedMutationQueue({ backgroundSync: true })` registers a tag, and
+  the dependency-free `ng-signal-request/persist/queue/sw` helper owns validation,
+  FIFO order, the Web Lock and retry bookkeeping. See
+  [`plan-item-2-background-replay.md`](./plan-item-2-background-replay.md).
 - **Persisting closures, headers or `onMutate` context.** Those are neither
   safely serializable nor stable across an auth refresh.
 - **Automatic optimistic UI restore.** The queue will not reconstruct arbitrary
@@ -935,11 +940,17 @@ A non-owner tab, or a tab with no Web Locks and no `assumeSingleTab` opt-in:
 Calls this tab accepted while it was a non-owner are in memory only; they are
 not retroactively written when ownership changes. A reload before it acquires
 ownership loses them. That is the cost of a single writer, not a missing handoff:
-ownership itself moves automatically (§14.1). What remains application work is a
-replay with **no tab open at all** - a service worker with Background Sync, which
-the library does not register - and a non-owner's own writes, which a
-BroadcastChannel handoff or a per-entry IndexedDB claim could make durable. Neither
-is in this design.
+ownership itself moves automatically (§14.1).
+
+Replay with **no tab open at all** is now an opt-in integration rather than an
+absolute gap: the application owns the service worker, and
+`providePersistedMutationQueue({ backgroundSync: true })` registers a tag that
+worker listens for. The worker asks for the same Web Lock with `ifAvailable`, so a
+live page owner wins and the worker returns `blocked: 'locked'` instead of racing
+it; with no page open the worker drains. See
+[`plan-item-2-background-replay.md`](./plan-item-2-background-replay.md). A
+non-owner's own writes are still memory-only - a BroadcastChannel handoff or a
+per-entry IndexedDB claim would be needed, and neither is in this design.
 
 ## 15. Versioning, migration and corruption
 
@@ -1105,6 +1116,19 @@ writes. It may read the existing `RESTORE_GATE` before dispatch (§9.2).
 The separate subpath is decided: it keeps `/persist`'s current 3.7 KB gzip
 budget from growing for applications that only persist the cache. The provider
 surface and storage code must stay out of `/persist`'s barrel export.
+
+The background-replay follow-up adds a nested, dependency-free entry point,
+`ng-signal-request/persist/queue/sw`, rather than growing `/persist/queue`:
+
+- `MUTATION_QUEUE_SYNC_TAG`, `MUTATION_QUEUE_SYNC_VERSION`;
+- `drainMutationQueue(options)`, `registerMutationQueueSync(registration)`;
+- `indexedDbQueueStorage(options)`;
+- `MutationQueueSyncHandler`, `MutationQueueSyncContext`, `MutationQueueSyncStorage`,
+  `MutationQueueSyncEvent`, `MutationQueueSyncResult` and the blocked-reason union.
+
+It imports **only types** from the core entry point, so a service worker does not
+pull Angular in. The page half is the `backgroundSync` option on
+`PersistedMutationQueueOptions`; the page never imports the worker helper.
 
 ### 17.4 `QueryClient`
 
@@ -1327,6 +1351,9 @@ run does and does not prove.
 - README: document `isAlreadyApplied` and the replay-only `409` policy.
 - README: document that settle hooks receive `context: TContext | undefined` and
   `meta.replayed`, and that `switch` is incompatible with `persistence`.
+- README: document the opt-in `backgroundSync` tag, the application-owned worker
+  example, the handler/idempotency contract, the shared `ifAvailable` lock, the
+  best-effort delivery limit, and the still-memory-only non-owner writes.
 - `docs/design-0.2.md`: add a short pointer from the Phase 2 non-goal to this
   document; do not rewrite the historical record.
 - `docs/missing-features.md`: update item 1 only after the feature ships; the
@@ -1474,10 +1501,13 @@ key is not a safe default for writes.
 
 ### 21.6 Service-worker Background Sync as the implementation
 
-Rejected for this feature. It is an application-level delivery mechanism, not a
-library queue. It does not solve the handler registration, optimistic state or
-server idempotency contract, and it would add a service-worker lifecycle the
-library does not own.
+Rejected as the **implementation** of the queue. It is an application-level
+delivery mechanism, not a library queue. It does not solve the handler
+registration, optimistic state or server idempotency contract, and it would add a
+service-worker lifecycle the library does not own. The later additive follow-up
+keeps that boundary: the application owns the worker, and the library only exposes
+a drain helper plus an opt-in tag. See
+[`plan-item-2-background-replay.md`](./plan-item-2-background-replay.md).
 
 ### 21.7 Put the queue in `MutationRegistry`
 
@@ -1524,6 +1554,11 @@ This design is implementable when all of the following are true:
     lands.
 14. `0.3.0` remains the `retryTimeouts` release; the queue lands in `0.4.0` or
     later, labelled experimental.
+15. Background replay is additive and opt-in: an application-owned service worker
+    can drain the queue through `/persist/queue/sw`, a live page owner makes the
+    worker return `blocked: 'locked'` without touching the snapshot, a corrupt or
+    mismatched snapshot is never overwritten, and an application that does not set
+    `backgroundSync` behaves exactly as before.
 
 ## 23. Evidence index
 

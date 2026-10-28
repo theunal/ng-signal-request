@@ -11,6 +11,7 @@ import { HttpTestingController } from '@angular/common/http/testing';
 import {
   createEnvironmentInjector,
   EnvironmentInjector,
+  ErrorHandler,
   Injectable,
   PLATFORM_ID,
   runInInjectionContext,
@@ -189,6 +190,37 @@ function fakeLockManager(): FakeLockManager {
       });
     },
   };
+}
+
+interface FakeSyncRegistration {
+  readonly sync?: { readonly register: (tag: string) => Promise<void> };
+}
+
+/**
+ * Installs a fake `navigator.serviceWorker` for one test.
+ *
+ * `null` means "this browser has no service worker at all", which is what jsdom actually is and
+ * what the unsupported-browser path must handle. The descriptor is restored afterwards because the
+ * queue reads `navigator` lazily, and leaking a worker into the next test would hide that path.
+ */
+async function withServiceWorker(
+  registration: FakeSyncRegistration | null,
+  run: () => Promise<void>,
+): Promise<void> {
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis.navigator, 'serviceWorker');
+  Object.defineProperty(globalThis.navigator, 'serviceWorker', {
+    configurable: true,
+    value: registration === null ? undefined : { ready: Promise.resolve(registration) },
+  });
+  try {
+    await run();
+  } finally {
+    if (descriptor === undefined) {
+      delete (globalThis.navigator as { serviceWorker?: unknown }).serviceWorker;
+    } else {
+      Object.defineProperty(globalThis.navigator, 'serviceWorker', descriptor);
+    }
+  }
 }
 
 /** Installs a fake lock manager for one test and restores the descriptor afterwards. */
@@ -709,6 +741,101 @@ describe('persisted mutation queue configuration', () => {
       tabB.destroy();
       await settle();
       expect(locks.held.size).toBe(0);
+    });
+  });
+});
+
+describe('persisted mutation queue background sync', () => {
+  it('registers the sync tag after initialization and again after an enqueue', async () => {
+    const storage = memoryStorage();
+    const register = vi.fn(async (_tag: string) => undefined);
+
+    await withServiceWorker({ sync: { register } }, async () => {
+      const { http, create } = setup([queueProviders(storage, { backgroundSync: true })]);
+      await settle();
+
+      // Initialization is enough: a snapshot left by a previous page must wake the worker even
+      // before this page enqueues anything.
+      expect(register).toHaveBeenCalledTimes(1);
+      expect(register).toHaveBeenLastCalledWith('ng-signal-request:mutation-queue');
+
+      const save = saveTodo(create, { key: 'todo.create' });
+      const pending = save.run({ body: { title: 'wake the worker' } });
+      pending.catch(() => undefined);
+      await settle();
+
+      expect(register).toHaveBeenCalledTimes(2);
+      expect(register).toHaveBeenLastCalledWith('ng-signal-request:mutation-queue');
+      http.match('/todos').forEach((request) => request.flush({ id: 1, title: 'wake the worker' }));
+      await settle();
+    });
+  });
+
+  it('registers a custom tag when one is configured', async () => {
+    const storage = memoryStorage();
+    const register = vi.fn(async (_tag: string) => undefined);
+
+    await withServiceWorker({ sync: { register } }, async () => {
+      setup([queueProviders(storage, { backgroundSync: { tag: 'todos-sync' } })]);
+      await settle();
+
+      expect(register).toHaveBeenCalledWith('todos-sync');
+    });
+  });
+
+  it('warns once and keeps the queue enabled when the browser has no service worker', async () => {
+    const storage = memoryStorage();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    try {
+      await withServiceWorker(null, async () => {
+        const { http, create } = setup([queueProviders(storage, { backgroundSync: true })]);
+        await settle();
+
+        const queue = TestBed.inject(PersistedMutationQueue);
+        expect(queue.enabled()).toBe(true);
+        expect(warn.mock.calls.flat().join(' ')).toContain('Background Sync is unavailable');
+
+        const save = saveTodo(create, { key: 'todo.create' });
+        const pending = save.run({ body: { title: 'still durable' } });
+        pending.catch(() => undefined);
+        await settle();
+
+        // A second registration attempt on enqueue must not repeat the warning.
+        const warnings = warn.mock.calls.filter((call) =>
+          String(call[0]).includes('Background Sync is unavailable'),
+        );
+        expect(warnings).toHaveLength(1);
+        expect(entriesIn(storage)).toHaveLength(1);
+
+        http.match('/todos').forEach((request) => request.flush({ id: 2, title: 'still durable' }));
+        await settle();
+      });
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('reports a rejected registration to ErrorHandler without disabling the queue', async () => {
+    const storage = memoryStorage();
+    const register = vi.fn(async () => {
+      throw new Error('permission denied');
+    });
+    const errors: unknown[] = [];
+
+    await withServiceWorker({ sync: { register } }, async () => {
+      setup([
+        queueProviders(storage, { backgroundSync: true }),
+        {
+          provide: ErrorHandler,
+          useValue: { handleError: (error: unknown) => errors.push(error) },
+        },
+      ]);
+      await settle();
+
+      expect(register).toHaveBeenCalledOnce();
+      expect(errors.map((error) => (error as Error).message)).toContain('permission denied');
+      expect(TestBed.inject(PersistedMutationQueue).enabled()).toBe(true);
     });
   });
 });

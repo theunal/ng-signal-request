@@ -37,8 +37,8 @@ Impact is an assessment of the cost when the gap is hit:
 
 | #   | Area        | Gap                                                                             | Status              | Impact |
 | --- | ----------- | ------------------------------------------------------------------------------- | ------------------- | ------ |
-| 1   | Offline     | Durable mutation queue is opt-in, not the default                               | Partial             | High   |
-| 2   | Offline     | Cross-tab coordination is opt-in; background replay needs an app worker         | Partial             | High   |
+| 1   | Offline     | The durable queue is opt-in; the default queue is still in memory               | By design           | High   |
+| 2   | Offline     | Cross-tab replay is single-owner; the owner delivers a waiting tab's calls      | By design           | High   |
 | 3   | Offline     | Default queue cannot be listed; the durable queue can                           | Partial             | Medium |
 | 4   | Offline     | `offlineFirst` is not available for mutations                                   | By design           | Low    |
 | 5   | Offline     | Connectivity means "an interface is up", not "the API is reachable"             | Partial             | Medium |
@@ -109,11 +109,18 @@ Impact is an assessment of the cost when the gap is hit:
 > idempotency contract is proven. Measurements and limits:
 > `docs/verification.md` §20-§21; design: `docs/design-offline-mutation-queue.md`.
 
+> **Update, 2026-10-28 — items 1 and 2 are closed as product boundaries.** A waiting tab now stores
+> its own calls durably (§1.2), so the last behavioural gap in item 2 is gone; item 1's remaining
+> "opt-in" property is the deliberate shape of the feature, not missing work. The client half of the
+> idempotency contract is proved in `persist/queue/idempotency.spec.ts` and `e2e/queue.spec.ts`, and
+> the server half is specified in `docs/idempotency-contract.md`; the release that ships the queue is
+> recorded in `docs/release-0.4.md`. Both rows moved from **Partial** to **By design**.
+
 ## 1. Offline and mutation delivery
 
 ### 1.1 The mutation queue is in memory by default
 
-**Status: Partial — opt-in. Impact: High.**
+**Status: By design — opt-in. Impact: High.**
 
 With `networkMode: 'online'`, a mutation made while offline is queued, its
 optimistic write is applied, `paused()` is `true`, and `run()` stays pending until
@@ -128,28 +135,46 @@ application that does not install it keeps the original in-memory behaviour. The
 server still has to honour the idempotency key; the library cannot invent an
 at-least-once guarantee on its own.
 
+**Why the default does not change.** Writing every persisted mutation to IndexedDB
+is a storage, quota and privacy decision that belongs to the application, and the
+default in-memory queue is what 0.2.0 shipped. Making durability the default is a
+later release decision, not an unfinished part of this one.
+
 **Workaround.** Opt into the durable queue (`ng-signal-request/persist/queue`), or
 keep an application-owned outbox. Background replay with no tab open is covered by
 §1.7.
 
 **Evidence:** `README.md` "A queue that survives a reload" and "Background replay";
-`docs/design-offline-mutation-queue.md`; `docs/verification.md` §20-§21.
+`docs/design-offline-mutation-queue.md`; `docs/verification.md` §20-§22;
+`docs/idempotency-contract.md`.
 
 ### 1.2 Cross-tab coordination and background replay are opt-in
 
-**Status: Partial. Impact: High.**
+**Status: By design. Impact: High.**
 
 The default in-memory queue has no cross-tab identity. Once the durable queue is
-opted in, Web Locks elect a single owner and hand ownership to a waiting tab, so
-two tabs do not replay the same logical work independently. A non-owner's own
-calls still stay in memory. Background replay with no tab open is now an opt-in
-integration, not a missing primitive.
+opted in, Web Locks elect a single owner, and two tabs do not replay the same
+logical work independently. A tab that does not own replay still **stores** its own
+calls - they are appended to the shared snapshot under a short write lock and the
+owner adopts them - but it never dispatches them. Background replay with no tab open
+is an opt-in integration, not a missing primitive.
+
+The boundaries that remain, all of them deliberate:
+
+- **One replayer.** A waiting tab's `run()` promise settles when that tab becomes the
+  owner, or when the owner reports the entry delivered over the queue's
+  `BroadcastChannel`. In the second case `onSettled` runs and `onSuccess` cannot:
+  the response body belongs to the tab that sent the request.
+- **The worker is the application's.** The library registers a Background Sync tag
+  and exports the drain, but never registers a service worker.
+- **Background Sync is best-effort.** It is a hint to the browser, not a wake-up
+  guarantee, so the library promises at-least-once storage rather than delivery with
+  no tab open.
 
 **Workaround.** Use `providePersistedMutationQueue` for cross-tab ownership. For
 delivery with no tab open, opt into `backgroundSync` and supply an
 application-owned service worker that calls `drainMutationQueue` from
-`ng-signal-request/persist/queue/sw`. A non-owner tab's own writes still need an
-application-level outbox or a future per-entry claim.
+`ng-signal-request/persist/queue/sw`.
 
 **Evidence:** queue ownership is per handle (`create-mutation.ts`); the page queue
 listens only to `pagehide` and `visibilitychange`, not to `storage` or a
@@ -161,9 +186,18 @@ BroadcastChannel (`persist/persist.ts`).
 > so when the owner tab closes or crashes the waiting tab becomes the owner,
 > hydrates the stored queue and replays it. Delivery therefore outlives the tab
 > that accepted the write, which was the high-impact half of this item; it is
-> asserted with two real tabs in `e2e/queue.spec.ts`. A non-owner's own calls still
-> stay in memory. See `docs/design-offline-mutation-queue.md` §14 and
-> `docs/verification.md` §20.3.
+> asserted with two real tabs in `e2e/queue.spec.ts`. See
+> `docs/design-offline-mutation-queue.md` §14 and `docs/verification.md` §20.3.
+
+> **Update, 2026-10-28 — a waiting tab's own writes are durable.** The non-owner gap
+> in §14.3 is closed: a tab that does not own replay appends its own call to the
+> shared snapshot under a short-lived write lock (so the owner's write cannot erase
+> it), tells the owner over a `BroadcastChannel`, and lets the owner adopt and
+> deliver it. The owner's writes and the service worker's writes are now
+> read-merge-write for the same reason. A call stored this way settles through the
+> new `attachSettled` hook when another tab delivers it. `enabled()` now means "this
+> tab stores calls durably" and `owner()` means "this tab replays them"; the two are
+> no longer the same question. See `docs/verification.md` §22.
 
 > **Update, 2026-10-28 — background replay is an opt-in integration.** The page
 > registers a Background Sync tag through
@@ -1130,10 +1164,12 @@ claimed" tone of the surrounding section.
 - **The highest-risk HTTP footgun is a non-lazy non-GET `createRequest`.** It is a
   query by construction, so it can re-fire reactively. Use `createMutation` or
   `lazy: true`.
-- **The durable offline outbox exists but is opt-in and unreleased.** It is a
-  deliberate, twice-opted integration (`persistence` plus the provider), not a
-  default. The remaining gaps are the server-side idempotency contract and a
-  non-owner tab's own writes.
+- **The durable offline outbox exists but is opt-in.** It is a deliberate,
+  twice-opted integration (`persistence` plus the provider), not a default, and it is
+  unreleased as of `0.2.0`. There is no behavioural gap left in it: a waiting tab's
+  own writes are durable, the owner delivers them, and the client half of the
+  idempotency contract is proved. What remains is the release itself and an
+  application's own proof against its backend (`docs/idempotency-contract.md`).
 - **The largest packaging gap is per-factory tree-shaking.** The primary entry
   retains the cached engine even for an uncached request.
 - **The most visible quality gap is e2e breadth.** The offline path is tested in a
@@ -1147,10 +1183,12 @@ claimed" tone of the surrounding section.
 This is not a release commitment and does not change the current release state. A
 sensible order, based only on the impact above:
 
-1. **Durable queue rollout** — the implementation and background replay already
-   exist in the working tree behind opt-in entry points. Finishing the item means
-   proving the server-side idempotency contract, covering a non-owner tab's own
-   writes, and shipping it without changing the default in-memory queue.
+1. **Durable queue rollout** — done in the working tree, behind opt-in entry points:
+   the non-owner gap is closed, background replay is an opt-in integration, and the
+   client half of the idempotency contract is asserted in the unit and browser
+   suites. What is left is not engineering in this repository: an application has to
+   run the server-side check in `docs/idempotency-contract.md` against its own
+   backend, and the release has to be cut (`docs/release-0.4.md`).
 2. **Per-factory tree-shaking or a cached subpath** — a public-API decision; it
    improves every application that uses only one factory.
 3. **E2E breadth** — query, devtools and persistence; the offline path already has

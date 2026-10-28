@@ -1077,7 +1077,8 @@ entry point's markers. `check:dist` enforces that plus a 4.5 KB gzip budget
   with a fake `LockManager`; the real `ifAvailable` interaction with a page owner is
   a browser-only path.
 - **No non-owner durability.** A non-owner tab's own calls remain memory-only; this
-  change does not add a BroadcastChannel handoff or a per-entry IndexedDB claim.
+  change does not add a BroadcastChannel handoff or a per-entry IndexedDB claim. It
+  is closed in §22.
 - **No guarantee of delivery.** Background Sync is best-effort and browser-
   controlled. The library guarantees at-least-once storage, not a wake-up.
 - **The server-side idempotency contract is still unverified.** The worker sends the
@@ -1086,3 +1087,86 @@ entry point's markers. `check:dist` enforces that plus a 4.5 KB gzip budget
 `pnpm test` is **668 passed**. Coverage is **92.8 / 86.51 / 95.86 / 94.53**
 (statements / branches / functions / lines), above the configured floors of
 90 / 85 / 90 / 90.
+
+## 22. Non-owner writes and the idempotency contract (2026-10-28)
+
+The last two items of `docs/missing-features.md` §12 step 1: a tab that does not own
+replay now stores its own calls, and the client half of the idempotency contract is
+asserted instead of described. Everything here is additive; the default in-memory
+queue and every 0.2.0 default are untouched (`docs/release-0.4.md`).
+
+### 22.1 The write path, and why it is two locks
+
+The long-lived Web Lock still elects one **replayer**. A second, short-lived lock
+(`ng-signal-request:mutation-queue-write:<key>`) serialises one read-modify-write of
+the snapshot, which is what lets a tab that does not own replay append an entry
+without overwriting the owner's, and stops the owner's write from erasing it. The
+owner and the worker both read-merge-write for the same reason.
+
+The one bug this design produced, and the fix that is now load-bearing in both
+places: a merge-write preserves entries it does not recognise, so it has to be told
+what this tab deleted. Without a tombstone set, every settled entry came back as
+"someone else's" on the next write and replayed forever - which is exactly how the
+worker's drain hung the first time this was run.
+
+### 22.2 Page-side tests
+
+`persist/queue/queue-config.spec.ts` (27 tests) changes two and adds one:
+
+- the second tab in "takes the Web Lock and reports a second tab as a non-owner" now
+  reports `enabled() === true` and `owner() === false`; the same assertion changed in
+  the handover test;
+- **new:** a waiting tab's own offline write is stored (`entriesIn(storage)` has one
+  entry, `pendingCount()` is 1, no request is made), survives the owner's
+  destruction, is replayed by the tab that stored it once it takes over, and carries
+  the idempotency key that was stored with it. The final assertion is that no lock is
+  still held after both scopes are destroyed.
+
+### 22.3 Idempotency tests
+
+`persist/queue/idempotency.spec.ts` (7 tests, new) is the client half of
+`docs/idempotency-contract.md`:
+
+- the key is minted before the first send, equals the stored entry's
+  `idempotencyKey`, and is reused verbatim across two retries of one call;
+- a hydrated entry replays with the key stored with it, not a new one;
+- `persistence.idempotencyKey(args)` makes two separate `run()` calls deduplicate;
+- a caller-supplied header wins over a minted key and is stored as the entry's key;
+- `idempotencyHeader: false` sends no header and turns a `5xx` into a permanent
+  failure instead of a retry;
+- `drainMutationQueue` hands the handler the stored key, and hands it the same key
+  again after a retry;
+- `export()` contains the key, so a support bundle can be matched to a request.
+
+`e2e/queue.spec.ts` adds two:
+
+- **a non-owner's own offline write is delivered by the owner**: two tabs, the second
+  is a non-owner with `enabled: true`, offline submit, no request, then the owner
+  adopts it over the `BroadcastChannel`, delivers it, and the tab that stored it
+  reports zero pending;
+- **a retried write is deduplicated**: a stateful route handler stores the key with
+  the effect and answers a repeat from that store. The first attempt is refused with
+  `503`, the queue retries, both requests carry the same key, and the server records
+  one effect for two requests.
+
+### 22.4 What is not covered
+
+- **The server half.** `docs/idempotency-contract.md` §5 is a manual check; the
+  repository cannot run it against a real backend. The queue stays experimental until
+  an application does and records the outcome.
+- **`BroadcastChannel` in a browser.** jsdom has no `BroadcastChannel`, and Node's
+  implementation is unref'd so it cannot hold the test runner open; the adoption path
+  is therefore proved by the e2e and by the ownership handover, not by a unit test
+  that sends a message.
+- **A duplicate window remains.** A non-owner's online call dispatches from that tab
+  while the owner may be adopting the same entry; both carry one key, so the server's
+  dedupe makes it harmless. The queue's own replay path is still single-writer.
+- **No `onSuccess` for a call another tab delivered.** The response body belongs to
+  the tab that sent the request; `onSettled` runs with `context: undefined`.
+
+`pnpm test` is **677 passed** (28 files). Coverage is
+**91.67 / 85.85 / 94.61 / 93.78** (statements / branches / functions / lines),
+above the configured floors of 90 / 85 / 90 / 90. `pnpm test:e2e` is **9 passed**
+(3 demo, 6 queue) against Chromium. `pnpm check:api v0.2.0` reports 0 removed and 17
+added names; `check:dist` passes with `ng-signal-request-persist-queue.mjs` at 8.9 KB
+gzip and the worker entry at 4.0 KB gzip.

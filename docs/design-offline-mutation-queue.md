@@ -948,9 +948,41 @@ absolute gap: the application owns the service worker, and
 worker listens for. The worker asks for the same Web Lock with `ifAvailable`, so a
 live page owner wins and the worker returns `blocked: 'locked'` instead of racing
 it; with no page open the worker drains. See
-[`plan-item-2-background-replay.md`](./plan-item-2-background-replay.md). A
-non-owner's own writes are still memory-only - a BroadcastChannel handoff or a
-per-entry IndexedDB claim would be needed, and neither is in this design.
+[`plan-item-2-background-replay.md`](./plan-item-2-background-replay.md).
+
+> **Update, 2026-10-28 — §14.3 is superseded by a per-tab write path.** The
+> paragraph that used to end this section said a non-owner's own writes were
+> memory-only and that "a BroadcastChannel handoff or a per-entry IndexedDB claim
+> would be needed, and neither is in this design". Both halves are now implemented,
+> in the cheapest form that keeps the single-writer rule:
+>
+> - **Writes are separated from replay.** The long-lived lock still elects one
+>   replayer; a _second_, short-lived lock (`…-write:<key>`) serialises one
+>   read-modify-write of the snapshot. A non-owner appends its own entry under that
+>   lock, so its view of the queue never has to be complete and the owner's write
+>   never has to know about it. `enabled()` therefore means "this tab stores calls
+>   durably" and `owner()` means "this tab replays them".
+> - **The owner is told, not polled.** A stored entry is announced on a
+>   `BroadcastChannel`; the owner adopts it, runs the handler's `onRestore` and
+>   replays it. A delivery is announced the same way, which is what lets the tab that
+>   stored the entry drop it and settle its `run()` promise (`attachSettled`). The
+>   channel carries no payload, so a lost message costs latency and never data.
+> - **No dispatch from a non-owner.** Two tabs sending one entry is exactly the
+>   duplicate traffic this section exists to prevent, so a non-owner only stores. An
+>   online call still dispatches from the tab that made it (`persistence` requires
+>   `networkMode: 'online'`, so there is no `'always'` case to consider); a failed
+>   dispatch hands the entry over instead of retrying it in a tab that does not
+>   replay.
+> - **Resurrection has to be prevented explicitly.** A merge-write preserves entries
+>   it does not know about, which means it also has to be told what this tab deleted;
+>   both the page queue and the worker keep a tombstone set for exactly that. This
+>   was the one bug the first implementation had: without it a settled entry came
+>   back as "someone else's" on the next write and replayed forever.
+>
+> The remaining boundary is a promise, not a message: a call a non-owner stored
+> settles in that tab only when it becomes the owner or when the owner reports the
+> entry delivered, and the second case cannot run `onSuccess` because the response
+> body belongs to the other tab.
 
 ## 15. Versioning, migration and corruption
 

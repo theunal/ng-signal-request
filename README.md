@@ -1210,6 +1210,12 @@ is the place to supply a key your server already understands; the generated UUID
 is the fallback. Treat the whole queue as an at-least-once delivery mechanism and
 make the endpoint idempotent.
 
+[`docs/idempotency-contract.md`](./docs/idempotency-contract.md) states the whole
+contract: what the client guarantees on every path (first attempt, retry, reload,
+another tab, service worker), what the server has to commit together, how long it has
+to remember a key, and the failure classification the queue derives from whether a
+key is present. It ends with a two-`curl` check for one endpoint.
+
 A `409 Conflict` on replay can mean "this write already landed". Return `true`
 from `persistence.isAlreadyApplied(error)` to treat that entry as applied: it is
 removed and the mutation invalidates as if it had succeeded. The hook is consulted
@@ -1244,11 +1250,25 @@ with `MutationQueueFullError` before the optimistic write and never evicts an
 accepted entry.
 
 Replaying in two tabs at once would send the same write twice, so the queue takes a
-**Web Lock** and only the owner replays. `owner()` and `enabled()` say which tab
-that is; a non-owner still runs mutations in memory but does not persist or replay
-them. Ownership is handed over: a non-owner waits in the browser's lock queue, so
-when the owner tab is closed the next tab becomes the owner, hydrates the stored
-queue and replays it. Delivery therefore outlives the tab that accepted the write.
+**Web Lock** and only the owner replays. `owner()` says which tab that is, and
+`enabled()` says whether this tab stores its calls durably - which is true in both.
+A tab that does not own replay still stores its own call: it appends the entry to the
+same snapshot under a short-lived write lock, so the owner's next write cannot
+overwrite it, and it tells the owner over a `BroadcastChannel` that the entry is
+there. The owner adopts it, runs its `onRestore` and delivers it. A non-owner never
+dispatches an entry itself, because two tabs sending one write is the duplicate
+traffic the lock exists to prevent; `'always'` and an online call still go out from
+the tab that made them, and if that send fails the entry is handed over instead.
+
+Ownership is handed over: a non-owner waits in the browser's lock queue, so when the
+owner tab is closed the next tab becomes the owner, hydrates the stored queue and
+replays it - including the entries it stored itself while it was waiting. Delivery
+therefore outlives the tab that accepted the write, whether or not that tab owned
+replay. A call a non-owner stored settles when this tab becomes the owner and replays
+it, or when another tab delivers it and announces that on the same channel: the
+second case runs `onSettled` but cannot run `onSuccess`, because the response body
+belongs to the tab that sent the request. Without `BroadcastChannel` the entry is
+still durable; it is picked up on the owner's next write or the next page load.
 With no tab open nothing replays by default; opt into
 [background replay](#background-replay) with an application-owned service worker
 if that gap matters. Without the Web Locks API durable persistence is disabled
@@ -1346,8 +1366,10 @@ pending; a permanent failure marks it `failed`; a retryable one updates
 The worker does not run `onRestore`, optimistic writes, `invalidates` or settle
 hooks - it has no cache or component tree. The page reconciles when it next
 opens. Background Sync itself is best-effort and browser-controlled, so the
-library guarantees at-least-once storage, not a wake-up. A non-owner tab's own
-calls are still memory-only; that remains a separate follow-up.
+library guarantees at-least-once storage, not a wake-up. The worker reads the
+snapshot a non-owner tab wrote as well, and merges it under the same write lock
+instead of overwriting it, so a call stored by a tab that never owned replay can be
+delivered with every tab closed.
 
 ## Auth: reactive headers + a refresh interceptor
 
@@ -1993,9 +2015,12 @@ report and one you read here is a design decision.
   `networkMode: 'online'`, calls made while offline are replayed on reconnect -
   but without `providePersistedMutationQueue(...)` and a `persistence` option
   they live in the handle's memory, and a reload loses them. Even opted in: only
-  the tab holding the Web Lock persists and replays, and ownership moves to a
-  waiting tab only when the owner goes away (`assumeSingleTab` exists for
-  environments without Web Locks); replay with no tab open needs the opt-in
+  the tab holding the Web Lock replays, and ownership moves to a waiting tab only
+  when the owner goes away (`assumeSingleTab` exists for environments without Web
+  Locks); a tab that does not own replay stores its own calls but cannot dispatch
+  them, so its `run()` promise settles when that tab takes over or when the owner
+  reports the entry delivered, and a `'always'` call that fails is handed over
+  rather than retried in place; replay with no tab open needs the opt-in
   Background Sync integration and an application-owned service worker, and is
   best-effort rather than guaranteed; stored args
   must be codec-serializable; auth

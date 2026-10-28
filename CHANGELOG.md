@@ -21,6 +21,11 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+> Release-ready as `0.4.0`, after `0.3.0` - the promised `retryTimeouts` default flip
+>
+> - is tagged. The checklist, the version reasoning and the publish steps are in
+>   [`docs/release-0.4.md`](./docs/release-0.4.md).
+
 ### Added
 
 - **An opt-in durable mutation queue (`ng-signal-request/persist/queue`), experimental.**
@@ -44,7 +49,18 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   - Ownership is handed over. A non-owner tab queues a request behind the Web Lock,
     so when the owner tab closes the next tab becomes the owner, hydrates the
     stored queue and replays it - delivery outlives the tab that accepted the
-    write. A non-owner tab's own calls are still memory-only.
+    write.
+  - **A tab that does not own replay still stores its own calls.** Writes and replay
+    are now separate locks: a short-lived write lock serialises one
+    read-modify-write of the snapshot, so a waiting tab appends its entry without
+    overwriting the owner's and the owner's write cannot erase it. The entry is
+    announced on a `BroadcastChannel`; the owner adopts it, runs `onRestore` and
+    delivers it. `enabled()` now means "this tab stores calls durably" and
+    `owner()` means "this tab replays them". A non-owner never dispatches an entry
+    itself - an online call still goes out from the tab that made it, and a failed
+    send is handed over instead of retried there. A stored call settles when that
+    tab becomes the owner or when the owner reports it delivered (`attachSettled`,
+    which runs `onSettled` and cannot run `onSuccess`).
   - **Background replay through an application-owned service worker, opt-in.**
     `providePersistedMutationQueue({ backgroundSync: true })` registers a Background
     Sync tag; the new dependency-free `ng-signal-request/persist/queue/sw` entry
@@ -57,12 +73,20 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
     `blocked: 'locked'`; a corrupt or mismatched snapshot is never overwritten. The
     library still does not register a worker, and Background Sync is best-effort.
   - The queue is a separate entry point so an application that only persists the
-    read cache does not pay for it. It is labelled experimental until the
-    server-side idempotency contract has been proven in practice.
+    read cache does not pay for it. It is labelled experimental until an
+    application has run the server-side idempotency contract against a real backend.
   - A real-browser check (`e2e/queue.spec.ts`) covers what jsdom cannot: the
     IndexedDB default, the Web Lock, a write that survives the page and replays
-    exactly once, a successful write that is not replayed, and a permanent failure
-    that stays durable and does not resurrect the optimistic row.
+    exactly once, a successful write that is not replayed, a permanent failure that
+    stays durable and does not resurrect the optimistic row, a non-owner's own
+    offline write delivered by the owner, and a retried write deduplicated by a
+    server that stores the key with the effect.
+- **`docs/idempotency-contract.md` - the server half of the queue, written down.**
+  What the client guarantees on every path (first attempt, retry, reload, another
+  tab, service worker), what the server has to commit in the same transaction as the
+  effect, how long a key has to be remembered, the failure classification the queue
+  derives from whether a key is present, and a two-`curl` check for one endpoint.
+  `persist/queue/idempotency.spec.ts` asserts the client half.
 
 ## [0.2.0] - 2026-10-21
 

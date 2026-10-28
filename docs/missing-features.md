@@ -59,7 +59,7 @@ Impact is an assessment of the cost when the gap is hit:
 | 20  | HTTP        | Non-GET `createRequest` is reactive and can fire on unrelated signal changes    | Partial             | High   |
 | 21  | HTTP        | `progress()` only works with the XHR backend                                    | Partial             | Medium |
 | 22  | HTTP        | `ctx.chain()` is unavailable on cached, lazy and debounced paths                | By design           | Low    |
-| 23  | HTTP        | A timeout is retried by default until 0.3.0                                     | Partial             | Medium |
+| 23  | HTTP        | A timeout is not retried by default; retrying it is opt-in                      | By design           | Medium |
 | 24  | HTTP        | `status: 0` cannot distinguish CORS, offline, extension and transport failure   | Partial             | Medium |
 | 25  | HTTP        | Token refresh is interceptor-only; mutations do not retry by default            | By design           | Low    |
 | 26  | HTTP        | Requests without a `key` are not deduplicated                                   | By design           | Low    |
@@ -619,21 +619,22 @@ the source while there is nothing to ask for.
 **Evidence:** `README.md` "Behavior notes and limits"; `CHANGELOG.md` dependent
 queries entry; `docs/design-0.2.md` §5.4.
 
-### 3.4 A timeout is retried by default until 0.3.0
+### 3.4 A timeout is not retried by default
 
-**Status: Partial. Impact: Medium.**
+**Status: By design. Impact: Medium.**
 
 A timeout arrives as `status: 0`, so the default retry predicate cannot distinguish
-it from a dropped connection. `timeout: 5_000` with `retry: 2` can take about 15
-seconds before reporting `{ kind: 'timeout' }`. 0.2.0 keeps the 0.1.x default for
-compatibility, warns in dev mode, and offers `retryTimeouts: false` globally or per
-request. The default is scheduled to flip in 0.3.0.
+it from a dropped connection. Retrying it is a real choice - a flaky upstream does
+time out and then answer - but it is not the safe one: `timeout: 5_000` with
+`retry: 2` would spend about 15 seconds in front of a user before reporting
+`{ kind: 'timeout' }`. Since 0.3.0 the default is to report the timeout as soon as it
+elapses, and `retryTimeouts: true` opts back in, globally or per request.
 
-**Workaround.** Set `retryTimeouts: false` today. An explicit `retry.when` also wins
-over the global default.
+**Workaround.** Pass `retryTimeouts: true`, or write an explicit `retry.when` that
+includes timeouts. Both win over the default.
 
-**Evidence:** `README.md` "Known limitations" / timeout caveat;
-`CHANGELOG.md` "Deprecated"; `docs/design-0.2.md` §5.1.
+**Evidence:** `README.md` "The timeout + retry caveat"; `CHANGELOG.md` `0.3.0`;
+`docs/verification.md` §23.
 
 ### 3.5 `status: 0` stays ambiguous
 

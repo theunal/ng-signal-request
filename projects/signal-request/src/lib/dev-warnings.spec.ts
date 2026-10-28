@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { createRequest, provideSignalRequest } from '../public-api';
-import { normalizeRetry, resetDevWarningsForTests } from './utils';
+import { resetDevWarningsForTests } from './utils';
 import { cache, settle, setup } from '../../testing/testing';
 
 /** A spied `console.warn`, quiet, restored after every test in this file. */
@@ -23,15 +23,16 @@ function withoutDevMode(fn: () => void): void {
 }
 
 /**
- * The two traps 0.2.0 keeps (both are 0.1.x behaviour) but now says out loud.
+ * The one trap that survived the 0.3.0 `retryTimeouts` flip: a write-shaped `createRequest`.
  *
- * Both are *combinations* of options rather than calls: neither is visible at the call site, and
- * neither can be a type error without splitting an API in two. So each is a dev-mode console warning.
+ * It is a *combination* of options rather than a call, so it is not visible at the call site and
+ * cannot be a type error without splitting an API in two. That is why it is a dev-mode console
+ * warning. The timeout-and-retry warning that used to live next to it was retired with the flip:
+ * the default it warned about is now the opt-in behaviour.
  *
  * Every message is printed at most once per session (`warnDevOnce`), which means **the tests below
  * have to use inputs that produce distinct messages** — two assertions about the same warning in one
- * file would otherwise be one assertion and one silence. That is why the timeout values are odd
- * numbers that exist only here.
+ * file would otherwise be one assertion and one silence.
  */
 describe('dev warnings', () => {
   beforeEach(() => {
@@ -43,67 +44,6 @@ describe('dev warnings', () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
-  });
-
-  describe('timeout combined with retry', () => {
-    it('warns once per message, with the way out', () => {
-      const warn = spyOnWarn();
-      normalizeRetry(2, { timeout: 1_234 });
-
-      expect(warn).toHaveBeenCalledTimes(1);
-      expect(warn.mock.calls[0][0]).toContain('retryTimeouts');
-      expect(warn.mock.calls[0][0]).toContain('timeout: 1234');
-
-      // A second handle is not a second mistake — a component on a revisited route rebuilds this
-      // every time, and a warning that repeats is a warning that gets filtered.
-      normalizeRetry(3, { timeout: 1_234 });
-      expect(warn).toHaveBeenCalledTimes(1);
-    });
-
-    it('is quiet when `retryTimeouts: false` already answers it', () => {
-      const warn = spyOnWarn();
-      normalizeRetry(2, { timeout: 1_235, timeouts: false });
-      expect(warn).not.toHaveBeenCalled();
-    });
-
-    it('is quiet when an explicit `when` already answers it', () => {
-      const warn = spyOnWarn();
-      normalizeRetry({ count: 2, when: () => true }, { timeout: 1_236 });
-      expect(warn).not.toHaveBeenCalled();
-    });
-
-    it('is quiet when nothing would be retried', () => {
-      // A warning about a retry that cannot happen is noise, so the policy has to exist first.
-      const warn = spyOnWarn();
-      normalizeRetry(undefined, { timeout: 1_237 });
-      normalizeRetry(false, { timeout: 1_238 });
-      normalizeRetry(0, { timeout: 1_239 });
-      expect(warn).not.toHaveBeenCalled();
-    });
-
-    it('is quiet without a timeout', () => {
-      const warn = spyOnWarn();
-      normalizeRetry(2);
-      expect(warn).not.toHaveBeenCalled();
-    });
-
-    it('is quiet outside dev mode', () => {
-      const warn = spyOnWarn();
-      withoutDevMode(() => normalizeRetry(2, { timeout: 1_240 }));
-      expect(warn).not.toHaveBeenCalled();
-    });
-
-    it('fires from a real request that sets both', async () => {
-      // The wiring end to end: the builder is what passes the request's own `timeout` into the
-      // policy, and the global config is what supplies the retry that makes it dangerous.
-      const warn = spyOnWarn();
-      const { create } = setup([provideSignalRequest({ retry: 1 })]);
-      create(() => createRequest<number>('/slow', { timeout: 1_241 }));
-
-      expect(warn).toHaveBeenCalledTimes(1);
-      expect(warn.mock.calls[0][0]).toContain('timeout: 1241');
-      await settle();
-    });
   });
 
   describe('write-shaped createRequest', () => {

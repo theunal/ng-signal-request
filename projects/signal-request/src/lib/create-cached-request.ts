@@ -86,7 +86,6 @@ function buildCachedInContext<T, R, TParams>(
 
   const lazy = options.lazy ?? false;
   const retryPolicy = normalizeRetry(options.retry ?? globalConfig.retry, {
-    timeout: options.timeout,
     timeouts: options.retryTimeouts ?? globalConfig.retryTimeouts,
   });
   const debounceMs = isBrowser ? (options.debounce ?? 0) : 0;

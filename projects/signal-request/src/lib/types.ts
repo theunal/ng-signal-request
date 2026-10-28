@@ -110,16 +110,14 @@ export interface SignalRequestConfig {
   /** Default retry policy for queries (`createRequest`). Mutations never retry by default. */
   retry?: RetryConfig;
   /**
-   * Whether a timeout counts as a failure worth retrying. Default `true`.
+   * Whether a timeout counts as a failure worth retrying. Default `false`.
    *
    * A timeout arrives as `status: 0`, so the default retry predicate cannot tell it apart from a
-   * dropped connection and retries it. That can be surprising — `timeout: 5000` with `retry: 2` may
-   * take about 15s — but it is the 0.1.x behaviour, so 0.2.0 keeps it. Set this to `false` to report
-   * `{ kind: 'timeout' }` as soon as the timeout elapses.
+   * dropped connection. Retrying it is a real choice - a flaky upstream does time out and then
+   * answer - but it is not the safe default: `timeout: 5000` with `retry: 2` would spend about 15s
+   * in front of a user before reporting `{ kind: 'timeout' }`. Set this to `true` to opt back in.
    *
    * A request's own `retryTimeouts` wins over this one, and an explicit `retry.when` wins over both.
-   * In dev mode the library warns when a `timeout` is combined with retry and neither escape hatch is
-   * used.
    */
   retryTimeouts?: boolean;
   /**
@@ -251,15 +249,15 @@ interface RequestOptionsBase<T, TRaw> {
    * Abort the request after this many ms. A timeout shows up as
    * `requestError() === { kind: 'timeout', ms }`, not `{ kind: 'aborted' }`.
    *
-   * A timeout reaches `retry` as a `status: 0` failure, so it is retried by default —
-   * `timeout: 5000` with `retry: 2` can therefore take up to ~15s. Set
-   * `retryTimeouts: false` to report the timeout as soon as it elapses, or write an explicit
-   * `retry: { when }` to decide per failure. In dev mode the library warns when neither is used.
+   * A timeout reaches `retry` as a `status: 0` failure, which the default predicate does **not**
+   * treat as transient: `timeout: 5000` with `retry: 2` reports the timeout once, after 5s, not
+   * three times. Pass `retryTimeouts: true` to retry it anyway, or write an explicit
+   * `retry: { when }` to decide per failure.
    */
   timeout?: number;
   /**
    * Whether this call's timeout counts as a failure worth retrying. Falls back to the global
-   * `retryTimeouts`, then to `true` — see {@link SignalRequestConfig.retryTimeouts}.
+   * `retryTimeouts`, then to `false` — see {@link SignalRequestConfig.retryTimeouts}.
    */
   retryTimeouts?: boolean;
   /**
@@ -822,7 +820,7 @@ export interface InfiniteRequestOptions<TPage, TParam> {
   timeout?: number;
   /**
    * Whether a page's timeout counts as a failure worth retrying. Falls back to the global
-   * `retryTimeouts`, then to `true` — see {@link SignalRequestConfig.retryTimeouts}.
+   * `retryTimeouts`, then to `false` — see {@link SignalRequestConfig.retryTimeouts}.
    */
   retryTimeouts?: boolean;
   /** Refetch when the tab becomes visible again. */

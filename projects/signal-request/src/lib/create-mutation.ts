@@ -242,7 +242,6 @@ function buildMutation<T, TArgs, TContext>(
    */
   const client = inject(QueryClient);
   const retryPolicy = normalizeRetry(options.retry, {
-    timeout: options.timeout,
     timeouts: options.retryTimeouts ?? config.retryTimeouts,
   });
   const concurrency = options.concurrency ?? 'parallel';

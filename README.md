@@ -75,7 +75,7 @@ because those callbacks run outside an injection context.
 | ----------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `baseUrl`                     | Prepended to every relative url. Absolute urls are left alone                                                                                                         |
 | `retry`                       | Default retry policy **for queries only**. Mutations never retry by default                                                                                           |
-| `retryTimeouts`               | Whether an elapsed `timeout` counts as worth retrying. Default `true` (0.1.x behaviour). See "The timeout + retry caveat"                                             |
+| `retryTimeouts`               | Whether an elapsed `timeout` counts as worth retrying. Default `false` since 0.3.0. See "The timeout + retry caveat"                                                  |
 | `headers`                     | `Record<string, string>`, or a function for reactive headers. Merged _under_ per-request headers                                                                      |
 | `onError`                     | Called once per request **or mutation** that ends in a final error, after retries. Good for toasts / logging                                                          |
 | `onSuccess`                   | The mirror image: called once per successful request or mutation. For logging / analytics — a toast belongs in the per-call `onSuccess`, where you know what happened |
@@ -189,7 +189,7 @@ bag it is just an ordinary query value (`?method=PUT`).
 | `debounce`                            | ms; delays source changes. **The very first request is never delayed.** Browser only                                                                                                                    |
 | `retry`                               | `3` \| `{ count, delay, when }`. Default: network errors, 408/425/429 and every 5xx; exponential back-off 1s, 2s, 4s… capped at 30s                                                                     |
 | `timeout`                             | Abort after N ms. Surfaces as `{ kind: 'timeout', ms }`. Overrides a `timeout` the source sets; a source-level `timeout` alone is classified the same way. See the caveat below                         |
-| `retryTimeouts`                       | Whether this request's `timeout` is retried. Default `true` (0.1.x behaviour); the global value is the fallback. See the caveat below                                                                   |
+| `retryTimeouts`                       | Whether this request's `timeout` is retried. Default `false`; the global value is the fallback. See the caveat below                                                                                    |
 | `pollInterval`                        | ms, or `() => number \| false` (reactive on/off). Browser only                                                                                                                                          |
 | `pollWhenHidden`                      | Keep polling while the tab is hidden (default `false`)                                                                                                                                                  |
 | `refetchOnWindowFocus`                | Re-fetch when the tab becomes visible again (default `false`). Browser only                                                                                                                             |
@@ -468,27 +468,26 @@ try {
 ### The timeout + retry caveat
 
 A timeout reaches the retry policy as a `status: 0` failure, which by status
-alone is indistinguishable from a dropped connection — so **it is retried by
-default**: `timeout: 5_000` with `retry: 2` can take about 15s and show three
-loading cycles before reporting the timeout. That default is unchanged from
-0.1.x, and in dev mode the library warns you when you combine the two options and
-say nothing about the timeout.
+alone is indistinguishable from a dropped connection. Retrying it is a real
+choice — a flaky upstream does time out and then answer — but it is not the safe
+default, because `timeout: 5_000` with `retry: 2` spends about 15s and shows three
+loading cycles before reporting the timeout. **Since 0.3.0 it is not retried**;
+the timeout is reported as soon as it elapses.
 
-> **This default changes in 0.3.0**, to `false`. It is not changed here because a
-> retry policy is not something to alter underneath a caller in a minor release —
-> the timing of every failing request would move. Set `retryTimeouts` explicitly
-> (either value) before then and the change is a non-event. The CHANGELOG's
-> Deprecated section has the same note.
+> **This changed in 0.3.0.** 0.1.x and 0.2.0 retried a timeout by default and
+> warned about it in dev mode. If you relied on that, pass
+> `retryTimeouts: true` — globally in `provideSignalRequest` or per request — and
+> nothing else about your retry policy moves. The CHANGELOG's 0.3.0 section has
+> the migration note.
 
-`retryTimeouts: false` is the way out — the timeout is reported as soon as it
-happens:
+`retryTimeouts: true` is the way back in:
 
 ```ts
-// one request, { kind: 'timeout', ms: 5_000 } as soon as the 5s elapses
-createRequest<User[]>('/users', { timeout: 5_000, retry: 2, retryTimeouts: false });
+// three attempts, ~15s, the 0.2.0 behaviour
+createRequest<User[]>('/users', { timeout: 5_000, retry: 2, retryTimeouts: true });
 ```
 
-It can be set globally (`provideSignalRequest({ retryTimeouts: false })`) and
+It can be set globally (`provideSignalRequest({ retryTimeouts: true })`) and
 overridden per request, and it is deliberately narrow: a genuine network failure
 still retries, because that is the case retries exist for. An explicit
 `retry: { when }` wins over both, since it answers the same question:
@@ -875,7 +874,7 @@ becomes the query string, exactly as in `createRequest`.
 | `headers`                             | Headers for this call, merged over the global defaults                                                                                             |
 | `retry`                               | **Off by default**, because writes are rarely idempotent. The global `retry` is _not_ inherited                                                    |
 | `timeout`                             | Abort the call after N ms. Wins over a `timeout` returned by the builder; without it, the builder's value is used as is                            |
-| `retryTimeouts`                       | Whether this call's `timeout` is retried. Default `true`; the global value is the fallback. See "The timeout + retry caveat"                       |
+| `retryTimeouts`                       | Whether this call's `timeout` is retried. Default `false`; the global value is the fallback. See "The timeout + retry caveat"                      |
 | `invalidates`                         | `Reloadable[]`, or a function returning one. Use the function form to avoid field-ordering problems                                                |
 | `onSuccess` / `onError` / `onSettled` | Lifecycle hooks                                                                                                                                    |
 | `injector`                            | Required if called outside an injection context                                                                                                    |
@@ -1853,7 +1852,7 @@ you give up when you stay inside Angular.
 | Invalidating by key  | `invalidates: [['users']]` refreshes every open `['users', …]` query                                                                                                                           | `invalidateQueries({ queryKey })`                                                    |
 | SSR                  | `providedIn: 'root'` already means one cache per render, with `TransferState` hydration                                                                                                        | A `QueryClient` you create per request in the server handler                         |
 | Errors               | A normalized `RequestError` view with per-kind predicates (`http()`, `timeout()`, `network()`, …) and a `message` getter, so templates do not need `@switch`                                   | `Error`, narrowed by hand                                                            |
-| Timeouts             | `timeout` per request, classified as its own kind, and `retryTimeouts: false` to stop a timeout from being retried as a `status: 0` failure                                                    | No built-in timeout; abandoned by composing an `AbortSignal`                         |
+| Timeouts             | `timeout` per request, classified as its own kind; a timeout is not retried as a `status: 0` failure unless `retryTimeouts: true` says so                                                      | No built-in timeout; abandoned by composing an `AbortSignal`                         |
 | Offline              | `networkMode` on queries and mutations, a paused state, and an opt-in durable mutation queue (`/persist/queue`) that survives a reload and can replay through Background Sync with no tab open | `onlineManager` + `networkMode`, paused mutations, and persisted mutation resumption |
 | Framework scope      | Angular 22                                                                                                                                                                                     | React, Vue, Svelte, Solid, Angular                                                   |
 
@@ -1973,13 +1972,13 @@ enough that the translation is mechanical.
   **second** argument; the first one is `params`. On the **cached** path it is
   unavailable outright, and the error says what to do instead: put the upstream
   value in the key (see "Dependent queries on a cached handle").
-- Two combinations print a dev-mode warning, once each per page load, because
-  neither is visible at the call site and neither can be a type error without
-  splitting an API in two: a `timeout` combined with retry (see "The timeout +
-  retry caveat"), and a **non-`lazy`, non-`GET` `createRequest`**. The second one
-  is reactive like every other query, so `createRequest.post(...)` re-fires
-  whenever a signal its source reads changes — for a write, use `createMutation`
-  or `lazy: true`.
+- One combination prints a dev-mode warning, once per page load, because it is
+  not visible at the call site and cannot be a type error without splitting an API
+  in two: a **non-`lazy`, non-`GET` `createRequest`**. It is reactive like every
+  other query, so `createRequest.post(...)` re-fires whenever a signal its source
+  reads changes — for a write, use `createMutation` or `lazy: true`. (The
+  timeout-and-retry warning that used to sit next to it was retired in 0.3.0,
+  when the default it warned about became the opt-in behaviour.)
 - SSR: `pollInterval`, `debounce` and `networkMode` are ignored on the server so
   timers do not hold stability and a render is never paused. Retry delays and
   `timeout` do apply.

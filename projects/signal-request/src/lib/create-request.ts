@@ -117,7 +117,6 @@ function buildInContext<T, R, TParams>(
   const networkMode: NetworkMode = options.networkMode ?? globalConfig.networkMode ?? 'always';
   const online = resolveConnectivity(networkMode, options.refetchOnReconnect === true);
   const retryPolicy = normalizeRetry(options.retry ?? globalConfig.retry, {
-    timeout: options.timeout,
     timeouts: options.retryTimeouts ?? globalConfig.retryTimeouts,
   });
   const debounceMs = isBrowser ? (options.debounce ?? 0) : 0;

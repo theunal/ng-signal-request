@@ -1170,3 +1170,41 @@ above the configured floors of 90 / 85 / 90 / 90. `pnpm test:e2e` is **9 passed*
 (3 demo, 6 queue) against Chromium. `pnpm check:api v0.2.0` reports 0 removed and 17
 added names; `check:dist` passes with `ng-signal-request-persist-queue.mjs` at 8.9 KB
 gzip and the worker entry at 4.0 KB gzip.
+
+## 23. `retryTimeouts` default flip (0.3.0)
+
+The one change in 0.3.0 is the default promised since 0.2.0: a timeout is no longer
+retried unless `retryTimeouts: true` says so. The mechanism is one line -
+`defaults.timeouts === true` instead of `!== false` - and the rest of the change is the
+dev warning that default made necessary.
+
+### 23.1 What changed
+
+- `normalizeRetry` keeps a timeout out of what the **default** predicate treats as
+  transient. An explicit `retry.when` still wins, because it answers the same question,
+  and a genuine network failure still retries.
+- The dev warning "timeout combined with retry" is removed, with its
+  `RetryDefaults.timeout` field: it existed to announce a surprising default, and the
+  same warning would now fire for every application that wants the new behaviour. The
+  non-`lazy`, non-`GET` `createRequest` warning is untouched.
+- `retry-timeouts.spec.ts` pins both sides of the new default rather than the old one:
+  one attempt and no armed timer by default, three attempts with `retryTimeouts: true`,
+  the global fallback in both directions, and the cached-entry path inside the entry's
+  own RxJS pipeline.
+- The demo's side-by-side pair swapped roles: the left button opts in, the right one is
+  the default.
+
+### 23.2 What it costs
+
+An application that relied on the retry silently loses it - that is the risk of any
+default flip, and the reason it was announced a release early. The migration is one
+option, `retryTimeouts: true`, and there is no compile-time change: the option, its
+type and its global fallback are unchanged.
+
+### 23.3 What is not covered
+
+- **No automatic detection.** Nothing warns an application that used to rely on the
+  retry; the dev warning was the mechanism for that, and it is gone by design. The
+  CHANGELOG's 0.3.0 section and the README's caveat are the record.
+- **No timing measurement.** The unit tests use fake timers and assert attempts, not
+  wall-clock duration; `timeout × (retries + 1)` is arithmetic, not a measurement.

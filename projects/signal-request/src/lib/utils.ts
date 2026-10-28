@@ -291,38 +291,13 @@ const defaultDelay = (attempt: number): number => Math.min(1000 * 2 ** (attempt 
 
 /** What the caller knows that the retry config does not. */
 export interface RetryDefaults {
-  /** The call's own `timeout`, used only for the dev-mode warning below. */
-  readonly timeout?: number;
   /**
    * `retryTimeouts` from the request, or from the global config if the request did not set it.
    *
-   * `false` takes a timeout out of what the *default* predicate considers transient. An explicit
-   * `when` always wins, because it is an answer to the same question.
+   * `false` - the default - takes a timeout out of what the *default* predicate considers
+   * transient. An explicit `when` always wins, because it is an answer to the same question.
    */
   readonly timeouts?: boolean;
-}
-
-/**
- * Dev-mode nudge for the one combination 0.2.0 kept but changed the meaning of.
- *
- * Before 0.2.0 a timeout was retried together with the network failures, silently: `timeout: 5000`
- * with `retry: 2` could spend about 15s before reporting `{ kind: 'timeout' }`. 0.2.0 keeps that as
- * the default so no existing application changes behaviour, which means an application that never
- * asked for it is now told it is happening and how to stop it.
- *
- * Deduplicated per message, so this costs one line in the console rather than one per request.
- */
-function warnIfTimeoutRetried(
-  timeout: number | undefined,
-  retryTimeouts: boolean,
-  when: ((error: Error, attempt: number) => boolean) | undefined,
-): void {
-  if (timeout === undefined || !retryTimeouts || when !== undefined) return;
-
-  warnDevOnce(
-    `ng-signal-request: \`timeout: ${timeout}\` is retried like a network failure. ` +
-      `Pass \`retryTimeouts: false\` or \`retry: { when }\` to change that.`,
-  );
 }
 
 export function normalizeRetry(
@@ -332,8 +307,10 @@ export function normalizeRetry(
   if (config === undefined || config === false) return undefined;
   const options = typeof config === 'number' ? { count: config } : config;
   if (!(options.count > 0)) return undefined;
-  const retryTimeouts = defaults.timeouts !== false;
-  warnIfTimeoutRetried(defaults.timeout, retryTimeouts, options.when);
+  // `true` opts a timeout back in; anything else, including "not set", keeps it out. The 0.2.0
+  // warning that pointed at this flag is gone with the flip: the surprising default is now the
+  // opt-in one, so there is nothing to warn about.
+  const retryTimeouts = defaults.timeouts === true;
   const { delay } = options;
   return {
     count: options.count,

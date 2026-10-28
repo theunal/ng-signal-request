@@ -21,10 +21,9 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
-> Release-ready as `0.4.0`, after `0.3.0` - the promised `retryTimeouts` default flip
->
-> - is tagged. The checklist, the version reasoning and the publish steps are in
->   [`docs/release-0.4.md`](./docs/release-0.4.md).
+Release-ready as `0.4.0`, on top of `0.3.0` (the promised `retryTimeouts` default flip,
+released 2026-10-28). The checklist, the version reasoning and the publish steps are in
+[`docs/release-0.4.md`](./docs/release-0.4.md).
 
 ### Added
 
@@ -87,6 +86,39 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   effect, how long a key has to be remembered, the failure classification the queue
   derives from whether a key is present, and a two-`curl` check for one endpoint.
   `persist/queue/idempotency.spec.ts` asserts the client half.
+
+## [0.3.0] - 2026-10-28
+
+The release that was promised in 0.2.0 and in the README: the `retryTimeouts` default
+flips. Nothing else changes, no name is removed, and an application that set the option
+explicitly - either value - sees no difference at all.
+
+### Changed
+
+- **A `timeout` is no longer retried by default.** `retryTimeouts` now defaults to
+  `false`, so `timeout: 5_000` with `retry: 2` reports `{ kind: 'timeout', ms: 5_000 }`
+  after about 5s instead of spending about 15s and showing three loading cycles. A
+  timeout arrives as an abort carrying `status: 0`, which the default predicate cannot
+  tell apart from a dropped connection; retrying it is a real choice, but not the safe
+  one, so it is now the opt-in.
+  - Opt back in with `retryTimeouts: true`, per request or globally in
+    `provideSignalRequest`. An explicit `retry: { when }` still wins over both, because
+    it answers the same question.
+  - The flag stays narrow: a genuine network failure still retries. Only the timeout is
+    excluded from what the **default** predicate considers transient.
+  - Applies to `createRequest` (all variants), `createCachedRequest`,
+    `createInfiniteRequest`, `createMutation` and their global fallback.
+- **The dev-mode warning for a `timeout` combined with `retry` is gone.** It existed to
+  announce a surprising default and point at the way out; the default is now the
+  unsurprising one, so the same warning would fire for every application that wants the
+  new behaviour. A non-`lazy`, non-`GET` `createRequest` still warns.
+
+### Migration from 0.2.0
+
+Nothing, unless you relied on the retry. If a failing `timeout` used to take
+`timeout × (retries + 1)`, it now takes `timeout`; pass `retryTimeouts: true` to keep
+the old timing. There is no compile-time change and no renamed option, and
+`docs/verification.md` §23 records what was re-measured.
 
 ## [0.2.0] - 2026-10-21
 

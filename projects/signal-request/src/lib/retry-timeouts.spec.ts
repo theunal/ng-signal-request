@@ -36,10 +36,32 @@ describe('retryTimeouts', () => {
     vi.useRealTimers();
   });
 
-  it('retries a timeout by default, which is the 0.1.x behaviour', async () => {
+  it('reports a timeout once by default, without retrying it', async () => {
     const { http, create } = setup();
     const r = create(() =>
       createRequest<number>('/slow', { timeout: 30, retry: { count: 2, delay: 5 } }),
+    );
+
+    await settle();
+    http.expectOne('/slow').error(abortEvent('TimeoutError'), timedOut);
+    await settle();
+
+    // The default since 0.3.0: one attempt, the failure as soon as the timeout elapses.
+    expect(r.requestError()).toEqual({ kind: 'timeout', ms: 30 });
+    expect(r.retryAttempt()).toBe(0);
+    // Nothing scheduled, nothing pending: not even a back-off timer was armed.
+    http.expectNone(() => true);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('retries the timeout when the request opts in', async () => {
+    const { http, create } = setup();
+    const r = create(() =>
+      createRequest<number>('/slow', {
+        timeout: 30,
+        retry: { count: 2, delay: 5 },
+        retryTimeouts: true,
+      }),
     );
 
     await settle();
@@ -52,43 +74,14 @@ describe('retryTimeouts', () => {
 
     await vi.advanceTimersByTimeAsync(5);
     await settle();
-    http.expectOne('/slow').error(abortEvent('TimeoutError'), timedOut);
-    await settle();
-    expect(r.retryAttempt()).toBe(2);
-
-    await vi.advanceTimersByTimeAsync(5);
-    await settle();
-    http.expectOne('/slow').error(abortEvent('TimeoutError'), timedOut);
+    http.expectOne('/slow').flush(1);
     await settle();
 
-    expect(r.requestError()).toEqual({ kind: 'timeout', ms: 30 });
-    expect(r.retryAttempt()).toBe(2);
-    http.expectNone(() => true);
-  });
-
-  it('reports the timeout instead, when the request says so', async () => {
-    const { http, create } = setup();
-    const r = create(() =>
-      createRequest<number>('/slow', {
-        timeout: 30,
-        retry: { count: 2, delay: 5 },
-        retryTimeouts: false,
-      }),
-    );
-
-    await settle();
-    http.expectOne('/slow').error(abortEvent('TimeoutError'), timedOut);
-    await settle();
-
-    expect(r.requestError()).toEqual({ kind: 'timeout', ms: 30 });
-    expect(r.retryAttempt()).toBe(0);
-    // Nothing scheduled, nothing pending: not even a back-off timer was armed.
-    http.expectNone(() => true);
-    expect(vi.getTimerCount()).toBe(0);
+    expect(r.response()).toBe(1);
   });
 
   it('reads the global setting when the request does not set one', async () => {
-    const { http, create } = setup([provideSignalRequest({ retryTimeouts: false })]);
+    const { http, create } = setup([provideSignalRequest({ retryTimeouts: true })]);
     const r = create(() =>
       createRequest<number>('/slow', { timeout: 30, retry: { count: 1, delay: 5 } }),
     );
@@ -96,9 +89,13 @@ describe('retryTimeouts', () => {
     await settle();
     http.expectOne('/slow').error(abortEvent('TimeoutError'), timedOut);
     await settle();
+    expect(r.retryAttempt()).toBe(1);
 
-    expect(r.requestError()).toEqual({ kind: 'timeout', ms: 30 });
-    http.expectNone(() => true);
+    await vi.advanceTimersByTimeAsync(5);
+    await settle();
+    http.expectOne('/slow').flush(1);
+    await settle();
+    expect(r.response()).toBe(1);
   });
 
   it('lets a request turn retries back on over a global `false`', async () => {
@@ -167,10 +164,14 @@ describe('retryTimeouts', () => {
     expect(r.retryAttempt()).toBe(1);
   });
 
-  it('applies to a mutation, whose retry is opt-in', async () => {
+  it('applies to a mutation, whose retry is opt-in twice', async () => {
     const { http, create } = setup();
     const save = create(() =>
-      createMutation<number>(() => '/save', { timeout: 30, retry: { count: 1, delay: 5 } }),
+      createMutation<number>(() => '/save', {
+        timeout: 30,
+        retry: { count: 1, delay: 5 },
+        retryTimeouts: true,
+      }),
     );
 
     const outcome = save.tryRun();
@@ -228,13 +229,14 @@ describe('retryTimeouts', () => {
     http.expectNone(() => true);
   });
 
-  it('leaves a cached entry retrying a timeout by default', async () => {
+  it('leaves a cached entry retrying a timeout when it opts in', async () => {
     const { http, create } = setup([provideSignalRequest({ gcTime: GC })]);
     const r = create(() =>
       createRequest<number>('/slow', {
         key: () => ['slow'],
         timeout: 30,
         retry: { count: 1, delay: 5 },
+        retryTimeouts: true,
       }),
     );
 

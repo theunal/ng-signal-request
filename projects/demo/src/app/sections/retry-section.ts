@@ -118,19 +118,19 @@ interface SearchParams {
       <h2>Timeout + retry — <code>retryTimeouts</code></h2>
       <p class="hint">
         <code>/api/slow</code> 3 saniye sürüyor, <code>timeout: 900</code> ise 900 ms'de kesiyor.
-        Zaman aşımı <code>status: 0</code> olarak geldiği için <strong>varsayılan</strong> hâlâ
-        yeniden dener: soldaki düğme üç kez bekler. <code>retryTimeouts: false</code> olan sağdaki
-        ise hatayı ilk zaman aşımında bildirir.
+        Zaman aşımı <code>status: 0</code> olarak geldiği için 0.3.0'a kadar varsayılan yeniden
+        deniyordu; artık denemiyor. Sağdaki düğme hatayı ilk zaman aşımında bildirir,
+        <code>retryTimeouts: true</code> olan soldaki üç kez bekler.
       </p>
 
       <div class="row">
-        <button (click)="retried.reload()">Varsayılan (yeniden dener)</button>
-        <button (click)="notRetried.reload()">retryTimeouts: false</button>
+        <button (click)="retried.reload()">retryTimeouts: true (yeniden dener)</button>
+        <button (click)="notRetried.reload()">Varsayılan (yeniden denemez)</button>
       </div>
 
       <div class="status">
         <span class="badge" [class]="'badge ' + retried.status()">
-          varsayılan: {{ retried.status() }}
+          opt-in: {{ retried.status() }}
         </span>
         @if (retried.retryAttempt() > 0) {
           <span class="badge warn">retry #{{ retried.retryAttempt() }}</span>
@@ -142,7 +142,7 @@ interface SearchParams {
 
       <div class="status">
         <span class="badge" [class]="'badge ' + notRetried.status()">
-          hemen: {{ notRetried.status() }}
+          varsayılan: {{ notRetried.status() }}
         </span>
         @if (notRetried.retryAttempt() > 0) {
           <span class="badge warn">retry #{{ notRetried.retryAttempt() }}</span>
@@ -219,24 +219,24 @@ export class RetrySection {
    * The timeout trap, side by side.
    *
    * A timeout is an abort carrying `status: 0`, which the default retry predicate cannot tell apart
-   * from a dropped connection — so it retries, and this call spends 900ms × (1 + 2 retries) before
-   * reporting the timeout. `retryTimeouts: false` reports the first one. Both are `lazy`, so the two
-   * are only compared when you press the buttons.
+   * from a dropped connection. Since 0.3.0 the default is to report it: the right-hand call spends
+   * 900ms and fails. `retryTimeouts: true` opts back in and spends 900ms × (1 + 2 retries). Both
+   * are `lazy`, so the two are only compared when you press the buttons.
    */
   protected readonly retried = createRequest<{ title: string }[]>(
     { url: '/api/slow?mode=retried' },
-    { lazy: true, initialValue: [], timeout: 900, retry: { count: 2, delay: 300 } },
-  );
-
-  protected readonly notRetried = createRequest<{ title: string }[]>(
-    { url: '/api/slow?mode=immediate' },
     {
       lazy: true,
       initialValue: [],
       timeout: 900,
       retry: { count: 2, delay: 300 },
-      retryTimeouts: false,
+      retryTimeouts: true,
     },
+  );
+
+  protected readonly notRetried = createRequest<{ title: string }[]>(
+    { url: '/api/slow?mode=immediate' },
+    { lazy: true, initialValue: [], timeout: 900, retry: { count: 2, delay: 300 } },
   );
 
   protected readonly raw = createRequest<string>({ url: '/posts/1' }, { lazy: true, retry: 0 });

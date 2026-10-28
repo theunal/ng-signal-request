@@ -21,8 +21,13 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
-Release-ready as `0.4.0`, on top of `0.3.0` (the promised `retryTimeouts` default flip,
-released 2026-10-28). The checklist, the version reasoning and the publish steps are in
+## [0.4.0] - 2026-10-28
+
+Published to npm as `ng-signal-request@0.4.0` with provenance; the [workflow
+run](https://github.com/theunal/ng-signal-request/actions/runs/40688548076) and the
+[SLSA statement](https://registry.npmjs.org/-/npm/v1/attestations/ng-signal-request@0.4.0)
+both name `refs/tags/v0.4.0`. The release record - what ships, which defaults deliberately
+do not move, and why this is `0.4.0` and not `0.3.0` - is
 [`docs/release-0.4.md`](./docs/release-0.4.md).
 
 ### Added
@@ -92,6 +97,16 @@ released 2026-10-28). The checklist, the version reasoning and the publish steps
 The release that was promised in 0.2.0 and in the README: the `retryTimeouts` default
 flips. Nothing else changes, no name is removed, and an application that set the option
 explicitly - either value - sees no difference at all.
+
+Published to npm as `ng-signal-request@0.3.0` with provenance from tag `v0.3.0`. The run
+that published it, [#40688167110](https://github.com/theunal/ng-signal-request/actions/runs/40688167110),
+is marked **failed** even though the version and its attestation are on the registry:
+`npm publish` exited non-zero after the upload had been accepted. The earlier run for the
+same tag,
+[#40687677155](https://github.com/theunal/ng-signal-request/actions/runs/40687677155),
+succeeded but skipped the publish, because its pre-flight probe reported the version as
+already present. Both facts are recorded here rather than tidied away: the gate that
+matters is the registry, and the workflow's own exit code was wrong twice for this tag.
 
 ### Changed
 

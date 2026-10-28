@@ -4,9 +4,8 @@ This is the release record for the durable mutation queue. It states what ships,
 does not change, why the version is `0.4.0` and not `0.3.0`, and the checks that have to pass before
 the tag. The npm outcome is recorded at the end, when there is one.
 
-> **Status: ready to cut, not cut.** Every code and documentation change is in the working tree and
-> the gate below passes. The two steps that are left are a decision and an action: tag `v0.3.0`
-> first (see "Why 0.4.0"), then tag `v0.4.0` and let `npm-publish.yml` do the publish.
+> **Status: published.** `v0.3.0` was tagged first (the `retryTimeouts` flip), then `v0.4.0`, and
+> `npm-publish.yml` published both with provenance. The npm outcome is recorded at the end.
 
 ## What ships
 
@@ -99,18 +98,21 @@ or a decision rather than on the repository.
 
 ### Manual
 
-- [ ] Tag `v0.3.0` (the `retryTimeouts` flip) if that release is still owed.
-- [ ] Confirm the npm version is free: `curl -fsSL https://registry.npmjs.org/ng-signal-request/0.4.0`.
-- [ ] Check the tarball, not the workspace: `pnpm pack` in `projects/signal-request` and confirm
-      `persist/queue` and `persist/queue/sw` are present with their `.d.ts` files, and that
-      `package.json` `exports` lists both.
-- [ ] Confirm `projects/signal-request/package.json` `version` is `0.1.0` in the repository - the
+- [x] Tag `v0.3.0` (the `retryTimeouts` flip) first - published 2026-10-28T12:30:46Z.
+- [x] Confirm the npm version is free: `curl -fsSL https://registry.npmjs.org/ng-signal-request/0.4.0`.
+- [x] Confirm `projects/signal-request/package.json` `version` is `0.1.0` in the repository - the
       workflow derives the published version from the tag, and a hand-edited version there is a
       merge conflict waiting to happen.
-- [ ] Read the release notes as a 0.2.0 user: nothing they use changed.
-- [ ] Tag and push: `git tag v0.4.0 && git push origin v0.4.0`. The workflow builds, tests,
+- [x] Read the release notes as a 0.2.0 user: nothing they use changed.
+- [x] Tag and push: `git tag v0.4.0 && git push origin v0.4.0`. The workflow builds, tests,
       typechecks the demo, runs `check:dist` and publishes with provenance through Trusted
       Publishing. It skips the publish if the version is already on the registry.
+- [x] Check the tarball, not the workspace. The published `0.4.0` tarball carries
+      `fesm2022/ng-signal-request-persist-queue.mjs`, `fesm2022/ng-signal-request-persist-queue-sw.mjs`
+      and `types/ng-signal-request-persist-queue{,-sw}.d.ts`, and `exports` maps `./persist/queue`
+      and `./persist/queue/sw` onto them. There is no `persist/queue` directory in the package -
+      ng-packagr flattens the entry points into `fesm2022/` - so a `tar -t | grep persist/queue`
+      check answers the wrong question.
 
 ## Rollback
 
@@ -124,5 +126,24 @@ the checklist above is longer than the change.
 
 ## npm outcome
 
-Not published yet. When it is, record the version, the workflow run URL and the SLSA statement here,
-the way `docs/release-0.2.md` does.
+| Release | Published (UTC)          | Workflow run                                                                          | Provenance                                                                       |
+| ------- | ------------------------ | ------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
+| `0.3.0` | 2026-10-28T12:30:46.871Z | [#40688167110](https://github.com/theunal/ng-signal-request/actions/runs/40688167110) | [SLSA](https://registry.npmjs.org/-/npm/v1/attestations/ng-signal-request@0.3.0) |
+| `0.4.0` | 2026-10-28T12:33:48.995Z | [#40688548076](https://github.com/theunal/ng-signal-request/actions/runs/40688548076) | [SLSA](https://registry.npmjs.org/-/npm/v1/attestations/ng-signal-request@0.4.0) |
+
+`ng-signal-request@latest` is `0.4.0`.
+
+Two things about the `0.3.0` runs are worth keeping, because the workflow's exit code was
+wrong in both directions:
+
+- [#40687677155](https://github.com/theunal/ng-signal-request/actions/runs/40687677155)
+  succeeded and **skipped** the publish: its pre-flight `curl` probe reported `0.3.0` as
+  already on the registry before anything had been published.
+- [#40688167110](https://github.com/theunal/ng-signal-request/actions/runs/40688167110)
+  published the version and its attestation, then `npm publish` exited non-zero, so the run
+  is marked **failed** even though the release is fine.
+
+The lesson is not "trust the registry over the workflow" or the reverse; it is that the
+pre-flight probe and the exit code are both unreliable for a first publish, so a release is
+confirmed by the version endpoint, not by the run's colour. `0.4.0` was green on the first
+attempt.

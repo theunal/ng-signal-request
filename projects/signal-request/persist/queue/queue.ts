@@ -73,6 +73,15 @@ const DEFAULT_BASE_DELAY = 1_000;
 const DEFAULT_MAX_DELAY = 30_000;
 const DEFAULT_NO_HANDLER_WARN_AFTER_MS = 5_000;
 
+/**
+ * How the queue's single-owner rule resolved for this tab.
+ *
+ * `'waiter'` is not "disabled": a waiting tab can still store its own calls durably, it just cannot
+ * dispatch them. Keeping the three cases apart is what stops "another tab owns replay" from being
+ * reported as "durability is off".
+ */
+type Ownership = 'owner' | 'waiter' | 'disabled';
+
 export interface PersistedMutationQueueRetryOptions {
   /** Attempts after the first one. Default `5`. */
   readonly maxAttempts?: number;
@@ -152,6 +161,16 @@ export type PersistedMutationQueueEvent =
   | { readonly type: 'restored'; readonly entries: readonly PersistedMutationEntry[] };
 
 export type PersistedMutationQueueListener = (event: PersistedMutationQueueEvent) => void;
+
+/**
+ * What the tabs of one queue say to each other.
+ *
+ * Deliberately tiny and never the payload: `enqueued` means "read the snapshot", `removed` means
+ * "stop showing this entry, someone delivered it". The snapshot stays the only source of truth, so
+ * a lost message costs latency and never data.
+ */
+type MutationQueueChannelMessage =
+  { readonly type: 'enqueued' } | { readonly type: 'removed'; readonly id: string };
 
 /** The options token is internal; applications configure the queue through the provider. */
 export const PERSISTED_MUTATION_QUEUE_OPTIONS = new InjectionToken<PersistedMutationQueueOptions>(
@@ -332,13 +351,29 @@ export class PersistedMutationQueue implements MutationQueueAdapter {
   readonly isReplaying: Signal<boolean> = this.replayingState.asReadonly();
   /** `true` after a 401/403 while replaying; `resume()` clears it. */
   readonly needsAuth: Signal<boolean> = this.authState.asReadonly();
-  /** Whether this tab owns the queue. `false` when another tab holds the Web Lock. */
+  /** Whether this tab owns replay. `false` when another tab holds the Web Lock. */
   readonly owner: Signal<boolean> = this.ownerState.asReadonly();
-  /** `false` when storage is unavailable, the queue is corrupt, or another tab owns it. */
+  /**
+   * Whether a persisted call made in this tab is stored durably.
+   *
+   * `true` in a tab that does **not** own replay as well: such a tab stores its own calls and the
+   * owner delivers them. `false` only when storage is unavailable, the queue is corrupt, or a
+   * storage write failed - the cases where a call really does fall back to memory alone.
+   */
   readonly enabled: Signal<boolean> = this.enabledState.asReadonly();
 
   private readonly handlers = new Map<string, MutationQueueHandler>();
   private readonly retryHooks = new Map<string, () => void>();
+  /** Calls in this tab whose entry another tab (or the worker) delivered. */
+  private readonly settledHooks = new Map<string, () => void>();
+  /**
+   * Ids this tab removed from the snapshot.
+   *
+   * A write preserves the entries another tab appended, which means it also has to be told what
+   * this tab deleted - otherwise every settled entry would come back as "someone else's" on the
+   * next read and be replayed forever.
+   */
+  private readonly removedIds = new Set<string>();
   private readonly activeIds = new Set<string>();
   private readonly restoredIds = new Set<string>();
   /** Entries whose version migration / `onRestore` has not finished; replay must not touch them. */
@@ -373,6 +408,13 @@ export class PersistedMutationQueue implements MutationQueueAdapter {
   private lockWait: AbortController | undefined;
   private detachOnline: (() => void) | undefined;
   private writing: Promise<unknown> = Promise.resolve();
+  /**
+   * Tells the owning tab that a waiting tab stored a call it cannot dispatch itself.
+   *
+   * Absent in a browser without `BroadcastChannel`; the entry is still durable, it is simply not
+   * delivered until the owner writes again or a page hydrates.
+   */
+  private channel: BroadcastChannel | undefined;
 
   private readonly key = this.options.key ?? DEFAULT_QUEUE_KEY;
   private readonly maxEntries = Math.max(1, this.options.maxEntries ?? DEFAULT_MAX_ENTRIES);
@@ -435,6 +477,10 @@ export class PersistedMutationQueue implements MutationQueueAdapter {
     await this.hydratedReady.promise;
     if (!this.enabledState() || this.destroyed || this.quarantined) return null;
 
+    // A tab that does not own replay still stores its own call; it just cannot dispatch it. That is
+    // the whole difference between "this tab delivers it" and "this call is lost on reload".
+    if (!this.ownerState()) return this.enqueueDetached(input);
+
     if (this.entryState().length >= this.maxEntries) {
       this.emit({ type: 'queue-full', maxEntries: this.maxEntries });
       throw new MutationQueueFullError(this.maxEntries);
@@ -486,14 +532,84 @@ export class PersistedMutationQueue implements MutationQueueAdapter {
     return { entry, deferred };
   }
 
+  /**
+   * Stores a call in a tab that does not own replay.
+   *
+   * The entry goes into the same snapshot, appended under the short write lock, so the owner reads
+   * it on its next refresh. This tab never dispatches it: two tabs sending the same entry would be
+   * the duplicate traffic the single-owner rule exists to prevent.
+   *
+   * `deferred` is "this tab cannot deliver it now". A durable mutation is always
+   * `networkMode: 'online'` (the core disables persistence for anything else), so an offline call
+   * is exactly the case that used to become a memory-only hold: it is stored and the owner is asked
+   * to take it. An online call still dispatches from here, and if that dispatch fails, `failed()`
+   * hands the entry over instead of retrying it in a tab that does not replay.
+   */
+  private async enqueueDetached(
+    input: MutationQueueEnqueueInput,
+  ): Promise<MutationQueueEnqueueResult | null> {
+    const entry: PersistedMutationEntry = {
+      id: newEntryId(),
+      key: input.key,
+      version: input.version,
+      ...(input.args === undefined ? {} : { args: input.args }),
+      createdAt: Date.now(),
+      seq: 0, // assigned under the write lock, from what is actually stored
+      ...(input.lane === undefined ? {} : { lane: input.lane }),
+      idempotencyKey: input.idempotencyKey,
+      attempts: 0,
+      state: 'pending',
+    };
+    const deferred = !this.online.online();
+
+    let stored: PersistedMutationEntry | 'full';
+    try {
+      stored = await this.withWriteLock(async () => {
+        const current = await this.readStoredEntries();
+        if (current.length >= this.maxEntries) return 'full' as const;
+        const next: PersistedMutationEntry = {
+          ...entry,
+          seq: current.reduce((max, candidate) => Math.max(max, candidate.seq), 0) + 1,
+        };
+        await this.writeEntries([...current, next]);
+        return next;
+      });
+    } catch (error) {
+      this.handleStorageError(error);
+      if (this.options.onStorageError === 'fail') {
+        throw new MutationQueueDisabledError(
+          'The persisted mutation queue could not store this call. ' +
+            '`onStorageError: "fail"` rejects instead of sending it without durability.',
+          error,
+        );
+      }
+      return null;
+    }
+
+    if (stored === 'full') {
+      this.emit({ type: 'queue-full', maxEntries: this.maxEntries });
+      throw new MutationQueueFullError(this.maxEntries);
+    }
+
+    this.setEntries([...this.entryState(), stored]);
+    this.emit({ type: 'enqueued', entry: stored });
+    // Even a tab that does not replay can ask the worker to wake up: the entry is durable and the
+    // worker takes the queue when no page owns it.
+    this.requestBackgroundSync();
+    if (deferred) this.notifyOwner();
+    return { entry: stored, deferred };
+  }
+
   succeeded(id: string): void {
     const entry = this.find(id);
     if (entry === undefined) return;
     this.activeIds.delete(id);
     this.retryHooks.delete(id);
     this.restoredIds.delete(id);
+    this.removedIds.add(id);
     this.setEntries(this.entryState().filter((candidate) => candidate.id !== id));
     this.emit({ type: 'succeeded', entry });
+    this.broadcast({ type: 'removed', id });
     void this.persistQuietly();
     this.scheduleReplay();
   }
@@ -538,6 +654,9 @@ export class PersistedMutationQueue implements MutationQueueAdapter {
       this.emit({ type: 'retry', entry: next, error });
       void this.persistQuietly();
       this.requestBackgroundSync();
+      // A tab that does not own replay cannot retry the entry itself; the owner has to know it is
+      // there, otherwise the retry clock only advances when this tab happens to become the owner.
+      if (!this.ownerState()) this.notifyOwner();
       this.scheduleReplay();
       return 'retry';
     }
@@ -568,6 +687,13 @@ export class PersistedMutationQueue implements MutationQueueAdapter {
     };
   }
 
+  attachSettled(id: string, settled: () => void): () => void {
+    this.settledHooks.set(id, settled);
+    return () => {
+      if (this.settledHooks.get(id) === settled) this.settledHooks.delete(id);
+    };
+  }
+
   active(id: string): void {
     this.activeIds.add(id);
   }
@@ -580,11 +706,20 @@ export class PersistedMutationQueue implements MutationQueueAdapter {
     const entry = this.find(id);
     if (entry === undefined) return;
     this.retryHooks.delete(id);
+    this.settledHooks.delete(id);
     this.activeIds.delete(id);
     this.restoredIds.delete(id);
+    this.removedIds.add(id);
     this.setEntries(this.entryState().filter((candidate) => candidate.id !== id));
     this.emit({ type: 'removed', id });
-    await this.persistQuietly();
+    this.broadcast({ type: 'removed', id });
+    if (this.ownerState()) {
+      await this.persistQuietly();
+    } else {
+      // Deleting by id under the write lock, not writing this tab's view: a waiting tab's view is
+      // a subset of the snapshot and writing it would drop the owner's entries.
+      await this.deleteStored([id]);
+    }
     this.scheduleReplay();
   }
 
@@ -645,19 +780,27 @@ export class PersistedMutationQueue implements MutationQueueAdapter {
 
   /** Removes every entry. Unlike the cache, this is an explicit destructive action. */
   async clear(): Promise<void> {
+    const mine = this.entryState().map((entry) => entry.id);
     this.retryHooks.clear();
+    this.settledHooks.clear();
     this.activeIds.clear();
     this.restoredIds.clear();
+    for (const id of mine) this.removedIds.add(id);
     this.setEntries([]);
     try {
-      await this.storage?.removeItem(this.key);
+      if (this.ownerState()) {
+        await this.storage?.removeItem(this.key);
+      } else {
+        // A waiting tab clears what it stored, not the owner's snapshot.
+        await this.deleteStored(mine);
+      }
     } catch (error) {
       this.handleStorageError(error);
     }
     if (this.quarantined) {
       this.quarantined = false;
       this.rawSnapshot = null;
-      this.enabledState.set(this.ownerState());
+      this.enabledState.set(true);
     }
     if (this.ownerState()) this.enabledState.set(true);
     this.scheduleReplay();
@@ -694,11 +837,17 @@ export class PersistedMutationQueue implements MutationQueueAdapter {
         return;
       }
 
-      const owns = await this.acquireLock();
-      if (!owns) {
+      const ownership = await this.acquireLock();
+      if (ownership === 'disabled') {
         this.enabledState.set(false);
         return;
       }
+      // Durability is per tab; replay is not. A waiting tab stores its own calls and the owner
+      // delivers them, which is why `enabled` is not a synonym for `owner` any more.
+      this.enabledState.set(true);
+      this.ensureChannel();
+      if (ownership === 'waiter') return;
+
       this.ownerState.set(true);
       await this.hydrate();
       // Hydration is the last thing `enqueue()` needs. Let a write land durably even if the cache
@@ -723,7 +872,7 @@ export class PersistedMutationQueue implements MutationQueueAdapter {
   private async retryOwnership(): Promise<void> {
     if (this.destroyed || this.ownerState()) return;
     try {
-      if (!(await this.acquireLock())) return;
+      if ((await this.acquireLock()) !== 'owner') return;
       await this.becomeOwner();
     } catch (error) {
       this.errorHandler.handleError(error);
@@ -751,26 +900,26 @@ export class PersistedMutationQueue implements MutationQueueAdapter {
     this.scheduleReplay();
   }
 
-  private async acquireLock(): Promise<boolean> {
-    if (this.options.assumeSingleTab) return true;
-    const locks = (globalThis as { navigator?: { locks?: LockManagerLike } }).navigator?.locks;
+  private async acquireLock(): Promise<Ownership> {
+    if (this.options.assumeSingleTab) return 'owner';
+    const locks = this.locks();
     if (locks === undefined) {
       this.warn(
         'The Web Locks API is unavailable. Persisted mutations are disabled; pass ' +
           '`assumeSingleTab: true` only if this application really runs in one tab.',
       );
-      return false;
+      return 'disabled';
     }
 
     const name = `ng-signal-request:mutation-queue:${this.key}`;
-    if (await this.requestLock(locks, name)) return true;
+    if (await this.requestLock(locks, name)) return 'owner';
 
-    // Another tab owns the queue. Queue a request behind it: the browser grants it the moment that
+    // Another tab owns replay. Queue a request behind it: the browser grants it the moment that
     // tab closes, crashes or navigates away, so delivery moves to this tab instead of dying with
     // the one that accepted the write. Without this, closing the owner loses nothing (the entry is
     // on disk) but nothing replays it until a page opens and asks again.
     this.waitForLock(locks, name);
-    return false;
+    return 'waiter';
   }
 
   /** Takes the lock if it is free, or reports `false` without waiting for it. */
@@ -1043,6 +1192,7 @@ export class PersistedMutationQueue implements MutationQueueAdapter {
       !this.started ||
       !this.hydrated ||
       !this.enabledState() ||
+      !this.ownerState() ||
       this.quarantined ||
       this.replaying ||
       this.replayScheduled ||
@@ -1085,6 +1235,7 @@ export class PersistedMutationQueue implements MutationQueueAdapter {
     return (
       this.destroyed ||
       !this.enabledState() ||
+      !this.ownerState() ||
       this.paused ||
       this.authState() ||
       !this.online.online()
@@ -1339,8 +1490,29 @@ export class PersistedMutationQueue implements MutationQueueAdapter {
 
   private async persist(): Promise<void> {
     if (this.storage === null || this.quarantined) return;
-    const raw = JSON.stringify(this.snapshot());
-    const write = this.writing.then(() => this.storage?.setItem(this.key, raw));
+    const write = this.writing.then(() =>
+      this.withWriteLock(async () => {
+        // Read before writing, because the snapshot is shared: a tab that does not own replay
+        // appends its own calls to it, and a blind overwrite here would be the write that loses
+        // someone else's work.
+        const stored = await this.readStoredEntries();
+        const mine = this.entryState();
+        const known = new Set(mine.map((entry) => entry.id));
+        const foreign = stored.filter(
+          (entry) => !known.has(entry.id) && !this.removedIds.has(entry.id),
+        );
+        const usedSeqs = new Set(mine.map((entry) => entry.seq));
+        let next = this.nextSeq;
+        for (const entry of mine) next = Math.max(next, entry.seq + 1);
+        for (const entry of foreign) next = Math.max(next, entry.seq + 1);
+        const entries = [
+          ...mine,
+          ...foreign.map((entry) => (usedSeqs.has(entry.seq) ? { ...entry, seq: next++ } : entry)),
+        ].sort((a, b) => a.seq - b.seq);
+        this.nextSeq = Math.max(this.nextSeq, next);
+        await this.writeEntries(entries);
+      }),
+    );
     this.writing = write.catch(() => undefined);
     await write;
   }
@@ -1353,6 +1525,199 @@ export class PersistedMutationQueue implements MutationQueueAdapter {
     }
   }
 
+  private locks(): LockManagerLike | undefined {
+    return (globalThis as { navigator?: { locks?: LockManagerLike } }).navigator?.locks;
+  }
+
+  /**
+   * Serialises one read-modify-write of the shared snapshot.
+   *
+   * The long-lived lock `acquireLock()` takes keeps **replay** single-owner. This one is held for a
+   * single storage round-trip and is what lets a tab that does not own replay append its own call
+   * without overwriting the owner's snapshot - and what stops the owner's write from erasing that
+   * call. Without Web Locks there is nothing to serialise against, and `acquireLock()` has already
+   * refused to enable the queue in that case.
+   */
+  private async withWriteLock<T>(run: () => Promise<T>): Promise<T> {
+    const locks = this.locks();
+    if (locks === undefined) return run();
+    return new Promise<T>((resolve, reject) => {
+      let answered = false;
+      void locks
+        .request(
+          `ng-signal-request:mutation-queue-write:${this.key}`,
+          { mode: 'exclusive' },
+          async () => {
+            try {
+              const value = await run();
+              answered = true;
+              resolve(value);
+            } catch (error) {
+              answered = true;
+              reject(toError(error));
+            }
+          },
+        )
+        .catch((error: unknown) => {
+          if (!answered) reject(toError(error));
+        });
+    });
+  }
+
+  /**
+   * The entries currently stored, read without trusting any of them.
+   *
+   * A snapshot this tab cannot parse is reported as empty rather than thrown: a write that keeps
+   * the unreadable bytes is worse than a write that is skipped, and the caller treats `[]` as "no
+   * foreign work to preserve".
+   */
+  private async readStoredEntries(): Promise<PersistedMutationEntry[]> {
+    if (this.storage === null) return [];
+    const raw = await this.storage.getItem(this.key);
+    if (raw === null) return [];
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return [];
+    }
+    if (!isEnvelope(parsed)) return [];
+    const entries: PersistedMutationEntry[] = [];
+    for (const candidate of parsed.entries) {
+      const read = readEntry(candidate);
+      // An entry the queue cannot even name makes the snapshot unreadable; the caller must not
+      // overwrite it. Everything else is preserved as it is, quarantined entries included.
+      if (read === null) return [];
+      entries.push(read.entry);
+    }
+    return entries;
+  }
+
+  private async writeEntries(entries: readonly PersistedMutationEntry[]): Promise<void> {
+    if (this.storage === null) return;
+    const snapshot: MutationQueueSnapshot = {
+      version: MUTATION_QUEUE_VERSION,
+      timestamp: Date.now(),
+      ...(this.options.buster === undefined ? {} : { buster: this.options.buster }),
+      entries: [...entries].sort((a, b) => a.seq - b.seq),
+    };
+    await this.storage.setItem(this.key, JSON.stringify(snapshot));
+  }
+
+  /** Removes specific ids from the snapshot without writing this tab's view over the rest. */
+  private async deleteStored(ids: readonly string[]): Promise<void> {
+    if (ids.length === 0) return;
+    const drop = new Set(ids);
+    try {
+      await this.withWriteLock(async () => {
+        const stored = await this.readStoredEntries();
+        const kept = stored.filter((entry) => !drop.has(entry.id));
+        if (kept.length === stored.length) return;
+        await this.writeEntries(kept);
+      });
+    } catch (error) {
+      this.handleStorageError(error);
+    }
+  }
+
+  /**
+   * Adopts work another tab stored while this one was the owner.
+   *
+   * Only ever called from a nudge, never from `persist()`: a waiting tab keeps dispatching its own
+   * online calls, and adopting one mid-flight would make this tab replay a request that is already
+   * on the wire.
+   */
+  private async refresh(): Promise<void> {
+    if (!this.ownerState() || this.destroyed || this.quarantined) return;
+    let stored: PersistedMutationEntry[];
+    try {
+      stored = await this.withWriteLock(() => this.readStoredEntries());
+    } catch (error) {
+      this.handleStorageError(error);
+      return;
+    }
+    const known = new Set(this.entryState().map((entry) => entry.id));
+    const adopted = stored
+      .filter((entry) => !known.has(entry.id) && !this.removedIds.has(entry.id))
+      .map((entry) => ({ ...entry, seq: this.nextSeq++ }));
+    if (adopted.length === 0) return;
+
+    this.setEntries([...this.entryState(), ...adopted]);
+    void this.persistQuietly();
+    for (const key of new Set(adopted.map((entry) => entry.key))) {
+      const handler = this.handlers.get(key);
+      if (handler !== undefined) this.reviewHandler(handler);
+    }
+    this.scheduleReplay();
+  }
+
+  private ensureChannel(): BroadcastChannel | undefined {
+    if (this.channel !== undefined || !this.isBrowser) return this.channel;
+    const ctor = (globalThis as { BroadcastChannel?: typeof BroadcastChannel }).BroadcastChannel;
+    if (ctor === undefined) return undefined;
+    try {
+      const channel = new ctor(`ng-signal-request:mutation-queue:${this.key}`);
+      channel.onmessage = (event: MessageEvent) => this.onChannelMessage(event.data);
+      // A browser tab is kept alive by its document, not by this channel. Node's implementation of
+      // the same interface refs the event loop, which would hold a test runner (and a prerender)
+      // open forever; `unref` exists there and nowhere else.
+      (channel as { unref?: () => void }).unref?.();
+      this.channel = channel;
+    } catch {
+      // A browser that has the constructor but refuses the channel is a browser where the nudge
+      // does not happen. The entries are still durable; they wait for the owner's next write.
+    }
+    return this.channel;
+  }
+
+  private broadcast(message: MutationQueueChannelMessage): void {
+    try {
+      this.channel?.postMessage(message);
+    } catch {
+      // Closed channel, or one the browser revoked. Not worth an error: the snapshot is the truth.
+    }
+  }
+
+  /** Asks the owning tab to look at the snapshot, because this tab cannot deliver what it stored. */
+  private notifyOwner(): void {
+    this.broadcast({ type: 'enqueued' });
+  }
+
+  private onChannelMessage(raw: unknown): void {
+    if (typeof raw !== 'object' || raw === null) return;
+    const message = raw as MutationQueueChannelMessage;
+    if (message.type === 'enqueued') {
+      void this.refresh();
+      return;
+    }
+    this.onExternalRemoval(message.id);
+  }
+
+  /**
+   * Another tab delivered an entry this one stored.
+   *
+   * The entry leaves this tab's view - it is not pending anywhere any more - and the call that
+   * created it is settled, because a tab that does not own replay has no other way to learn the
+   * outcome. There is no response body to hand to `onSuccess`; `onSettled` runs.
+   */
+  private onExternalRemoval(id: string): void {
+    if (this.ownerState()) return;
+    if (this.find(id) !== undefined) {
+      this.retryHooks.delete(id);
+      this.activeIds.delete(id);
+      this.restoredIds.delete(id);
+      this.setEntries(this.entryState().filter((candidate) => candidate.id !== id));
+      this.emit({ type: 'removed', id });
+    }
+    const settled = this.settledHooks.get(id);
+    if (settled === undefined) return;
+    this.settledHooks.delete(id);
+    try {
+      settled();
+    } catch (error) {
+      this.errorHandler.handleError(error);
+    }
+  }
   private handleStorageError(error: unknown): void {
     this.errorHandler.handleError(error);
     if (this.options.onStorageError === 'fail') return;
@@ -1409,8 +1774,10 @@ export class PersistedMutationQueue implements MutationQueueAdapter {
       tag === undefined ||
       !this.isBrowser ||
       this.destroyed ||
-      !this.enabledState() ||
-      !this.ownerState()
+      // Not `ownerState()`: a tab that only stored a call still wants the worker to be able to
+      // deliver it when every tab is gone. The worker takes the same lock with `ifAvailable`, so a
+      // live owner is never raced.
+      !this.enabledState()
     ) {
       return;
     }
@@ -1463,6 +1830,12 @@ export class PersistedMutationQueue implements MutationQueueAdapter {
     this.lockWait = undefined;
     this.releaseLock?.();
     this.releaseLock = undefined;
+    try {
+      this.channel?.close();
+    } catch {
+      // Already closed by the browser.
+    }
+    this.channel = undefined;
     this.hydratedReady.resolve();
     this.restoreReady.resolve();
   }

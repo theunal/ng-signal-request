@@ -438,15 +438,82 @@ async function drainUnlocked(
 
   const entries = [...read.entries];
   const buster = options.buster ?? read.buster;
-  const persist = async (): Promise<boolean> => {
-    const snapshot: MutationQueueSnapshot = {
-      version: MUTATION_QUEUE_SYNC_VERSION,
-      timestamp: now(),
-      ...(buster === undefined ? {} : { buster }),
-      entries,
-    };
+  /** Ids this drain has delivered. A re-read of the snapshot must not resurrect them. */
+  const removed = new Set<string>();
+
+  /**
+   * Serialises one read-modify-write of the snapshot.
+   *
+   * The replay lock `drainMutationQueue` takes keeps two *replayers* apart; this one is what keeps
+   * the worker's write from erasing a call a tab that does not own replay appended while the drain
+   * was running. It is a separate lock name on purpose: the replay lock is held for the whole drain
+   * and waiting for it here would deadlock.
+   */
+  const withWriteLock = async <T>(run: () => Promise<T>): Promise<T> => {
+    const locks = (globalThis as { navigator?: { locks?: LockManagerLike } }).navigator?.locks;
+    if (locks === undefined) return run();
+    return new Promise<T>((resolve, reject) => {
+      let answered = false;
+      void locks
+        .request(
+          `ng-signal-request:mutation-queue-write:${key}`,
+          { mode: 'exclusive' },
+          async () => {
+            try {
+              const value = await run();
+              answered = true;
+              resolve(value);
+            } catch (error) {
+              answered = true;
+              reject(error instanceof Error ? error : new Error(String(error)));
+            }
+          },
+        )
+        .catch((error: unknown) => {
+          if (!answered) reject(error instanceof Error ? error : new Error(String(error)));
+        });
+    });
+  };
+
+  /** Entries another tab stored while this drain was running. Never a reason to fail the drain. */
+  const adoptForeign = async (): Promise<void> => {
+    let rawNow: string | null;
     try {
-      await storage.setItem(key, JSON.stringify(snapshot));
+      rawNow = await storage.getItem(key);
+    } catch {
+      return;
+    }
+    if (rawNow === null) return;
+    let parsedNow: unknown;
+    try {
+      parsedNow = JSON.parse(rawNow);
+    } catch {
+      return;
+    }
+    const current = readSnapshot(parsedNow, options.buster);
+    if (!current.ok) return;
+    const known = new Set(entries.map((entry) => entry.id));
+    for (const candidate of current.entries) {
+      // `removed` is the same tombstone the page queue keeps: the snapshot still holds an entry
+      // this drain has just sent, and re-adopting it would replay it forever.
+      if (!known.has(candidate.id) && !removed.has(candidate.id)) entries.push(candidate);
+    }
+  };
+
+  const persist = async (): Promise<boolean> => {
+    try {
+      await withWriteLock(async () => {
+        // `entries` is mutated in place by the drain, and `adoptForeign` appends to it, so the
+        // snapshot is built after the merge rather than before it.
+        await adoptForeign();
+        const snapshot: MutationQueueSnapshot = {
+          version: MUTATION_QUEUE_SYNC_VERSION,
+          timestamp: now(),
+          ...(buster === undefined ? {} : { buster }),
+          entries,
+        };
+        await storage.setItem(key, JSON.stringify(snapshot));
+      });
       return true;
     } catch {
       return false;
@@ -596,6 +663,7 @@ async function drainUnlocked(
 
     entries.splice(index, 1);
     index--;
+    removed.add(entry.id);
     replayed++;
     emit({ type: 'succeeded', entry });
     emit({ type: 'removed', id: entry.id });

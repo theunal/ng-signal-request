@@ -678,7 +678,9 @@ describe('persisted mutation queue configuration', () => {
       const second = secondScope.get(PersistedMutationQueue);
       await settle();
       expect(second.owner()).toBe(false);
-      expect(second.enabled()).toBe(false);
+      // `enabled` is durability, `owner` is replay: the second tab stores its own calls, it just
+      // does not dispatch them.
+      expect(second.enabled()).toBe(true);
       secondScope.destroy();
     });
   });
@@ -719,7 +721,7 @@ describe('persisted mutation queue configuration', () => {
       );
       await settle();
       expect(queueB.owner()).toBe(false);
-      expect(queueB.enabled()).toBe(false);
+      expect(queueB.enabled()).toBe(true);
       expect(queueB.pendingCount()).toBe(0);
 
       // A closes. The browser grants the queued request, so delivery moves instead of dying.
@@ -741,6 +743,124 @@ describe('persisted mutation queue configuration', () => {
       tabB.destroy();
       await settle();
       expect(locks.held.size).toBe(0);
+    });
+  });
+
+  it("stores a waiting tab's own offline write and delivers it after the handover", async () => {
+    const storage = memoryStorage();
+    await withFakeLocks(async (locks) => {
+      setup();
+      const parent = TestBed.inject(EnvironmentInjector);
+      const online = TestBed.inject(OnlineManager);
+      const http = TestBed.inject(HttpTestingController);
+
+      const tabA = createEnvironmentInjector([providePersistedMutationQueue({ storage })], parent);
+      const queueA = tabA.get(PersistedMutationQueue);
+      await settle();
+      expect(queueA.owner()).toBe(true);
+
+      const tabB = createEnvironmentInjector([providePersistedMutationQueue({ storage })], parent);
+      const queueB = tabB.get(PersistedMutationQueue);
+      const saveB = runInInjectionContext(tabB, () =>
+        createMutation.post<Todo, SaveArgs>((args) => ({ url: '/todos', body: args.body }), {
+          networkMode: 'online',
+          persistence: { key: 'todo.create' },
+        }),
+      );
+      await settle();
+      expect(queueB.owner()).toBe(false);
+
+      // The case that used to be a memory-only hold: a non-owner tab, offline, under 'online'.
+      online.setOnline(false);
+      const pending = saveB.run({ body: { title: 'from tab b' } });
+      pending.catch(() => undefined);
+      await settle();
+
+      // Stored under the write lock, not sent: this tab does not own dispatch.
+      expect(entriesIn(storage)).toHaveLength(1);
+      expect(queueB.pendingCount()).toBe(1);
+      expect(http.match('/todos')).toHaveLength(0);
+      const key = entriesIn(storage)[0].idempotencyKey;
+
+      // The owner goes away. The waiting tab takes over, hydrates what it stored and replays it -
+      // with the key that was minted before the write was ever attempted.
+      tabA.destroy();
+      await settle();
+      expect(queueB.owner()).toBe(true);
+      expect(queueB.pendingCount()).toBe(1);
+
+      online.setOnline(true);
+      await settle();
+      const request = http.expectOne('/todos');
+      expect(request.request.headers.get('Idempotency-Key')).toBe(key);
+      request.flush({ id: 21, title: 'from tab b' });
+      await settle();
+
+      expect(queueB.pendingCount()).toBe(0);
+      expect(entriesIn(storage)).toEqual([]);
+      tabB.destroy();
+      await settle();
+      expect(locks.held.size).toBe(0);
+    });
+  });
+
+  it('deletes only its own entries when a waiting tab removes or clears', async () => {
+    const storage = memoryStorage();
+    await withFakeLocks(async () => {
+      setup();
+      const parent = TestBed.inject(EnvironmentInjector);
+      const online = TestBed.inject(OnlineManager);
+
+      const tabA = createEnvironmentInjector([providePersistedMutationQueue({ storage })], parent);
+      const queueA = tabA.get(PersistedMutationQueue);
+      await settle();
+
+      const tabB = createEnvironmentInjector([providePersistedMutationQueue({ storage })], parent);
+      const queueB = tabB.get(PersistedMutationQueue);
+      await settle();
+
+      online.setOnline(false);
+      await queueA.enqueue({
+        key: 'todo.create',
+        version: 1,
+        args: { body: { title: 'owned by a' } },
+        idempotencyKey: 'idem-a',
+      });
+      const first = await queueB.enqueue({
+        key: 'todo.create',
+        version: 1,
+        args: { body: { title: 'owned by b' } },
+        idempotencyKey: 'idem-b1',
+      });
+      await queueB.enqueue({
+        key: 'todo.create',
+        version: 1,
+        args: { body: { title: 'also owned by b' } },
+        idempotencyKey: 'idem-b2',
+      });
+      await settle();
+      expect(entriesIn(storage).map((entry) => entry.idempotencyKey)).toEqual([
+        'idem-a',
+        'idem-b1',
+        'idem-b2',
+      ]);
+
+      // By id, under the write lock: writing this tab's view would drop the owner's entry.
+      await queueB.remove(first!.entry.id);
+      expect(entriesIn(storage).map((entry) => entry.idempotencyKey)).toEqual([
+        'idem-a',
+        'idem-b2',
+      ]);
+
+      // And clearing a waiting tab drops what it stored, not the whole queue.
+      await queueB.clear();
+      expect(entriesIn(storage).map((entry) => entry.idempotencyKey)).toEqual(['idem-a']);
+      expect(queueB.pendingCount()).toBe(0);
+      expect(queueA.pendingCount()).toBe(1);
+
+      tabA.destroy();
+      tabB.destroy();
+      await settle();
     });
   });
 });

@@ -95,6 +95,14 @@ export interface MutationQueueAdapter {
   failed(id: string, error: Error, context: MutationQueueFailureContext): MutationQueueDecision;
   /** A same-page retry path. Hydrated entries have no live closure, so the queue uses replay(). */
   attachRetry(id: string, retry: () => void): () => void;
+  /**
+   * Notifies the caller when an entry left the queue without this tab sending it - another tab or
+   * the application's service worker delivered it.
+   *
+   * Optional, and only meaningful for a queue that accepts writes without owning replay: without
+   * it the creating tab would keep a call pending forever after another tab settled the same entry.
+   */
+  attachSettled?(id: string, settled: () => void): () => void;
   active(id: string): void;
   inactive(id: string): void;
   remove(id: string): Promise<void>;

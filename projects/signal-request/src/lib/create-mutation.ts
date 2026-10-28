@@ -511,10 +511,14 @@ function buildMutation<T, TArgs, TContext>(
       let undo: () => void = noop;
       /** The same-page retry hook the durable queue can call while this frame is still alive. */
       let detachQueueRetry: (() => void) | undefined;
+      /** Fires when another tab or the service worker delivered this call's entry. */
+      let detachQueueSettled: (() => void) | undefined;
 
       const clearQueueRetry = (): void => {
         detachQueueRetry?.();
         detachQueueRetry = undefined;
+        detachQueueSettled?.();
+        detachQueueSettled = undefined;
       };
 
       /** Leaves the local queue, if this call is in it. Idempotent - `finish` and a replay both call it. */
@@ -559,6 +563,17 @@ function buildMutation<T, TArgs, TContext>(
           if (settled) return;
           activeQueue.active(activeEntryId);
           send();
+        });
+        // A tab that queued this call without owning replay cannot settle it itself once another
+        // tab (or the service worker) delivers the entry. Without this the call would stay in
+        // flight forever and `isMutating()` would never go back to zero.
+        detachQueueSettled = activeQueue.attachSettled?.(activeEntryId, () => {
+          if (settled) return;
+          finish();
+          finished.set('success');
+          safe(reloadInvalidated);
+          safe(() => options.onSettled?.(callArgs, ctx, meta));
+          resolve(undefined as T);
         });
       };
 

@@ -146,10 +146,12 @@ test('a waiting tab takes the queue over when the owner goes away', async ({ con
   await expect(owner.getByTestId('owner')).toHaveText('true');
 
   // The second tab is a non-owner, but it is queued behind the lock rather than merely refused.
+  // `enabled` is about durability, not about replay: this tab stores its own calls, `owner` is
+  // what says it does not dispatch them.
   const second = await context.newPage();
   await second.goto('/');
   await expect(second.getByTestId('owner')).toHaveText('false');
-  await expect(second.getByTestId('enabled')).toHaveText('false');
+  await expect(second.getByTestId('enabled')).toHaveText('true');
 
   await context.setOffline(true);
   await submit(owner, 'handover');
@@ -192,4 +194,84 @@ test('a permanent failure keeps the entry and does not resurrect the row', async
   // `onRestore` is a pending-entry hook: a failed entry must not put its row back.
   await expect(page.getByTestId('todo')).toHaveCount(0);
   expect(posts).toHaveLength(1);
+});
+
+test("a non-owner tab's own offline write is stored and the owner delivers it", async ({
+  context,
+}) => {
+  const posts: Post[] = [];
+  await mockApi(context, posts, () => ({ status: 201, json: { id: 8, title: 'second tab' } }));
+
+  const owner = await context.newPage();
+  await owner.goto('/');
+  await expect(owner.getByTestId('owner')).toHaveText('true');
+
+  const second = await context.newPage();
+  await second.goto('/');
+  await expect(second.getByTestId('owner')).toHaveText('false');
+  await expect(second.getByTestId('enabled')).toHaveText('true');
+
+  await context.setOffline(true);
+  await submit(second, 'second tab');
+
+  // Stored, not sent: this tab does not own dispatch, so the entry waits for the owner. This is the
+  // case that used to be a memory-only hold and died with the page.
+  await expect(second.getByTestId('pending')).toHaveText('1');
+  await expect(second.getByTestId('todo')).toHaveCount(1);
+  expect(posts).toHaveLength(0);
+
+  await context.setOffline(false);
+
+  // The owner was nudged over the queue's BroadcastChannel, adopted the entry and delivered it.
+  await expect.poll(() => posts.length).toBe(1);
+  await expect(owner.getByTestId('pending')).toHaveText('0');
+  await expect(owner.getByTestId('todo')).toHaveAttribute('data-state', 'saved');
+
+  // And the tab that stored it hears that the entry is gone, so its own view stops lying.
+  await expect(second.getByTestId('pending')).toHaveText('0');
+  await expect(second.getByTestId('entries')).not.toContainText('e2e.todos.add');
+});
+
+test('a retried write is deduplicated because the key never changes', async ({ page, context }) => {
+  const posts: Post[] = [];
+  const effects = new Map<string, Reply>();
+  let attempts = 0;
+
+  // A server that honours the contract: it stores the key with the effect and answers a repeat
+  // from that store. The first attempt is refused so the queue has to retry.
+  await context.route(`**${API_PATH}`, async (route) => {
+    const request = route.request();
+    if (request.method() !== 'POST') {
+      await route.fulfill({ status: 200, json: [] });
+      return;
+    }
+    const key = request.headers()['idempotency-key'] ?? '';
+    posts.push({ key, body: request.postDataJSON() });
+    const applied = effects.get(key);
+    if (applied !== undefined) {
+      await route.fulfill({ ...applied });
+      return;
+    }
+    attempts++;
+    if (attempts === 1) {
+      await route.fulfill({ status: 503, json: { message: 'busy' } });
+      return;
+    }
+    const reply: Reply = { status: 201, json: { id: 12, title: 'dedupe' } };
+    effects.set(key, reply);
+    await route.fulfill({ ...reply });
+  });
+
+  await open(page);
+  await submit(page, 'dedupe');
+
+  await expect.poll(() => posts.length, { timeout: 20_000 }).toBe(2);
+  expect(posts[0].key).not.toBe('');
+  expect(posts[1].key).toBe(posts[0].key);
+  // Two requests, one effect. Exactly-once is the server's half of the contract; the stable key is
+  // the client's, and this is where the two meet.
+  expect(effects.size).toBe(1);
+
+  await expect(page.getByTestId('pending')).toHaveText('0');
+  await expect(page.getByTestId('todo')).toHaveAttribute('data-state', 'saved');
 });
